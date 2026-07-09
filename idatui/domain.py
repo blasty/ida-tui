@@ -141,6 +141,10 @@ class FunctionIndex:
                 self._done = True
         return len(data)
 
+    def load_next_page(self) -> int:
+        """Load one more page; return the number of rows fetched (0 at end)."""
+        return self._load_next_page()
+
     def ensure(self, n: int) -> None:
         """Ensure at least ``n`` functions are loaded (or all, if fewer exist)."""
         while not self._done and len(self._funcs) < n:
@@ -261,6 +265,36 @@ class DisasmModel:
             self._prefetch_block(b1 + 1)  # forward scroll
             self._prefetch_block(b0 - 1)  # backward scroll
         return out
+
+    def cached_line(self, idx: int) -> Line | None:
+        """Non-blocking single-line peek: return the cached Line or None. Never
+        touches the network — used by the virtualized view's render path."""
+        if idx < 0:
+            return None
+        b = idx // self.BLOCK
+        off = idx - b * self.BLOCK
+        with self._lock:
+            block = self._blocks.get(b)
+        if block is None or off >= len(block):
+            return None
+        return block[off]
+
+    def is_cached(self, start: int, count: int) -> bool:
+        """True if every block covering [start, start+count) is already cached."""
+        if count <= 0:
+            return True
+        b0, b1 = start // self.BLOCK, (start + count - 1) // self.BLOCK
+        with self._lock:
+            return all(b in self._blocks for b in range(b0, b1 + 1))
+
+    def ensure_async(self, start: int, count: int) -> None:
+        """Schedule background fetches for any missing blocks in the range
+        (non-blocking). Safe to call every render."""
+        if count <= 0:
+            return
+        b0, b1 = start // self.BLOCK, (start + count - 1) // self.BLOCK
+        for b in range(b0, b1 + 1):
+            self._prefetch_block(b)
 
     def cached_blocks(self) -> int:
         with self._lock:
