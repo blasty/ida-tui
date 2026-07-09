@@ -171,6 +171,9 @@ async def run(db):
         check("cursor sits on a match", dis.cursor in dis._matches, f"cursor={dis.cursor}")
         check("match substring highlighted",
               bool(dis._ranges.get(dis.cursor)), str(dis._ranges.get(dis.cursor)))
+        check("search cursor lands on the match's starting column",
+              dis.cursor_x == dis._ranges[dis.cursor][0][0],
+              f"cursor_x={dis.cursor_x} ranges={dis._ranges.get(dis.cursor)}")
         prev = dis.cursor
         await pilot.press("slash")
         await pilot.pause(0.1)

@@ -346,6 +346,7 @@ class SearchMixin:
     # --- driven by the app's prompt (incremental / as-you-type) ---
     def search_begin(self, direction: int) -> None:
         self._search_origin = self.cursor
+        self._search_origin_x = self.cursor_x
         self._search_dir = direction
 
     def search_update(self, term: str) -> None:
@@ -355,6 +356,7 @@ class SearchMixin:
             self._matches = []
             self._ranges = {}
             self.cursor = getattr(self, "_search_origin", self.cursor)
+            self.cursor_x = getattr(self, "_search_origin_x", self.cursor_x)
             self.refresh()
             self._app_status("/")
             return
@@ -392,6 +394,7 @@ class SearchMixin:
         self._matches = []
         self._ranges = {}
         self.cursor = getattr(self, "_search_origin", self.cursor)
+        self.cursor_x = getattr(self, "_search_origin_x", self.cursor_x)
         self.scroll_to(y=max(self.cursor - self._visible_height() // 2, 0), animate=False)
         self.refresh()
 
@@ -447,7 +450,12 @@ class SearchMixin:
     def _goto_line(self, idx: int) -> None:
         total = self._search_line_count()
         self.cursor = max(0, min(total - 1, idx))
+        # Land the cursor on the start of the (first) match on this line.
+        ranges = self._ranges.get(self.cursor)
+        if ranges:
+            self.cursor_x = ranges[0][0]
         self.scroll_to(y=max(self.cursor - self._visible_height() // 2, 0), animate=False)
+        self._hscroll()  # bring the match column into horizontal view
         self.refresh()
 
     def clear_search(self) -> None:
