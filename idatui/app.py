@@ -16,6 +16,7 @@ Design notes:
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 
 from rich.segment import Segment
@@ -28,9 +29,11 @@ from textual.containers import Horizontal, Vertical
 from textual.geometry import Region, Size
 from textual.message import Message
 from textual.reactive import reactive
+from textual.screen import ModalScreen
 from textual.scroll_view import ScrollView
 from textual.strip import Strip
-from textual.widgets import DataTable, Footer, Header, Input, Static
+from textual.widgets import DataTable, Footer, Header, Input, OptionList, Static
+from textual.widgets.option_list import Option
 
 from .highlight import highlight_c
 
@@ -63,6 +66,38 @@ class SearchRequested(Message):
         super().__init__()
         self.view = view
         self.direction = direction
+
+
+class FollowRequested(Message):
+    """A code view asks to follow the reference under the cursor."""
+
+    def __init__(self, view) -> None:  # type: ignore[no-untyped-def]
+        super().__init__()
+        self.view = view
+
+
+class XrefsRequested(Message):
+    """A code view asks for cross-references to the item under the cursor."""
+
+    def __init__(self, view) -> None:  # type: ignore[no-untyped-def]
+        super().__init__()
+        self.view = view
+
+
+class NavMixin:
+    """Follow / xrefs actions shared by the code views (bindings live on each
+    view since Textual only merges BINDINGS from DOMNode subclasses)."""
+
+    NAV_BINDINGS = [
+        Binding("enter", "follow", "Follow"),
+        Binding("x", "xrefs", "Xrefs"),
+    ]
+
+    def action_follow(self) -> None:
+        self.post_message(FollowRequested(self))
+
+    def action_xrefs(self) -> None:
+        self.post_message(XrefsRequested(self))
 
 
 def _overlay_ranges(strip: Strip, ranges: list[tuple[int, int]], style: Style) -> Strip:
@@ -252,7 +287,7 @@ class SearchMixin:
 # --------------------------------------------------------------------------- #
 # Virtualized disassembly view
 # --------------------------------------------------------------------------- #
-class DisasmView(SearchMixin, ScrollView, can_focus=True):
+class DisasmView(SearchMixin, NavMixin, ScrollView, can_focus=True):
     """A line-virtualized disassembly listing for a single function."""
 
     BINDINGS = [
@@ -266,6 +301,7 @@ class DisasmView(SearchMixin, ScrollView, can_focus=True):
         Binding("G,end", "goto_bottom", "Bottom", show=False),
         Binding("tab,shift+tab", "app.toggle_view", "Pseudocode", priority=True),
         *SearchMixin.SEARCH_BINDINGS,
+        *NavMixin.NAV_BINDINGS,
     ]
 
     cursor = reactive(0, repaint=False)
@@ -477,7 +513,7 @@ def _refresh_lines(view, *indices: int) -> None:
 # --------------------------------------------------------------------------- #
 # Decompiler (pseudocode) view
 # --------------------------------------------------------------------------- #
-class DecompView(SearchMixin, ScrollView, can_focus=True):
+class DecompView(SearchMixin, NavMixin, ScrollView, can_focus=True):
     """Read-only, line-virtualized Hex-Rays pseudocode with Pygments C
     highlighting. Lines are highlighted once at load and cached as Strips, so
     cursor movement and scrolling are O(1) (no TextArea/tree-sitter overhead).
@@ -494,6 +530,7 @@ class DecompView(SearchMixin, ScrollView, can_focus=True):
         Binding("home", "goto_top", "Top", show=False),
         Binding("G,end", "goto_bottom", "Bottom", show=False),
         *SearchMixin.SEARCH_BINDINGS,
+        *NavMixin.NAV_BINDINGS,
     ]
 
     cursor = reactive(0, repaint=False)
@@ -605,6 +642,34 @@ class FunctionsPanel(Vertical):
 
 
 # --------------------------------------------------------------------------- #
+# Xrefs popup
+# --------------------------------------------------------------------------- #
+class XrefsScreen(ModalScreen):
+    """A modal list of cross-references; Enter jumps, Esc closes."""
+
+    BINDINGS = [Binding("escape", "close", "Close")]
+
+    def __init__(self, label: str, items: list[tuple[int, str]]) -> None:
+        super().__init__()
+        self._label = label
+        self._items = items
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="xref-box"):
+            yield Static(self._label, id="xref-title")
+            yield OptionList(*[Option(text) for _, text in self._items], id="xref-list")
+
+    def on_mount(self) -> None:
+        self.query_one(OptionList).focus()
+
+    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+        self.dismiss(self._items[event.option_index][0])
+
+    def action_close(self) -> None:
+        self.dismiss(None)
+
+
+# --------------------------------------------------------------------------- #
 # The app
 # --------------------------------------------------------------------------- #
 class IdaTui(App):
@@ -621,6 +686,10 @@ class IdaTui(App):
         background: $primary-darken-2; color: $text;
     }
     #status { dock: bottom; height: 1; background: $panel; color: $text; padding: 0 1; }
+    XrefsScreen { align: center middle; }
+    #xref-box { width: 84; max-height: 70%; height: auto; border: thick $accent; background: $panel; }
+    #xref-title { dock: top; height: 1; background: $accent; color: $text; padding: 0 1; }
+    #xref-list { height: auto; max-height: 100%; }
     """
 
     BINDINGS = [
@@ -861,6 +930,115 @@ class IdaTui(App):
         inp.value = ""
         inp.focus()
 
+    # -- follow / xrefs ---------------------------------------------------- #
+    def on_follow_requested(self, msg: FollowRequested) -> None:
+        view = msg.view
+        if isinstance(view, DisasmView):
+            ea = view._cursor_ea()
+            if ea is not None:
+                self._follow_disasm(ea)
+        elif isinstance(view, DecompView) and view._texts:
+            self._follow_decomp(view._texts[view.cursor])
+
+    def on_xrefs_requested(self, msg: XrefsRequested) -> None:
+        view = msg.view
+        if isinstance(view, DisasmView):
+            ea = view._cursor_ea()
+            if ea is not None:
+                self._xrefs_disasm(ea)
+        elif isinstance(view, DecompView) and view._texts:
+            self._xrefs_decomp(view._texts[view.cursor])
+
+    @work(thread=True, group="nav")
+    def _follow_disasm(self, ea: int) -> None:
+        assert self.program is not None
+        xr = self.program.xrefs_from(ea)
+        tgt = next((x for x in xr if x.type == "code" and x.to), None)
+        tgt = tgt or next((x for x in xr if x.to), None)
+        if tgt is None or tgt.to is None:
+            self.app.call_from_thread(self._status, "nothing to follow here")
+            return
+        self._do_navigate(tgt.to, push=True)
+
+    @work(thread=True, group="nav")
+    def _follow_decomp(self, line: str) -> None:
+        target = self._ref_on_line(line)
+        if target is None:
+            self.app.call_from_thread(self._status, "nothing to follow on this line")
+            return
+        self._do_navigate(target, push=True)
+
+    def _ref_on_line(self, line: str) -> int | None:
+        """Address of the first decompiler ref whose name appears on ``line``."""
+        if self._cur is None or self.program is None:
+            return None
+        dec = self.program.decompile(self._cur.ea)
+        toks = set(re.findall(r"[A-Za-z_][A-Za-z0-9_]*", line))
+        for r in dec.refs:
+            if r.name in toks:
+                return r.addr
+        return None
+
+    @work(thread=True, group="xrefs")
+    def _xrefs_disasm(self, ea: int) -> None:
+        assert self.program is not None
+        frm = self.program.xrefs_from(ea)
+        subj = next((x.to for x in frm if x.type == "code" and x.to), ea)
+        self._xrefs_present(subj)
+
+    @work(thread=True, group="xrefs")
+    def _xrefs_decomp(self, line: str) -> None:
+        subj = self._ref_on_line(line)
+        if subj is None and self._cur is not None:
+            subj = self._cur.ea
+        if subj is not None:
+            self._xrefs_present(subj)
+
+    def _xrefs_present(self, subj: int) -> None:  # worker context
+        assert self.program is not None
+        xr = self.program.xrefs_to(subj)
+        fn = self.program.function_of(subj)
+        if fn is not None:
+            label = f"xrefs to {fn.name}"
+            if subj != fn.addr:
+                label += f"+{subj - fn.addr:#x}"
+        else:
+            label = f"xrefs to {subj:#x}"
+        items = [(x.frm, f"{x.frm:08X}  {x.fn_name or '?':<24}  [{x.type}]") for x in xr]
+        self.app.call_from_thread(self._present_xrefs, label, items)
+
+    def _present_xrefs(self, label: str, items: list[tuple[int, str]]) -> None:
+        if not items:
+            self._status(f"{label}: none")
+            return
+        self._status(f"{label}: {len(items)}")
+        self.push_screen(XrefsScreen(label, items), self._on_xref_chosen)
+
+    def _on_xref_chosen(self, addr: int | None) -> None:
+        if addr is not None:
+            self._goto_ea(addr, push=True)
+
+    # -- navigation to an arbitrary address ------------------------------- #
+    @work(thread=True, group="nav")
+    def _goto_ea(self, ea: int, push: bool = True) -> None:
+        self._do_navigate(ea, push)
+
+    def _do_navigate(self, ea: int, push: bool) -> None:  # worker context
+        assert self.program is not None
+        fn = self.program.function_of(ea)
+        if fn is None:
+            self.app.call_from_thread(self._status, f"no function contains {ea:#x}")
+            return
+        model = self.program.disasm(fn.addr, fn.name)
+        idx = 0 if ea == fn.addr else model.index_of_ea(ea)
+        self.app.call_from_thread(self._open_at, fn.addr, fn.name, idx, push)
+
+    def _open_at(self, ea: int, name: str, cursor: int, push: bool) -> None:
+        entry = NavEntry(ea=ea, name=name, cursor=cursor)
+        if push:
+            self._nav.append(entry)
+        self._open_entry(entry, push=False)
+
     def on_input_changed(self, event: Input.Changed) -> None:
         if event.input.id == "search":
             view, _ = self._search_ctx
@@ -936,9 +1114,9 @@ class IdaTui(App):
         except Exception as e:  # noqa: BLE001
             self.app.call_from_thread(self._status, f"goto: {e}")
             return
-        f = self.program.functions().by_addr(ea)
-        name = f.name if f else target
-        self.app.call_from_thread(self._open_function, ea, name)
+        # Navigate to the containing function at the right line (handles both a
+        # function name and a mid-function address).
+        self._do_navigate(ea, push=True)
 
     # -- opening functions ------------------------------------------------- #
     def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:

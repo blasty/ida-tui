@@ -12,8 +12,10 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from idatui.app import DecompView, DisasmView, FunctionsPanel, IdaTui  # noqa: E402
-from textual.widgets import DataTable, Input, Static  # noqa: E402
+from idatui.app import (  # noqa: E402
+    DecompView, DisasmView, FunctionsPanel, IdaTui, XrefsScreen,
+)
+from textual.widgets import DataTable, Input, OptionList, Static  # noqa: E402
 from rich.text import Text  # noqa: E402
 
 PASS = FAIL = 0
@@ -226,6 +228,42 @@ async def run(db):
         await pilot.pause(0.3)
         check("Esc on the list clears the filter", table.row_count == full,
               f"{table.row_count}/{full}")
+
+        # Follow (Enter) + back (Esc) + xrefs (x), using a real call site.
+        dis = app.query_one(DisasmView)
+        dis.focus()
+        await pilot.pause(0.1)
+        lines = dis.model.lines(0, 400, prefetch=False)
+        call_idx = next((i for i, ln in enumerate(lines)
+                         if ln.text.startswith("call ")), None)
+        if call_idx is None:
+            check("found a call line to exercise follow/xrefs", False, "no call in first 400")
+        else:
+            dis.cursor = call_idx
+            dis.refresh()
+            orig = app._cur.ea
+            depth = len(app._nav)
+            await pilot.press("enter")
+            await wait_until(pilot, lambda: len(app._nav) > depth, timeout=25)
+            check("Enter follows the call into another function",
+                  app._cur.ea != orig and len(app._nav) > depth, f"cur={app._cur.ea:#x}")
+            await pilot.press("escape")
+            await pilot.pause(0.2)
+            check("Esc returns from the follow", app._cur.ea == orig, f"cur={app._cur.ea:#x}")
+            dis.cursor = call_idx
+            dis.refresh()
+            await pilot.press("x")
+            opened = await wait_until(
+                pilot, lambda: isinstance(app.screen, XrefsScreen), timeout=25)
+            check("'x' opens the xrefs popup", opened,
+                  f"screen={type(app.screen).__name__}")
+            if opened:
+                check("xrefs popup has entries",
+                      app.screen.query_one(OptionList).option_count >= 1)
+                await pilot.press("escape")
+                await pilot.pause(0.2)
+                check("Esc closes the xrefs popup",
+                      not isinstance(app.screen, XrefsScreen))
 
 
 def main(argv):

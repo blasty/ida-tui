@@ -21,6 +21,7 @@ Textual worker threads; the internal prefetch pool is separate and small.
 
 from __future__ import annotations
 
+import bisect
 import json
 import re
 import threading
@@ -80,6 +81,15 @@ class Ref:
     addr: int
     name: str
     string: str | None = None
+
+
+@dataclass
+class Xref:
+    frm: int              # the referencing address
+    to: int | None        # the referenced address
+    type: str             # "code" | "data" | ...
+    fn_name: str | None   # function containing `frm`
+    fn_addr: int | None
 
 
 @dataclass
@@ -210,6 +220,7 @@ class DisasmModel:
         self.name = name
         self._blocks: dict[int, list[Line]] = {}
         self._total: int | None = None
+        self._ea_list: list[int] | None = None
         self._lock = threading.Lock()
         self._inflight: set[int] = set()
 
@@ -306,10 +317,35 @@ class DisasmModel:
         with self._lock:
             return len(self._blocks)
 
+    def ensure_ea_index(self) -> list[int]:
+        """Build (once) a sorted list of every line's ea, for ea->index lookup.
+        Fetches the whole function; cached. Only needed for mid-function jumps."""
+        if self._ea_list is not None:
+            return self._ea_list
+        total = self.total()
+        eas: list[int] = []
+        off = 0
+        while off < total:
+            lines = self.lines(off, self.BLOCK, prefetch=False)
+            if not lines:
+                break
+            eas.extend(ln.ea for ln in lines)
+            off += len(lines)
+        with self._lock:
+            self._ea_list = eas
+        return eas
+
+    def index_of_ea(self, ea: int) -> int:
+        """Instruction index of the line at/containing ``ea`` (0 if before start)."""
+        eas = self.ensure_ea_index()
+        i = bisect.bisect_right(eas, ea) - 1
+        return i if 0 <= i < len(eas) else 0
+
     def invalidate(self) -> None:
         with self._lock:
             self._blocks.clear()
             self._total = None
+            self._ea_list = None
 
 
 # --------------------------------------------------------------------------- #
@@ -394,6 +430,29 @@ class Program:
         except Exception:  # noqa: BLE001 -- fall back to the truncated preview
             return None
 
+    # -- cross-references & containing function --------------------------- #
+    def function_of(self, ea: int) -> Func | None:
+        """Return the function containing ``ea`` (resolves mid-function addrs)."""
+        payload = self.client.call("lookup_funcs", queries=[hex(ea)])
+        res = payload.get("result", []) if isinstance(payload, dict) else []
+        fn = res[0].get("fn") if res and isinstance(res[0], dict) else None
+        return Func.from_raw(fn) if fn else None
+
+    def xrefs_from(self, ea: int) -> list[Xref]:
+        payload = self.client.call(
+            "xref_query",
+            queries=[{"addr": hex(ea), "direction": "from", "include_fn": True}],
+        )
+        return _parse_xrefs(payload)
+
+    def xrefs_to(self, ea: int, limit: int = 2000) -> list[Xref]:
+        payload = self.client.call(
+            "xref_query",
+            queries=[{"addr": hex(ea), "direction": "to", "include_fn": True,
+                      "dedup": True, "count": limit}],
+        )
+        return _parse_xrefs(payload)
+
     # -- address resolution ------------------------------------------------ #
     def resolve(self, target: int | str) -> int:
         """Resolve an int/hex-string/symbol name to an address (ea)."""
@@ -429,6 +488,28 @@ class Program:
         """Drop the function index caches (after rename/define/undefine)."""
         with self._lock:
             self._indices.clear()
+
+
+def _parse_xrefs(payload) -> list[Xref]:
+    res = payload.get("result", []) if isinstance(payload, dict) else []
+    if not res:
+        return []
+    data = res[0].get("data", []) or []
+    out: list[Xref] = []
+    for d in data:
+        if not isinstance(d, dict):
+            continue
+        fn = d.get("fn") or {}
+        frm = d.get("from", d.get("addr"))
+        to = d.get("to")
+        out.append(Xref(
+            frm=_as_int(frm) if frm is not None else 0,
+            to=_as_int(to) if to is not None else None,
+            type=d.get("type", "?"),
+            fn_name=fn.get("name"),
+            fn_addr=_as_int(fn["addr"]) if fn.get("addr") else None,
+        ))
+    return out
 
 
 def _parse_decompilation(ea: int, payload) -> Decompilation:
