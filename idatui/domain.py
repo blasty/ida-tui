@@ -185,6 +185,10 @@ class FunctionIndex:
         with self._lock:
             return self._by_addr.get(ea)
 
+    def all_loaded(self) -> list[Func]:
+        with self._lock:
+            return list(self._funcs)
+
 
 # --------------------------------------------------------------------------- #
 # Disassembly model: block-cached windowed listing for ONE function

@@ -20,6 +20,7 @@ from dataclasses import dataclass
 
 from rich.segment import Segment
 from rich.style import Style
+from rich.text import Text
 from textual import work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
@@ -45,6 +46,7 @@ _S_CURSOR = Style(bgcolor="grey30")
 _S_DIM = Style(color="grey42", italic=True)
 _S_MATCH = Style(bgcolor="#7a5c00")  # all search matches
 _S_MATCH_CUR = Style(bgcolor="#b58900", color="black")  # the current match
+_S_NAME_MATCH = Style(bgcolor="#b58900", color="black")  # filter match in a name
 
 
 @dataclass
@@ -641,7 +643,10 @@ class IdaTui(App):
         self.program: Program | None = None
         self._ka = None
         self._nav: list[NavEntry] = []
-        self._cur_filter: str | None = None
+        self._func_index = None  # the unfiltered FunctionIndex (source of truth)
+        self._filter_term = ""
+        self._pending_filter = ""
+        self._filter_timer = None
         self._active = "disasm"  # or "decomp"
         self._cur: NavEntry | None = None
         self._search_ctx: tuple[object | None, int] = (None, 1)
@@ -711,18 +716,11 @@ class IdaTui(App):
         self._load_functions()
 
     @work(thread=True, exclusive=True, group="load-funcs")
-    def _load_functions(self, filter: str | None = None) -> None:
+    def _load_functions(self) -> None:
         assert self.program is not None
-        idx = self.program.functions(filter=filter)
-        # Stream rows in as pages arrive so the UI fills progressively.
-        table_reset = {"done": False}
-
-        def reset_table():
-            t = self.query_one("#func-table", DataTable)
-            t.clear()
-            table_reset["done"] = True
-
-        self.app.call_from_thread(reset_table)
+        idx = self.program.functions()
+        self._func_index = idx
+        self.app.call_from_thread(lambda: self.query_one("#func-table", DataTable).clear())
         last = 0
         module = self._module()
         while not idx.complete:
@@ -734,7 +732,11 @@ class IdaTui(App):
                 self.app.call_from_thread(
                     self._status, f"{module} — {last} functions…"
                 )
-        self.app.call_from_thread(self._status, f"{module} — {len(idx)} functions")
+        # If a filter is active (typed during load), re-apply it over the full set.
+        if self._filter_term:
+            self.app.call_from_thread(self._apply_filter, self._filter_term)
+        else:
+            self.app.call_from_thread(self._status, f"{module} — {len(idx)} functions")
 
     def _module(self) -> str:
         try:
@@ -743,9 +745,64 @@ class IdaTui(App):
             return "?"
 
     def _append_rows(self, rows: list[Func]) -> None:
+        if self._filter_term:  # streaming paused while a filter is active
+            return
         table = self.query_one("#func-table", DataTable)
         for f in rows:
             table.add_row(f"{f.addr:08X}", f.name, f"{f.size:#x}", key=str(f.addr))
+
+    # -- incremental function-name filter --------------------------------- #
+    def _apply_filter(self, term: str) -> None:
+        """Client-side incremental filter over the cached function list, with the
+        matched substring highlighted in each name. Glob (``*``/``?``) or plain
+        substring; smartcase (case-insensitive unless the query has uppercase).
+        """
+        import fnmatch
+
+        term = term.strip()
+        self._filter_term = term
+        idx = self._func_index
+        if idx is None:
+            return
+        funcs = idx.all_loaded()
+        total = len(funcs)
+        ci = term.islower()
+        is_glob = ("*" in term) or ("?" in term)
+        needle = term.lower() if ci else term
+        pat = needle if (is_glob and ("*" in needle or "?" in needle)) else f"*{needle}*"
+        matched: list[tuple[Func, tuple[int, int] | None]] = []
+        for f in funcs:
+            if not term:
+                matched.append((f, None))
+                continue
+            hay = f.name.lower() if ci else f.name
+            if is_glob:
+                if fnmatch.fnmatch(hay, pat):
+                    matched.append((f, None))
+            else:
+                i = hay.find(needle)
+                if i >= 0:
+                    matched.append((f, (i, i + len(term))))
+        table = self.query_one("#func-table", DataTable)
+        table.clear()
+        for f, rng in matched:
+            if rng:
+                name: object = Text(f.name)
+                name.stylize(_S_NAME_MATCH, rng[0], rng[1])
+            else:
+                name = f.name
+            table.add_row(f"{f.addr:08X}", name, f"{f.size:#x}", key=str(f.addr))
+        if term:
+            self._status(f"filter '{term}':  {len(matched)}/{total}")
+        else:
+            self._status(f"{self._module()} — {total} functions")
+
+    def _apply_pending_filter(self) -> None:
+        self._filter_timer = None
+        self._apply_filter(self._pending_filter)
+
+    def clear_filter(self) -> None:
+        self._apply_filter("")
 
     # -- actions ----------------------------------------------------------- #
     def action_toggle_functions(self) -> None:
@@ -766,10 +823,10 @@ class IdaTui(App):
 
     def action_filter(self) -> None:
         inp = self.query_one("#func-filter", Input)
-        inp.placeholder = "filter (glob, e.g. sub_*)  —  Enter to apply"
+        inp.placeholder = "filter names…  Enter=keep  Esc=clear"
         inp.can_focus = True
         inp.display = True
-        inp.value = self._cur_filter or ""
+        inp.value = self._filter_term
         inp.focus()
 
     def action_goto(self) -> None:
@@ -782,11 +839,15 @@ class IdaTui(App):
         self._goto_mode = True
 
     def action_back(self) -> None:
+        table = self.query_one("#func-table", DataTable)
+        if self.focused is table and self._filter_term:
+            self.clear_filter()  # Esc on the list clears an active filter
+            return
         if len(self._nav) > 1:
             self._nav.pop()
             self._open_entry(self._nav[-1], push=False)
         else:
-            self.query_one("#func-table", DataTable).focus()
+            table.focus()
 
     # -- input submit (filter / goto) ------------------------------------- #
     def on_search_requested(self, msg: SearchRequested) -> None:
@@ -801,11 +862,16 @@ class IdaTui(App):
         inp.focus()
 
     def on_input_changed(self, event: Input.Changed) -> None:
-        if event.input.id != "search":
+        if event.input.id == "search":
+            view, _ = self._search_ctx
+            if view is not None:
+                view.search_update(event.value)
             return
-        view, _ = self._search_ctx
-        if view is not None:
-            view.search_update(event.value)
+        if event.input.id == "func-filter" and not getattr(self, "_goto_mode", False):
+            self._pending_filter = event.value
+            if self._filter_timer is not None:
+                self._filter_timer.stop()
+            self._filter_timer = self.set_timer(0.08, self._apply_pending_filter)
 
     def _end_search(self, cancel: bool = False) -> None:
         inp = self.query_one("#search", Input)
@@ -819,10 +885,24 @@ class IdaTui(App):
             view.focus()
 
     def on_key(self, event) -> None:  # type: ignore[no-untyped-def]
-        if event.key == "escape" and self.query_one("#search", Input).display:
+        if event.key != "escape":
+            return
+        if self.query_one("#search", Input).display:
             event.stop()
             event.prevent_default()
             self._end_search(cancel=True)
+            return
+        fi = self.query_one("#func-filter", Input)
+        if fi.display:
+            event.stop()
+            event.prevent_default()
+            fi.display = False
+            fi.can_focus = False
+            if getattr(self, "_goto_mode", False):
+                self._goto_mode = False
+            else:
+                self.clear_filter()  # Esc in the filter box clears it
+            self.query_one("#func-table", DataTable).focus()
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
         value = event.value.strip()
@@ -840,15 +920,13 @@ class IdaTui(App):
             return
         if getattr(self, "_goto_mode", False):
             self._goto_mode = False
-            inp.placeholder = "filter (glob, e.g. sub_*)  —  Enter to apply"
             self.query_one("#func-table", DataTable).focus()
             if value:
                 self._goto(value)
             return
-        # filter mode
-        self._cur_filter = value or None
+        # filter mode: already applied incrementally; Enter just confirms + closes.
+        self._apply_filter(value)
         self.query_one("#func-table", DataTable).focus()
-        self._load_functions(filter=self._cur_filter)
 
     @work(thread=True, exclusive=True, group="goto")
     def _goto(self, target: str) -> None:
@@ -865,9 +943,8 @@ class IdaTui(App):
     # -- opening functions ------------------------------------------------- #
     def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
         ea = int(event.row_key.value)
-        table = self.query_one("#func-table", DataTable)
-        row = table.get_row(event.row_key)
-        name = row[1] if row else hex(ea)
+        f = self._func_index.by_addr(ea) if self._func_index else None
+        name = f.name if f else hex(ea)
         self._open_function(ea, name)
 
     def _open_function(self, ea: int, name: str, push: bool = True) -> None:

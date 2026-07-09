@@ -14,6 +14,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from idatui.app import DecompView, DisasmView, FunctionsPanel, IdaTui  # noqa: E402
 from textual.widgets import DataTable, Input, Static  # noqa: E402
+from rich.text import Text  # noqa: E402
 
 PASS = FAIL = 0
 
@@ -198,6 +199,33 @@ async def run(db):
         check("Esc cancels: status restored, matches cleared",
               status.display and not si.display and not dis._matches,
               f"status={status.display} si={si.display} m={len(dis._matches)}")
+
+        # Incremental function-name filter + highlight + Esc-clear.
+        table.focus()
+        await pilot.pause(0.1)
+        if app._filter_term:  # clear any leftover filter from earlier
+            await pilot.press("escape")
+            await pilot.pause(0.2)
+        full = table.row_count
+        await pilot.press("slash")
+        await pilot.pause(0.2)
+        for ch in "sub_":
+            await pilot.press(ch)
+            await pilot.pause(0.1)
+        await pilot.pause(0.2)
+        check("filter narrows incrementally as you type",
+              0 < table.row_count < full, f"{table.row_count}/{full}")
+        cell = table.get_row_at(0)[1]
+        check("filter highlights matched substring in name",
+              isinstance(cell, Text) and any(s.style for s in cell.spans), repr(str(cell)))
+        await pilot.press("enter")
+        await pilot.pause(0.2)
+        check("Enter keeps filter + focuses table",
+              isinstance(app.focused, DataTable) and table.row_count < full)
+        await pilot.press("escape")
+        await pilot.pause(0.3)
+        check("Esc on the list clears the filter", table.row_count == full,
+              f"{table.row_count}/{full}")
 
 
 def main(argv):
