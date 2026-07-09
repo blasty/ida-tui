@@ -242,6 +242,7 @@ class IdaTui(App):
         Binding("q", "quit", "Quit"),
         Binding("slash", "filter", "Filter"),
         Binding("g", "goto", "Goto"),
+        Binding("ctrl+b", "toggle_functions", "Names"),
         Binding("tab", "toggle_focus", "Switch pane"),
         Binding("escape", "back", "Back"),
     ]
@@ -341,6 +342,15 @@ class IdaTui(App):
             table.add_row(f"{f.addr:08X}", f.name, f"{f.size:#x}", key=str(f.addr))
 
     # -- actions ----------------------------------------------------------- #
+    def action_toggle_functions(self) -> None:
+        """Show/hide the functions pane; give the disasm view all the width."""
+        left = self.query_one("#left", FunctionsPanel)
+        left.display = not left.display
+        if not left.display:
+            self.query_one(DisasmView).focus()
+        else:
+            self.query_one("#func-table", DataTable).focus()
+
     def action_toggle_focus(self) -> None:
         table = self.query_one("#func-table", DataTable)
         if self.focused is table:

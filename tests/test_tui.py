@@ -12,7 +12,7 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from idatui.app import DisasmView, IdaTui  # noqa: E402
+from idatui.app import DisasmView, FunctionsPanel, IdaTui  # noqa: E402
 from textual.widgets import DataTable, Static  # noqa: E402
 
 PASS = FAIL = 0
@@ -110,6 +110,19 @@ async def run(db):
             pilot, lambda: table.row_count > 0 and table.row_count < nfuncs, timeout=15
         )
         check("filter narrowed the list", filtered, f"rows={table.row_count} of {nfuncs}")
+
+        # Toggle the functions pane show/hide.
+        left = app.query_one("#left", FunctionsPanel)
+        await pilot.press("ctrl+b")
+        await pilot.pause(0.1)
+        check("ctrl+b hides functions pane + focuses disasm",
+              not left.display and isinstance(app.focused, DisasmView),
+              f"display={left.display} focus={type(app.focused).__name__}")
+        await pilot.press("ctrl+b")
+        await pilot.pause(0.1)
+        check("ctrl+b again restores pane + focuses table",
+              left.display and isinstance(app.focused, DataTable),
+              f"display={left.display} focus={type(app.focused).__name__}")
 
 
 def main(argv):
