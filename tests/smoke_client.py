@@ -26,6 +26,13 @@ from idatui.client import (  # noqa: E402
 PASS, FAIL = 0, 0
 
 
+def _query_data(payload):
+    res = payload.get("result", payload) if isinstance(payload, dict) else payload
+    if isinstance(res, list):
+        res = res[0] if res else {}
+    return res.get("data", []) if isinstance(res, dict) else []
+
+
 def check(name, cond, detail=""):
     global PASS, FAIL
     if cond:
@@ -82,8 +89,11 @@ def main(argv):
     check("health is dict", isinstance(h, dict), type(h).__name__)
     funcs = ida.call("list_funcs", queries=[{"count": 5}])
     check("list_funcs shape", isinstance(funcs, (list, dict)), type(funcs).__name__)
-    dis = ida.call("disasm", addr="main", max_instructions=10)
-    lines = dis.get("asm", {}).get("lines") if isinstance(dis, dict) else None
+    # Pick a real function (don't assume 'main' exists — libraries have none).
+    some = ida.call("list_funcs", queries=[{"filter": "sub_*", "count": 1}])
+    target = _query_data(some)[0]["addr"]
+    dis = ida.call("disasm", addr=target, max_instructions=10)
+    lines = (dis.get("asm") or {}).get("lines") if isinstance(dis, dict) else None
     check("disasm main has lines", bool(lines), str(dis)[:120])
     check("disasm line carries addr", bool(lines and "addr" in lines[0]),
           str(lines[0]) if lines else "no lines")
@@ -136,7 +146,7 @@ def main(argv):
 
     print("[concurrency]")
     def worker(i):
-        return ida.call("disasm", addr="main", max_instructions=5)
+        return ida.call("disasm", addr=target, max_instructions=5)
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=8) as ex:
         results = list(ex.map(worker, range(40)))

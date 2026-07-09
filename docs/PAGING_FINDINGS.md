@@ -93,6 +93,16 @@ fall back to the disassembly view or show an error panel.
 Normal decompile bodies are server-truncated with a `[N chars total]` marker
 (still to be solved for full-body display — see Phase 2).
 
+## Workers self-exit when idle (`idle_ttl_sec`, default 600s)
+
+A headless idalib worker self-exits after ~10 min idle. Its session then lingers
+in `idb_list` but calls fail with `"Worker for session <id> is not reachable"`
+(distinct from `"Session not found"`). Recovery differs: this needs a fresh
+`idb_open` of the same `input_path` (new worker), not just a db re-resolve. The
+TUI should (a) raise `idle_ttl_sec` when opening, and/or (b) detect
+"not reachable" and transparently re-open. Currently surfaced as a clean
+`IDAToolError`; auto-reopen is a TODO for the app layer.
+
 ## Writable path requirement (operational)
 
 `idb_open` writes the `.i64` next to the input binary, so the path must be
