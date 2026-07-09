@@ -199,6 +199,19 @@ class FunctionIndex:
         with self._lock:
             return list(self._funcs)
 
+    def update_name(self, addr: int, new_name: str) -> None:
+        """Reflect a rename in the cached index (Func is frozen -> replace)."""
+        with self._lock:
+            old = self._by_addr.get(addr)
+            if old is None:
+                return
+            nf = Func(addr=old.addr, name=new_name, size=old.size)
+            self._by_addr[addr] = nf
+            try:
+                self._funcs[self._funcs.index(old)] = nf
+            except ValueError:
+                pass
+
 
 # --------------------------------------------------------------------------- #
 # Disassembly model: block-cached windowed listing for ONE function

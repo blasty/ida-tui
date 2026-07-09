@@ -37,7 +37,7 @@ from textual.widgets.option_list import Option
 
 from .highlight import highlight_c
 
-from .client import IDAClient
+from .client import IDAClient, IDAToolError
 from .domain import DisasmModel, Func, Program
 
 # Styles for the disassembly listing.
@@ -89,6 +89,15 @@ class XrefsRequested(Message):
         self.view = view
 
 
+class RenameRequested(Message):
+    """A code view asks to rename the symbol under the cursor."""
+
+    def __init__(self, view, name: str | None) -> None:  # type: ignore[no-untyped-def]
+        super().__init__()
+        self.view = view
+        self.name = name
+
+
 class NavMixin:
     """Follow / xrefs actions shared by the code views (bindings live on each
     view since Textual only merges BINDINGS from DOMNode subclasses)."""
@@ -96,6 +105,7 @@ class NavMixin:
     NAV_BINDINGS = [
         Binding("enter", "follow", "Follow"),
         Binding("x", "xrefs", "Xrefs"),
+        Binding("n", "rename", "Rename"),
     ]
 
     def action_follow(self) -> None:
@@ -103,6 +113,9 @@ class NavMixin:
 
     def action_xrefs(self) -> None:
         self.post_message(XrefsRequested(self))
+
+    def action_rename(self) -> None:
+        self.post_message(RenameRequested(self, self.word_under_cursor()))
 
 
 def _overlay_ranges(strip: Strip, ranges: list[tuple[int, int]], style: Style) -> Strip:
@@ -300,7 +313,6 @@ class SearchMixin:
     SEARCH_BINDINGS = [
         Binding("slash", "search(1)", "Search"),
         Binding("question_mark", "search(-1)", "Search ↑", show=False),
-        Binding("n", "search_repeat(1)", "Next", show=False),
         Binding("N", "search_repeat(-1)", "Prev", show=False),
     ]
 
@@ -905,6 +917,10 @@ class IdaTui(App):
         dock: bottom; height: 1; border: none; padding: 0 1;
         background: $primary-darken-2; color: $text;
     }
+    #rename {
+        dock: bottom; height: 1; border: none; padding: 0 1;
+        background: $warning-darken-2; color: $text;
+    }
     #status { dock: bottom; height: 1; background: $panel; color: $text; padding: 0 1; }
     XrefsScreen { align: center middle; }
     #xref-box { width: 84; max-height: 70%; height: auto; border: thick $accent; background: $panel; }
@@ -918,6 +934,7 @@ class IdaTui(App):
         Binding("g", "goto", "Goto"),
         Binding("ctrl+b", "toggle_functions", "Names"),
         Binding("tab,shift+tab", "toggle_view", "Disasm/Pseudocode"),
+        Binding("ctrl+s", "save", "Save"),
         Binding("escape", "back", "Back"),
     ]
 
@@ -941,6 +958,8 @@ class IdaTui(App):
         self._active = "disasm"  # or "decomp"
         self._cur: NavEntry | None = None
         self._search_ctx: tuple[object | None, int] = (None, 1)
+        self._rename_ctx: tuple[object | None, str] = (None, "")
+        self._dirty = False
 
     # -- layout ------------------------------------------------------------ #
     def compose(self) -> ComposeResult:
@@ -956,6 +975,10 @@ class IdaTui(App):
         si.display = False
         si.can_focus = False
         yield si
+        ri = Input(id="rename")
+        ri.display = False
+        ri.can_focus = False
+        yield ri
         yield Static("connecting…", id="status")
         yield Footer()
 
@@ -1300,6 +1323,135 @@ class IdaTui(App):
         if addr is not None:
             self._goto_ea(addr, push=True)
 
+    # -- rename ------------------------------------------------------------ #
+    def on_rename_requested(self, msg: RenameRequested) -> None:
+        if not msg.name:
+            self._status("nothing to rename under the cursor")
+            return
+        self._rename_ctx = (msg.view, msg.name)
+        self.query_one("#status", Static).display = False
+        inp = self.query_one("#rename", Input)
+        inp.placeholder = f"rename '{msg.name}' —  Enter=apply  Esc=cancel"
+        inp.can_focus = True
+        inp.display = True
+        inp.value = msg.name
+        inp.focus()
+
+    def _end_rename(self) -> None:
+        inp = self.query_one("#rename", Input)
+        inp.display = False
+        inp.can_focus = False
+        self.query_one("#status", Static).display = True
+        view, _ = self._rename_ctx
+        if view is not None:
+            view.focus()
+
+    @work(thread=True, exclusive=True, group="rename")
+    def _do_rename(self, view, old: str, new: str) -> None:  # type: ignore[no-untyped-def]
+        assert self.program is not None
+        prog, cur = self.program, self._cur
+        kind = "data"
+        addr: int | None = None
+        batch: dict = {"data": {"old": old, "new": new}}
+        resolved: int | None = None
+        try:
+            resolved = prog.resolve(old)
+        except Exception:  # noqa: BLE001
+            resolved = None
+        if resolved is not None:
+            fn = prog.function_of(resolved)
+            if fn is not None and fn.addr == resolved:
+                kind, addr = "func", resolved
+                batch = {"func": {"addr": hex(resolved), "name": new}}
+            else:
+                kind, batch = "data", {"data": {"old": old, "new": new}}
+        elif isinstance(view, DecompView) and cur is not None:
+            dec = prog.decompile(cur.ea)
+            ref = next((r for r in dec.refs if r.name == old), None)
+            if ref is not None:
+                fn = prog.function_of(ref.addr)
+                if fn is not None and fn.addr == ref.addr:
+                    kind, addr = "func", ref.addr
+                    batch = {"func": {"addr": hex(ref.addr), "name": new}}
+                else:
+                    kind, batch = "data", {"data": {"old": old, "new": new}}
+            else:
+                kind = "local"
+                batch = {"local": {"func_addr": hex(cur.ea), "old": old, "new": new}}
+        elif cur is not None:  # disasm view
+            if old.startswith(("var_", "arg_")):
+                kind = "stack"
+                batch = {"stack": {"func_addr": hex(cur.ea), "old": old, "new": new}}
+        try:
+            res = prog.client.call("rename", batch=batch)
+        except IDAToolError as e:
+            self.app.call_from_thread(self._status, f"rename failed: {e.message}")
+            return
+        summary = res.get("summary", {}) if isinstance(res, dict) else {}
+        if not (summary.get("ok", 0) > 0 and summary.get("failed", 0) == 0):
+            msg = "rename failed"
+            for catk in ("func", "data", "local", "stack"):
+                items = res.get(catk) if isinstance(res, dict) else None
+                if isinstance(items, list) and items and items[0].get("error"):
+                    msg = f"rename failed: {items[0]['error']}"
+            self.app.call_from_thread(self._status, msg)
+            return
+        self.app.call_from_thread(self._after_rename, kind, addr, old, new)
+
+    def _after_rename(self, kind: str, addr: int | None, old: str, new: str) -> None:
+        cur = self._cur
+        if cur is not None:
+            self._invalidate_and_reload(cur)
+        if kind == "func" and addr is not None and self._func_index is not None:
+            self._func_index.update_name(addr, new)
+            for e in self._nav:
+                if e.ea == addr:
+                    e.name = new
+            # Update the one cell in place (a full rebuild would race the
+            # initial streaming load and duplicate row keys).
+            table = self.query_one("#func-table", DataTable)
+            try:
+                name_col = list(table.columns.keys())[1]
+                table.update_cell(str(addr), name_col, new)
+            except Exception:  # noqa: BLE001 -- row filtered out / not yet streamed
+                pass
+        self._dirty = True
+        self._status(f"renamed  {old} → {new}   (Ctrl+S to save)")
+
+    def _invalidate_and_reload(self, cur: NavEntry) -> None:
+        assert self.program is not None
+        try:
+            self.program.client.call("force_recompile", addr=hex(cur.ea))
+        except Exception:  # noqa: BLE001
+            pass
+        self.program.invalidate(cur.ea)
+        dis = self.query_one(DisasmView)
+        dec = self.query_one(DecompView)
+        cur.cursor, cur.cursor_x = dis.cursor, dis.cursor_x
+        if dec.loaded_ea == cur.ea:
+            cur.dec_cursor, cur.dec_cursor_x = dec.cursor, dec.cursor_x
+        dec.loaded_ea = None  # force pseudocode reload with new names
+        model = self.program.disasm(cur.ea, cur.name)
+        dis.load(model, cur.name, cursor=cur.cursor, cursor_x=cur.cursor_x)
+        self._show_active()
+
+    @work(thread=True, exclusive=True, group="save")
+    def _save(self) -> None:
+        assert self.program is not None
+        try:
+            self.program.client.call("idb_save", timeout=300.0)
+        except Exception as e:  # noqa: BLE001
+            self.app.call_from_thread(self._status, f"save failed: {e}")
+            return
+        self._dirty = False
+        self.app.call_from_thread(self._status, "saved to disk")
+
+    def action_save(self) -> None:
+        if self.program is None:
+            return
+        self._status("saving…")
+        self._save()
+
     # -- navigation to an arbitrary address ------------------------------- #
     @work(thread=True, group="nav")
     def _goto_ea(self, ea: int, push: bool = True) -> None:
@@ -1352,6 +1504,11 @@ class IdaTui(App):
             event.prevent_default()
             self._end_search(cancel=True)
             return
+        if self.query_one("#rename", Input).display:
+            event.stop()
+            event.prevent_default()
+            self._end_rename()
+            return
         fi = self.query_one("#func-filter", Input)
         if fi.display:
             event.stop()
@@ -1377,6 +1534,12 @@ class IdaTui(App):
                 else:
                     view.repeat_last(direction)
             self._end_search()
+            return
+        if inp.id == "rename":
+            view, old = self._rename_ctx
+            self._end_rename()
+            if view is not None and value and value != old:
+                self._do_rename(view, old, value)
             return
         if getattr(self, "_goto_mode", False):
             self._goto_mode = False

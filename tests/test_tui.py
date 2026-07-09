@@ -405,6 +405,46 @@ async def run(db):
         check("click Address header sorts by address",
               app._sort_col == 0 and saddrs == sorted(saddrs), f"sort_col={app._sort_col}")
 
+        # Rename via 'n' (reuse the pseudocode sub_ ref found above).
+        if pick is not None:
+            fn, drow, dcol, dsym = pick
+            dtarget = app.program.resolve(dsym)
+            await pilot.press("g")
+            await pilot.pause(0.2)
+            for ch in fn.name:
+                await pilot.press(ch)
+            await pilot.press("enter")
+            await wait_until(pilot, lambda: dis.total > 0, timeout=20)
+            if app._active != "decomp":
+                await pilot.press("tab")
+            await wait_until(pilot, lambda: dec.loaded_ea == fn.addr, timeout=20)
+            dec.focus()
+            dec.cursor, dec.cursor_x = drow, dcol + 1
+            dec.refresh()
+            await pilot.pause(0.1)
+            newname = f"ren_{os.getpid()}"
+            await pilot.press("n")
+            await pilot.pause(0.2)
+            ri = app.query_one("#rename", Input)
+            check("'n' opens the rename prompt prefilled with the symbol",
+                  ri.display and ri.value == dsym, f"val={ri.value!r}")
+            ri.value = newname
+            await pilot.press("enter")
+            await wait_until(
+                pilot,
+                lambda: app._func_index.by_addr(dtarget)
+                and app._func_index.by_addr(dtarget).name == newname,
+                timeout=25,
+            )
+            check("rename updates the function name",
+                  app._func_index.by_addr(dtarget).name == newname,
+                  app._func_index.by_addr(dtarget).name)
+            # revert via the API for reliable, race-free cleanup
+            rr = app.program.client.call(
+                "rename", batch={"func": {"addr": hex(dtarget), "name": dsym}})
+            check("rename reverted cleanly",
+                  rr.get("summary", {}).get("ok", 0) == 1, str(rr.get("summary")))
+
 
 def main(argv):
     db = None
