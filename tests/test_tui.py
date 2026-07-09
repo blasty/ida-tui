@@ -157,6 +157,25 @@ async def run(db):
               app._active == "disasm" and dis.display and not dec.display,
               f"active={app._active}")
 
+        # A (re)decompile shows a grayed 'decompiling…' overlay while it runs.
+        await pilot.press("tab")
+        await wait_until(pilot, lambda: app._active == "decomp", timeout=10)
+        await wait_until(pilot, lambda: dec.loaded_ea is not None, timeout=20)
+        dec.loaded_ea = None            # force a reload (as rename/refresh does)
+        app._show_active()
+        cover = dec._cover_widget
+        check("decompile shows a 'decompiling…' overlay",
+              dec.loading and cover is not None
+              and "decomp-loading" in cover.classes
+              and "decompiling" in str(cover.render()),
+              f"loading={dec.loading} cover={cover!r}")
+        await wait_until(pilot, lambda: not dec.loading and dec._cover_widget is None,
+                         timeout=25)
+        check("overlay clears when the decompile finishes",
+              not dec.loading and dec._cover_widget is None)
+        await pilot.press("tab")  # back to disasm for the rest of the tests
+        await wait_until(pilot, lambda: app._active == "disasm", timeout=10)
+
         # Vim-style search in the disassembly view.
         line0 = dis.model.cached_line(0)
         raw = (line0.text.split() or ["push"])[0] if line0 else "push"

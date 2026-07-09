@@ -835,6 +835,10 @@ class DecompView(SearchMixin, NavMixin, ColumnCursor, ScrollView, can_focus=True
             self._hscroll()
         self.refresh()
 
+    def get_loading_widget(self):  # type: ignore[override]
+        # Shown (grayed, centered) while a (re)decompile is in flight.
+        return Static("― decompiling… ―", classes="decomp-loading")
+
     def _line_ea(self, idx: int) -> int | None:
         if not (0 <= idx < len(self._texts)):
             return None
@@ -972,6 +976,10 @@ class IdaTui(App):
         background: $warning-darken-2; color: $text;
     }
     #status { height: 1; background: $panel; color: $text; padding: 0 1; }
+    .decomp-loading {
+        width: 100%; height: 100%; content-align: center middle;
+        background: $panel-darken-1; color: $text-muted; text-style: italic bold;
+    }
     XrefsScreen { align: center middle; }
     #xref-box { width: 84; max-height: 70%; height: auto; border: thick $accent; background: $panel; }
     #xref-title { dock: top; height: 1; background: $accent; color: $text; padding: 0 1; }
@@ -983,7 +991,7 @@ class IdaTui(App):
         Binding("slash", "filter", "Filter"),
         Binding("g", "goto", "Goto"),
         Binding("ctrl+b", "toggle_functions", "Names"),
-        Binding("tab,shift+tab", "toggle_view", "Disasm/Pseudocode"),
+        Binding("tab,shift+tab", "toggle_view", "Disasm/Pseudocode", priority=True),
         Binding("ctrl+s", "save", "Save"),
         Binding("escape", "back", "Back"),
     ]
@@ -1670,6 +1678,7 @@ class IdaTui(App):
             dec.focus()
             if self._cur is not None and dec.loaded_ea != self._cur.ea:
                 self._status(f"{self._cur.name} — decompiling…")
+                dec.loading = True  # gray out + 'decompiling…' overlay
                 self._load_decomp(self._cur.ea, self._cur.name)
             else:
                 self._status_for_cur("pseudocode")
@@ -1686,6 +1695,9 @@ class IdaTui(App):
 
     def _apply_decomp(self, ea: int, name: str, dec) -> None:  # type: ignore[no-untyped-def]
         view = self.query_one(DecompView)
+        view.loading = False
+        if self._active == "decomp":
+            view.focus()  # loading cover had blurred it; restore focus
         # Restore the saved pseudocode position when returning to this function.
         cur = self._cur
         same = cur is not None and cur.ea == ea
