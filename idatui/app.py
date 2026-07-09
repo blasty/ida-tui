@@ -58,8 +58,10 @@ _S_CELL = Style(reverse=True)      # the block cursor cell
 class NavEntry:
     ea: int
     name: str
-    cursor: int = 0      # line index (disasm instruction index)
-    cursor_x: int = 0    # column
+    cursor: int = 0       # disasm line (instruction index)
+    cursor_x: int = 0     # disasm column
+    dec_cursor: int = 0   # pseudocode line
+    dec_cursor_x: int = 0 # pseudocode column
 
 
 class SearchRequested(Message):
@@ -719,6 +721,14 @@ class DecompView(SearchMixin, NavMixin, ColumnCursor, ScrollView, can_focus=True
     cursor = reactive(0, repaint=False)
     cursor_x = reactive(0, repaint=False)
 
+    class CursorMoved(Message):
+        """Posted when the pseudocode cursor moves; carries the line's ea."""
+
+        def __init__(self, index: int, ea: int | None) -> None:
+            super().__init__()
+            self.index = index
+            self.ea = ea
+
     def __init__(self) -> None:
         super().__init__(id="decomp")
         self.loaded_ea: int | None = None
@@ -739,19 +749,32 @@ class DecompView(SearchMixin, NavMixin, ColumnCursor, ScrollView, can_focus=True
         elif self.cursor_x >= sx + width:
             self.scroll_to(x=self.cursor_x - width + 1, animate=False)
 
-    def show(self, ea: int, text: str) -> None:
+    def show(self, ea: int, text: str, cursor: int = 0, cursor_x: int = 0) -> None:
         seglists = highlight_c(text)
         self._strips = [Strip(segs) for segs in seglists]
         self._texts = ["".join(seg.text for seg in segs) for segs in seglists]
         self.loaded_ea = ea
-        self.cursor = 0
-        self.cursor_x = 0
+        total = len(self._strips)
+        self.cursor = max(0, min(max(total - 1, 0), cursor))
+        self.cursor_x = cursor_x
         self._matches = []
         self._ranges = {}
         maxw = max((s.cell_length for s in self._strips), default=0)
-        self.virtual_size = Size(maxw, len(self._strips))
+        self.virtual_size = Size(maxw, total)
         self.scroll_to(0, 0, animate=False)
+        self._clamp_x()
+        self._scroll_cursor_into_view()
+        self._hscroll()
         self.refresh()
+
+    def _line_ea(self, idx: int) -> int | None:
+        if not (0 <= idx < len(self._texts)):
+            return None
+        ms = re.findall(r"/\*\s*0x([0-9A-Fa-f]+)\s*\*/", self._texts[idx])
+        return int(ms[-1], 16) if ms else None
+
+    def _after_cursor_move(self) -> None:
+        self.post_message(DecompView.CursorMoved(self.cursor, self._line_ea(self.cursor)))
 
     @property
     def total(self) -> int:
@@ -802,6 +825,7 @@ class DecompView(SearchMixin, NavMixin, ColumnCursor, ScrollView, can_focus=True
             self.refresh()
         else:
             _refresh_lines(self, old, self.cursor)
+        self._after_cursor_move()
 
     def action_cursor_down(self) -> None:
         self._move(1)
@@ -1400,13 +1424,25 @@ class IdaTui(App):
 
     def _apply_decomp(self, ea: int, name: str, dec) -> None:  # type: ignore[no-untyped-def]
         view = self.query_one(DecompView)
+        # Restore the saved pseudocode position when returning to this function.
+        cur = self._cur
+        c = cur.dec_cursor if (cur is not None and cur.ea == ea) else 0
+        cx = cur.dec_cursor_x if (cur is not None and cur.ea == ea) else 0
         if dec.failed:
             view.show(ea, f"/* decompilation failed at {ea:#x}: {dec.error} */\n")
             self._status(f"{name} — decompile failed; Tab for disasm")
         else:
             note = "  (truncated)" if dec.truncated else ""
-            view.show(ea, dec.code or "")
+            view.show(ea, dec.code or "", cursor=c, cursor_x=cx)
             self._status(f"{name}  @ {ea:#x}   [pseudocode {len(dec.code or '')} chars]{note}")
+
+    def on_decomp_view_cursor_moved(self, msg: DecompView.CursorMoved) -> None:
+        if self._nav:
+            self._nav[-1].dec_cursor = msg.index
+            self._nav[-1].dec_cursor_x = self.query_one(DecompView).cursor_x
+        if self._cur is not None:
+            loc = f" @ {msg.ea:#x}" if msg.ea is not None else ""
+            self._status(f"{self._cur.name}{loc}   [pseudocode line {msg.index}]")
 
     def on_disasm_view_cursor_moved(self, msg: DisasmView.CursorMoved) -> None:
         if self._nav:

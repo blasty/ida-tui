@@ -337,6 +337,53 @@ async def run(db):
                   dis.cursor == mline and dis.word_under_cursor() == msym,
                   f"cursor={dis.cursor} (want {mline}) word={dis.word_under_cursor()!r}")
 
+        # Pseudocode-view position is tracked independently across jumps.
+        prog = app.program
+        fi = prog.functions()
+        fi.ensure(500)
+        pick = None
+        for fn in fi.all_loaded()[:500]:
+            d = prog.decompile(fn.addr)
+            if d.failed or not d.code:
+                continue
+            dl = d.code.split("\n")
+            if len(dl) < 12:
+                continue
+            for i, txt in enumerate(dl):
+                if i < 8:
+                    continue
+                dm2 = re.search(r"\b(sub_[0-9A-Fa-f]+)", txt)
+                if dm2 and dm2.group(1) != fn.name:
+                    pick = (fn, i, dm2.start(1), dm2.group(1))
+                    break
+            if pick:
+                break
+        if pick is None:
+            check("found a pseudocode line to test decomp nav", False)
+        else:
+            fn, drow, dcol, dsym = pick
+            await pilot.press("g")
+            await pilot.pause(0.2)
+            for ch in fn.name:
+                await pilot.press(ch)
+            await pilot.press("enter")
+            await wait_until(pilot, lambda: dis.total > 0, timeout=20)
+            await pilot.press("tab")
+            await wait_until(pilot, lambda: dec.loaded_ea == fn.addr, timeout=20)
+            dec.cursor = drow
+            dec.cursor_x = dcol
+            dec._after_cursor_move()
+            await pilot.pause(0.1)
+            depth = len(app._nav)
+            await pilot.press("enter")  # follow the sym under the pseudocode cursor
+            await wait_until(pilot, lambda: len(app._nav) > depth, timeout=25)
+            await pilot.press("escape")
+            await wait_until(pilot, lambda: dec.loaded_ea == fn.addr, timeout=25)
+            await pilot.pause(0.2)
+            check("pseudocode-view position restored after jump+back",
+                  dec.cursor == drow and dec.word_under_cursor() == dsym,
+                  f"cursor={dec.cursor} (want {drow}) word={dec.word_under_cursor()!r}")
+
 
 def main(argv):
     db = None
