@@ -195,6 +195,11 @@ async def run(db):
         await pilot.pause(0.2)
         check("search bar visible, status hidden (no overlap)",
               si.display and not status.display, f"si={si.display} status={status.display}")
+        from textual.widgets import Footer as _Footer
+        footer = app.query_one(_Footer)
+        check("search input is rendered above the footer (not overlapping)",
+              si.region.height >= 1 and si.region.y < footer.region.y,
+              f"search={si.region} footer={footer.region}")
         for ch in term:
             await pilot.press(ch)
             await pilot.pause(0.1)
@@ -521,6 +526,71 @@ async def run(db):
         check("PageUp preserves the viewport-relative row",
               dis.cursor - round(dis.scroll_offset.y) == rel,
               f"rel={dis.cursor - round(dis.scroll_offset.y)} want={rel}")
+
+        # Rename refresh across history: rename a callee while viewing it, then
+        # 'back' to the caller (cached earlier) shows the new name.
+        table.focus()
+        table.move_cursor(row=biggest_i)
+        await pilot.press("enter")
+        await wait_until(pilot, lambda: dis.total > 0, timeout=20)
+        dis.focus()
+        await pilot.pause(0.2)
+        hrow = hsym = None
+        for _ in range(40):
+            top = round(dis.scroll_offset.y)
+            dis.model.lines(top, dis.size.height + 2, prefetch=False)
+            for r in range(min(dis.size.height, dis.total - top)):
+                p = dis._line_plain(top + r)
+                if p and "call sub_" in p:
+                    mm = re.search(r"\bcall (sub_[0-9A-Fa-f]+)", p)
+                    if mm:
+                        hrow, hsym = top + r, mm.group(1)
+                        break
+            if hrow is not None:
+                break
+            await pilot.press("pagedown")
+            await pilot.pause(0.05)
+        if hrow is not None:
+            htarget = app.program.resolve(hsym)
+            await pilot.press("g")
+            await pilot.pause(0.2)
+            for ch in hsym:
+                await pilot.press(ch)
+            await pilot.press("enter")
+            await wait_until(pilot, lambda: app._cur.ea == htarget, timeout=20)
+            if app._active != "decomp":
+                await pilot.press("tab")
+            await wait_until(pilot, lambda: dec.loaded_ea == htarget, timeout=20)
+            nx = dec._texts[0].find(hsym) if dec._texts else -1
+            if nx >= 0:
+                dec.focus()
+                dec.cursor, dec.cursor_x = 0, nx + 1
+                dec.refresh()
+                await pilot.pause(0.1)
+                hnew = f"h_{os.getpid()}"
+                await pilot.press("n")
+                await pilot.pause(0.2)
+                app.query_one("#rename", Input).value = hnew
+                await pilot.press("enter")
+                await wait_until(
+                    pilot,
+                    lambda: app._func_index.by_addr(htarget)
+                    and app._func_index.by_addr(htarget).name == hnew,
+                    timeout=25,
+                )
+                if app._active != "disasm":
+                    await pilot.press("tab")
+                await pilot.press("escape")
+                await wait_until(
+                    pilot, lambda: dis.total > 0 and app._cur.ea != htarget, timeout=25)
+                await pilot.pause(0.4)
+                dis.model.lines(hrow, 4, prefetch=False)
+                await pilot.pause(0.2)
+                hline = dis._line_plain(hrow)
+                check("caller shows renamed callee after 'back' (cache refresh)",
+                      hline is not None and hnew in hline, f"line={hline!r}")
+                app.program.client.call(
+                    "rename", batch={"func": {"addr": hex(htarget), "name": hsym}})
 
 
 def main(argv):

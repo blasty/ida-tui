@@ -374,7 +374,8 @@ class Program:
         )
         self._indices: dict[str | None, FunctionIndex] = {}
         self._disasm: dict[int, DisasmModel] = {}
-        self._decomp: dict[int, Decompilation] = {}
+        self._decomp: dict[int, tuple[Decompilation, int]] = {}
+        self._name_gen = 0  # bumped on rename; invalidates stale name caches
         self._lock = threading.Lock()
 
     # -- prefetch plumbing ------------------------------------------------- #
@@ -417,8 +418,17 @@ class Program:
         if not refresh:
             with self._lock:
                 hit = self._decomp.get(ea)
-                if hit is not None:
-                    return hit
+                gen = self._name_gen
+            if hit is not None:
+                dec, hit_gen = hit
+                if hit_gen == gen:
+                    return dec
+                # Cached before a rename: names may be stale. Drop the server's
+                # Hex-Rays cache so the refetch reflects the new names.
+                try:
+                    self.client.call("force_recompile", addr=hex(ea))
+                except Exception:  # noqa: BLE001
+                    pass
         envelope = self.client.call_envelope("decompile", addr=hex(ea))
         result = envelope.get("result", {})
         payload = result.get("structuredContent")
@@ -431,8 +441,18 @@ class Program:
                 payload = full
         dec = _parse_decompilation(ea, payload)
         with self._lock:
-            self._decomp[ea] = dec
+            self._decomp[ea] = (dec, self._name_gen)
         return dec
+
+    def bump_names(self) -> None:
+        """Signal that symbol names changed (a rename). Disasm names are live in
+        the IDB, so clearing the block caches is enough for those; decompilation
+        is generation-checked and force-recompiled lazily on next access."""
+        with self._lock:
+            self._name_gen += 1
+            models = list(self._disasm.values())
+        for m in models:
+            m.invalidate()
 
     @staticmethod
     def _fetch_output(url: str, timeout: float = 15.0):

@@ -1,4 +1,5 @@
 [ ] RPC endpoint for robot-spectator-ida
-[ ] page up/down cursor x/y preserve
-[ ] hlsearch should jump cursor
+[ ] rename -> history stack pop -> old name
+[x] page up/down cursor x/y preserve
+[x] hlsearch should jump cursor
 [x] makes names pane sortable (addr/name columns)

@@ -951,14 +951,14 @@ class IdaTui(App):
     DisasmView { width: 1fr; padding: 0 1; }
     DecompView { width: 1fr; }
     #search {
-        dock: bottom; height: 1; border: none; padding: 0 1;
+        height: 1; border: none; padding: 0 1;
         background: $primary-darken-2; color: $text;
     }
     #rename {
-        dock: bottom; height: 1; border: none; padding: 0 1;
+        height: 1; border: none; padding: 0 1;
         background: $warning-darken-2; color: $text;
     }
-    #status { dock: bottom; height: 1; background: $panel; color: $text; padding: 0 1; }
+    #status { height: 1; background: $panel; color: $text; padding: 0 1; }
     XrefsScreen { align: center middle; }
     #xref-box { width: 84; max-height: 70%; height: auto; border: thick $accent; background: $panel; }
     #xref-title { dock: top; height: 1; background: $accent; color: $text; padding: 0 1; }
@@ -1449,8 +1449,13 @@ class IdaTui(App):
 
     def _after_rename(self, kind: str, addr: int | None, old: str, new: str) -> None:
         cur = self._cur
+        # A renamed symbol can appear in many functions, so invalidate globally;
+        # each function refreshes its names the next time it's viewed.
+        self.program.bump_names()
         if cur is not None:
-            self._invalidate_and_reload(cur)
+            self._save_current_pos()
+            self.query_one(DecompView).loaded_ea = None  # force pseudocode reload
+            self._open_entry(cur, push=False)
         if kind == "func" and addr is not None and self._func_index is not None:
             self._func_index.update_name(addr, new)
             for e in self._nav:
@@ -1466,17 +1471,6 @@ class IdaTui(App):
                 pass
         self._dirty = True
         self._status(f"renamed  {old} → {new}   (Ctrl+S to save)")
-
-    def _invalidate_and_reload(self, cur: NavEntry) -> None:
-        assert self.program is not None
-        try:
-            self.program.client.call("force_recompile", addr=hex(cur.ea))
-        except Exception:  # noqa: BLE001
-            pass
-        self.program.invalidate(cur.ea)
-        self._save_current_pos()  # capture cursor + scroll before reloading
-        self.query_one(DecompView).loaded_ea = None  # force pseudocode reload
-        self._open_entry(cur, push=False)
 
     @work(thread=True, exclusive=True, group="save")
     def _save(self) -> None:
