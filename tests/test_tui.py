@@ -173,6 +173,13 @@ async def run(db):
                          timeout=25)
         check("overlay clears when the decompile finishes",
               not dec.loading and dec._cover_widget is None)
+        # Line-number gutter.
+        dec.scroll_to(0, 0, animate=False)
+        await pilot.pause(0.05)
+        row0 = "".join(seg.text for seg in dec.render_line(0))
+        check("pseudocode has a numbered gutter (line 1 first)",
+              dec._gutter > 0 and row0[:dec._gutter].strip() == "1",
+              f"gutter={dec._gutter} row0={row0[:10]!r}")
         await pilot.press("tab")  # back to disasm for the rest of the tests
         await wait_until(pilot, lambda: app._active == "disasm", timeout=10)
 

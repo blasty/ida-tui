@@ -52,6 +52,8 @@ _S_MATCH_CUR = Style(bgcolor="#b58900", color="black")  # the current match
 _S_NAME_MATCH = Style(bgcolor="#b58900", color="black")  # filter match in a name
 _S_WORD = Style(bgcolor="#264f78")  # identifier under the cursor
 _S_CELL = Style(reverse=True)      # the block cursor cell
+_S_LINENO = Style(color="grey37")             # pseudocode line-number gutter
+_S_LINENO_CUR = Style(color="grey66", bold=True)  # gutter on the cursor line
 
 
 @dataclass
@@ -272,6 +274,10 @@ class ColumnCursor:
         s, e = _word_bounds(plain, min(self.cursor_x, len(plain) - 1))
         return plain[s:e] or None
 
+    def _col_offset(self) -> int:
+        """Cells to the left of the code content (e.g. a line-number gutter)."""
+        return 0
+
     # -- mouse ------------------------------------------------------------- #
     def _after_cursor_move(self) -> None:
         pass
@@ -297,7 +303,8 @@ class ColumnCursor:
         if line >= self.total:
             return
         self.focus()
-        self._set_cursor_at(line, round(self.scroll_offset.x) + off.x)
+        col = round(self.scroll_offset.x) + off.x - self._col_offset()
+        self._set_cursor_at(line, max(col, 0))
         if event.chain >= 2:  # double-click == place cursor + follow
             self.post_message(FollowRequested(self))
 
@@ -798,6 +805,7 @@ class DecompView(SearchMixin, NavMixin, ColumnCursor, ScrollView, can_focus=True
         self.loaded_ea: int | None = None
         self._strips: list[Strip] = []
         self._texts: list[str] = []
+        self._gutter = 0  # line-number gutter width (cells)
         self._term = ""
         self._matches: list[int] = []
         self._ranges: dict[int, list[tuple[int, int]]] = {}
@@ -805,8 +813,11 @@ class DecompView(SearchMixin, NavMixin, ColumnCursor, ScrollView, can_focus=True
     def _line_plain(self, idx: int) -> str | None:
         return self._texts[idx] if 0 <= idx < len(self._texts) else None
 
+    def _col_offset(self) -> int:
+        return self._gutter
+
     def _hscroll(self) -> None:
-        width = self.size.width
+        width = max(self.size.width - self._gutter, 1)  # code viewport (past gutter)
         sx = round(self.scroll_offset.x)
         if self.cursor_x < sx:
             self.scroll_to(x=self.cursor_x, animate=False)
@@ -824,8 +835,10 @@ class DecompView(SearchMixin, NavMixin, ColumnCursor, ScrollView, can_focus=True
         self.cursor_x = cursor_x
         self._matches = []
         self._ranges = {}
+        # Gutter wide enough for the largest line number + a trailing space.
+        self._gutter = (len(str(total)) + 1) if total else 0
         maxw = max((s.cell_length for s in self._strips), default=0)
-        self.virtual_size = Size(maxw, total)
+        self.virtual_size = Size(maxw + self._gutter, total)
         self._clamp_x()
         if scroll_y >= 0:
             self._apply_scroll(min(scroll_y, max(total - 1, 0)), scroll_x)
@@ -861,9 +874,12 @@ class DecompView(SearchMixin, NavMixin, ColumnCursor, ScrollView, can_focus=True
 
     def render_line(self, y: int) -> Strip:
         width = self.size.width
+        gw = self._gutter
         top = round(self.scroll_offset.y)
         idx = top + y
         if idx >= len(self._strips):
+            if gw:
+                return Strip([Segment(" " * gw, _S_LINENO)]).adjust_cell_length(width)
             return Strip.blank(width)
         x = round(self.scroll_offset.x)
         base = self._strips[idx]
@@ -871,7 +887,13 @@ class DecompView(SearchMixin, NavMixin, ColumnCursor, ScrollView, can_focus=True
             base = _overlay_ranges(base, self._ranges[idx], self._match_style(idx))
         if idx == self.cursor:
             base = _cursor_decorate(base, self._texts[idx], self.cursor_x)
-        return base.crop(x, x + width).adjust_cell_length(width)
+        code_w = max(width - gw, 0)
+        code = base.crop(x, x + code_w).adjust_cell_length(code_w)
+        if gw <= 0:
+            return code
+        style = _S_LINENO_CUR if idx == self.cursor else _S_LINENO
+        gutter = Strip([Segment(f"{idx + 1:>{gw - 1}} ", style)])
+        return Strip.join([gutter, code]).adjust_cell_length(width)
 
     # -- navigation (mirrors DisasmView) ---------------------------------- #
     def _visible_height(self) -> int:
