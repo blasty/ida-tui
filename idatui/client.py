@@ -53,6 +53,11 @@ PROTOCOL_VERSION = "2025-06-18"
 # Tools that must NOT receive an injected ``database`` argument.
 SESSION_AGNOSTIC_TOOLS = frozenset({"idb_list", "idb_open", "int_convert"})
 
+# Substrings (lowercased) that identify a stale/invalid IDB session in a tool
+# error message. Verified against the live server: after a server restart the
+# old session id is gone and every call fails with "Session not found: <id>".
+_STALE_SESSION_MARKERS = ("session not found", "database is required")
+
 
 # --------------------------------------------------------------------------- #
 # Exceptions
@@ -251,10 +256,12 @@ class IDAClient:
         pool_size: int = 8,
         client_name: str = "idatui",
         client_version: str = "0.0.1",
+        auto_recover_session: bool = True,
     ):
         self.url = url
         self._db = db
         self.timeout = timeout
+        self.auto_recover_session = auto_recover_session
         self._transport = _Transport(url, max_retries=max_retries, pool_size=pool_size)
         self._client_info = {"name": client_name, "version": client_version}
 
@@ -434,26 +441,50 @@ class IDAClient:
         except (json.JSONDecodeError, TypeError):
             return text
 
+    def _prepare_args(self, tool: str, args: dict) -> tuple[dict, bool]:
+        """Return (arguments, db_was_injected). Never mutates the caller's dict."""
+        prepared = dict(args)
+        if tool in SESSION_AGNOSTIC_TOOLS or "database" in prepared:
+            return prepared, False
+        prepared["database"] = self.resolve_db()
+        return prepared, True
+
     def call_envelope(self, tool: str, *, timeout: float | None = None, **args) -> dict:
         """Call ``tool`` and return the full JSON-RPC envelope (for debugging)."""
-        self._inject_db(tool, args)
-        return self._rpc("tools/call", {"name": tool, "arguments": args}, timeout=timeout)
+        prepared, _ = self._prepare_args(tool, args)
+        return self._rpc(
+            "tools/call", {"name": tool, "arguments": prepared}, timeout=timeout
+        )
 
     def call(self, tool: str, *, timeout: float | None = None, **args) -> Any:
         """Call ``tool`` and return its payload (parsed JSON when possible).
 
         Raises IDAToolError on a hard tool failure. Soft/per-item errors (an
         ``error`` field with ``isError == false``) are returned as data.
-        """
-        envelope = self.call_envelope(tool, timeout=timeout, **args)
-        return self._extract_payload(tool, envelope.get("result", {}))
 
-    def _inject_db(self, tool: str, args: dict) -> None:
-        if tool in SESSION_AGNOSTIC_TOOLS:
-            return
-        if "database" in args:
-            return
-        args["database"] = self.resolve_db()
+        If ``auto_recover_session`` is set and the db was auto-injected, a stale
+        "Session not found" error (e.g. after a server restart) triggers exactly
+        one transparent recovery: drop the stale pin, re-resolve the session,
+        and retry. A db the caller pinned explicitly is never silently switched.
+        """
+        prepared, injected = self._prepare_args(tool, args)
+        envelope = self._rpc(
+            "tools/call", {"name": tool, "arguments": prepared}, timeout=timeout
+        )
+        try:
+            return self._extract_payload(tool, envelope.get("result", {}))
+        except IDAToolError as e:
+            if not (injected and self.auto_recover_session and _is_stale_session(e)):
+                raise
+            # The pinned IDB session vanished (server restart). Re-resolve the
+            # sole session and retry once. resolve_db() raises IDASessionError
+            # if zero/many sessions exist, so we never guess.
+            self.set_db(None)
+            prepared2, _ = self._prepare_args(tool, args)
+            envelope2 = self._rpc(
+                "tools/call", {"name": tool, "arguments": prepared2}, timeout=timeout
+            )
+            return self._extract_payload(tool, envelope2.get("result", {}))
 
     # -- session management ------------------------------------------------ #
     def list_sessions(self) -> list[Session]:
@@ -509,6 +540,11 @@ class IDAClient:
             if t["name"] == tool:
                 return t.get("inputSchema", {})
         raise IDAError(f"tool not found: {tool}")
+
+
+def _is_stale_session(e: IDAToolError) -> bool:
+    msg = e.message.lower()
+    return any(marker in msg for marker in _STALE_SESSION_MARKERS)
 
 
 def _first_text(result: dict) -> str | None:
