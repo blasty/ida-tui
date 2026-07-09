@@ -100,7 +100,11 @@ async def run(db):
         check("goto-bottom lands near end",
               view.cursor >= view.total - 1, f"cursor={view.cursor}/{view.total}")
 
-        # Filter round-trip.
+        # Filter round-trip. '/' is context-sensitive: it filters when the
+        # function table is focused (and searches when a code view is focused),
+        # so focus the table first.
+        table.focus()
+        await pilot.pause(0.1)
         await pilot.press("slash")
         await pilot.pause(0.1)
         for ch in "sub_1*":
@@ -148,6 +152,34 @@ async def run(db):
         check("shift+tab returns to disassembly",
               app._active == "disasm" and dis.display and not dec.display,
               f"active={app._active}")
+
+        # Vim-style search in the disassembly view.
+        line0 = dis.model.cached_line(0)
+        raw = (line0.text.split() or ["push"])[0] if line0 else "push"
+        term = "".join(c for c in raw if c.isalnum())[:4] or "push"
+        await pilot.press("slash")
+        await pilot.pause(0.2)
+        for ch in term:
+            await pilot.press(ch)
+        await pilot.press("enter")
+        await wait_until(pilot, lambda: bool(dis._matches), timeout=25)
+        check("search finds matches", len(dis._matches) > 0, f"term={term!r}")
+        check("cursor sits on a match", dis.cursor in dis._matches, f"cursor={dis.cursor}")
+        check("match substring highlighted",
+              bool(dis._ranges.get(dis.cursor)), str(dis._ranges.get(dis.cursor)))
+        prev = dis.cursor
+        await pilot.press("slash")
+        await pilot.pause(0.1)
+        await pilot.press("enter")
+        await pilot.pause(0.1)
+        check("'/' repeats to next match",
+              dis.cursor != prev and dis.cursor in dis._matches, f"cursor={dis.cursor}")
+        await pilot.press("question_mark")
+        await pilot.pause(0.1)
+        await pilot.press("enter")
+        await pilot.pause(0.1)
+        check("'?' repeats to previous match", dis.cursor in dis._matches,
+              f"cursor={dis.cursor}")
 
 
 def main(argv):

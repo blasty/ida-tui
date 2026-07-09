@@ -43,6 +43,8 @@ _S_INSN = Style(color="white")
 _S_MNEM = Style(color="cyan")
 _S_CURSOR = Style(bgcolor="grey30")
 _S_DIM = Style(color="grey42", italic=True)
+_S_MATCH = Style(bgcolor="#7a5c00")  # all search matches
+_S_MATCH_CUR = Style(bgcolor="#b58900", color="black")  # the current match
 
 
 @dataclass
@@ -52,10 +54,155 @@ class NavEntry:
     cursor: int = 0
 
 
+class SearchRequested(Message):
+    """A code view asks the app to open the search prompt."""
+
+    def __init__(self, view: "SearchMixin", direction: int) -> None:
+        super().__init__()
+        self.view = view
+        self.direction = direction
+
+
+def _overlay_ranges(strip: Strip, ranges: list[tuple[int, int]], style: Style) -> Strip:
+    """Return a copy of ``strip`` with ``style`` merged over the given cell
+    ranges (pseudocode/disasm are ASCII, so char offset == cell offset)."""
+    total = strip.cell_length
+    parts: list[Strip] = []
+    pos = 0
+    for a, b in ranges:
+        a = max(a, 0)
+        b = min(b, total)
+        if a >= b:
+            continue
+        if a > pos:
+            parts.append(strip.crop(pos, a))
+        parts.append(strip.crop(a, b).apply_style(style))
+        pos = b
+    if pos < total:
+        parts.append(strip.crop(pos, total))
+    return Strip.join(parts) if parts else strip
+
+
+class SearchMixin:
+    """Vim-style in-view search shared by the disasm and pseudocode views.
+
+    ``/`` searches forward, ``?`` backward; an empty query repeats the last one.
+    ``n``/``N`` jump next/prev. All matches are highlighted; the cursor lands on
+    the current match. Subclasses provide the line-text source via the three
+    ``_search_*`` hooks (disasm indexes lazily; pseudocode has text in hand).
+    """
+
+    # NOTE: Textual only merges BINDINGS from DOMNode subclasses, so a plain
+    # mixin's BINDINGS are ignored. Each view lists SEARCH_BINDINGS explicitly.
+    SEARCH_BINDINGS = [
+        Binding("slash", "search(1)", "Search"),
+        Binding("question_mark", "search(-1)", "Search ↑", show=False),
+        Binding("n", "search_repeat(1)", "Next", show=False),
+        Binding("N", "search_repeat(-1)", "Prev", show=False),
+    ]
+
+    # --- state (subclasses must init these in __init__) ---
+    _term: str
+    _matches: list[int]
+    _ranges: dict[int, list[tuple[int, int]]]
+
+    # --- hooks a subclass implements ---
+    def _search_line_count(self) -> int:
+        raise NotImplementedError
+
+    def _search_line_text(self, i: int) -> str | None:
+        raise NotImplementedError
+
+    def _search_ensure(self, done) -> None:
+        """Ensure all line texts are available, then call ``done()`` on the UI
+        thread. Default: assume ready."""
+        done()
+
+    # --- actions ---
+    def action_search(self, direction: int) -> None:
+        self.post_message(SearchRequested(self, direction))
+
+    def action_search_repeat(self, direction: int) -> None:
+        self.search_repeat(direction)
+
+    # --- driven by the app's prompt ---
+    def set_search(self, term: str, direction: int) -> None:
+        self._term = term
+        self._ci = term.islower()  # smartcase
+        self._pending_dir = direction
+        self._search_ensure(self._after_search_ready)
+
+    def _after_search_ready(self) -> None:
+        self._compute_matches()
+        self._app_status(f"/{self._term}/  {len(self._matches)} matches")
+        self.refresh()
+        if self._matches:
+            self.search_repeat(self._pending_dir, include_current=True)
+
+    def _compute_matches(self) -> None:
+        term = self._term
+        needle = term.lower() if getattr(self, "_ci", True) else term
+        matches: list[int] = []
+        ranges: dict[int, list[tuple[int, int]]] = {}
+        for i in range(self._search_line_count()):
+            s = self._search_line_text(i)
+            if not s:
+                continue
+            hay = s.lower() if getattr(self, "_ci", True) else s
+            pos, rs = 0, []
+            while True:
+                j = hay.find(needle, pos)
+                if j < 0:
+                    break
+                rs.append((j, j + len(term)))
+                pos = j + len(term)
+            if rs:
+                matches.append(i)
+                ranges[i] = rs
+        self._matches = matches
+        self._ranges = ranges
+
+    def search_repeat(self, direction: int, include_current: bool = False) -> None:
+        if not getattr(self, "_term", ""):
+            return
+        if not self._matches:
+            self._app_status(f"no matches for /{self._term}/")
+            return
+        cur = self.cursor
+        if direction >= 0:
+            nxt = next((m for m in self._matches
+                        if (m >= cur if include_current else m > cur)), self._matches[0])
+        else:
+            nxt = next((m for m in reversed(self._matches) if m < cur), self._matches[-1])
+        self._goto_line(nxt)
+        k = self._matches.index(nxt) + 1
+        self._app_status(f"/{self._term}/  {k}/{len(self._matches)}  line {nxt}")
+
+    def _goto_line(self, idx: int) -> None:
+        total = self._search_line_count()
+        self.cursor = max(0, min(total - 1, idx))
+        self.scroll_to(y=max(self.cursor - self._visible_height() // 2, 0), animate=False)
+        self.refresh()
+
+    def clear_search(self) -> None:
+        self._term = ""
+        self._matches = []
+        self._ranges = {}
+        self.refresh()
+
+    def _match_style(self, idx: int) -> Style:
+        return _S_MATCH_CUR if idx == self.cursor else _S_MATCH
+
+    def _app_status(self, text: str) -> None:
+        app = self.app
+        if hasattr(app, "_status"):
+            app._status(text)
+
+
 # --------------------------------------------------------------------------- #
 # Virtualized disassembly view
 # --------------------------------------------------------------------------- #
-class DisasmView(ScrollView, can_focus=True):
+class DisasmView(SearchMixin, ScrollView, can_focus=True):
     """A line-virtualized disassembly listing for a single function."""
 
     BINDINGS = [
@@ -68,6 +215,7 @@ class DisasmView(ScrollView, can_focus=True):
         Binding("home", "goto_top", "Top", show=False),
         Binding("G,end", "goto_bottom", "Bottom", show=False),
         Binding("tab,shift+tab", "app.toggle_view", "Pseudocode", priority=True),
+        *SearchMixin.SEARCH_BINDINGS,
     ]
 
     cursor = reactive(0, repaint=False)
@@ -85,6 +233,10 @@ class DisasmView(ScrollView, can_focus=True):
         self.model: DisasmModel | None = None
         self.total = 0
         self._name = ""
+        self._term = ""
+        self._matches: list[int] = []
+        self._ranges: dict[int, list[tuple[int, int]]] = {}
+        self._search_texts: list[str] | None = None
 
     # -- public API -------------------------------------------------------- #
     def load(self, model: DisasmModel, name: str, cursor: int = 0) -> None:
@@ -93,7 +245,49 @@ class DisasmView(ScrollView, can_focus=True):
         self.total = 0
         self.cursor = cursor
         self.virtual_size = Size(0, 0)
+        self._matches = []
+        self._ranges = {}
+        self._search_texts = None
         self._prime()
+
+    # -- search hooks ------------------------------------------------------ #
+    @staticmethod
+    def _fmt(line) -> str:  # type: ignore[no-untyped-def]
+        s = f"{line.ea:08X}  "
+        if line.label:
+            s += f"{line.label}: "
+        return s + line.text
+
+    def _search_line_count(self) -> int:
+        return self.total
+
+    def _search_line_text(self, i: int) -> str | None:
+        t = self._search_texts
+        return t[i] if t is not None and 0 <= i < len(t) else None
+
+    def _search_ensure(self, done) -> None:
+        if self._search_texts is not None:
+            done()
+            return
+        self._app_status(f"/{self._term}/  indexing {self.total} lines…")
+        self._index_for_search(done)
+
+    @work(thread=True, exclusive=True, group="search-index")
+    def _index_for_search(self, done) -> None:
+        model = self.model
+        if model is None:
+            self.app.call_from_thread(done)
+            return
+        texts: list[str] = []
+        off, total = 0, self.total
+        while off < total:
+            lines = model.lines(off, DisasmModel.BLOCK, prefetch=False)
+            if not lines:
+                break
+            texts.extend(self._fmt(ln) for ln in lines)
+            off += len(lines)
+        self._search_texts = texts
+        self.app.call_from_thread(done)
 
     @work(thread=True, exclusive=True, group="disasm-prime")
     def _prime(self) -> None:
@@ -142,6 +336,8 @@ class DisasmView(ScrollView, can_focus=True):
         if rest:
             segs.append(Segment(" " + rest, _join(base, _S_INSN)))
         strip = Strip(segs)
+        if idx in self._ranges:
+            strip = _overlay_ranges(strip, self._ranges[idx], self._match_style(idx))
         return strip.adjust_cell_length(width, _join(base, _S_INSN) or _S_INSN)
 
     def _ensure_window(self, top: int) -> None:
@@ -231,7 +427,7 @@ def _refresh_lines(view, *indices: int) -> None:
 # --------------------------------------------------------------------------- #
 # Decompiler (pseudocode) view
 # --------------------------------------------------------------------------- #
-class DecompView(ScrollView, can_focus=True):
+class DecompView(SearchMixin, ScrollView, can_focus=True):
     """Read-only, line-virtualized Hex-Rays pseudocode with Pygments C
     highlighting. Lines are highlighted once at load and cached as Strips, so
     cursor movement and scrolling are O(1) (no TextArea/tree-sitter overhead).
@@ -247,6 +443,7 @@ class DecompView(ScrollView, can_focus=True):
         Binding("pageup,b", "page(-1)", "PgUp", show=False),
         Binding("home", "goto_top", "Top", show=False),
         Binding("G,end", "goto_bottom", "Bottom", show=False),
+        *SearchMixin.SEARCH_BINDINGS,
     ]
 
     cursor = reactive(0, repaint=False)
@@ -255,14 +452,20 @@ class DecompView(ScrollView, can_focus=True):
         super().__init__(id="decomp")
         self.loaded_ea: int | None = None
         self._strips: list[Strip] = []
-        self._widths: list[int] = []
+        self._texts: list[str] = []
+        self._term = ""
+        self._matches: list[int] = []
+        self._ranges: dict[int, list[tuple[int, int]]] = {}
 
     def show(self, ea: int, text: str) -> None:
-        self._strips = [Strip(segs) for segs in highlight_c(text)]
-        self._widths = [s.cell_length for s in self._strips]
+        seglists = highlight_c(text)
+        self._strips = [Strip(segs) for segs in seglists]
+        self._texts = ["".join(seg.text for seg in segs) for segs in seglists]
         self.loaded_ea = ea
         self.cursor = 0
-        maxw = max(self._widths, default=0)
+        self._matches = []
+        self._ranges = {}
+        maxw = max((s.cell_length for s in self._strips), default=0)
         self.virtual_size = Size(maxw, len(self._strips))
         self.scroll_to(0, 0, animate=False)
         self.refresh()
@@ -271,6 +474,13 @@ class DecompView(ScrollView, can_focus=True):
     def total(self) -> int:
         return len(self._strips)
 
+    # -- search hooks ------------------------------------------------------ #
+    def _search_line_count(self) -> int:
+        return len(self._strips)
+
+    def _search_line_text(self, i: int) -> str | None:
+        return self._texts[i] if 0 <= i < len(self._texts) else None
+
     def render_line(self, y: int) -> Strip:
         width = self.size.width
         top = round(self.scroll_offset.y)
@@ -278,7 +488,10 @@ class DecompView(ScrollView, can_focus=True):
         if idx >= len(self._strips):
             return Strip.blank(width)
         x = round(self.scroll_offset.x)
-        strip = self._strips[idx].crop(x, x + width).adjust_cell_length(width)
+        base = self._strips[idx]
+        if idx in self._ranges:
+            base = _overlay_ranges(base, self._ranges[idx], self._match_style(idx))
+        strip = base.crop(x, x + width).adjust_cell_length(width)
         if idx == self.cursor:
             strip = strip.apply_style(_S_CURSOR)
         return strip
@@ -353,6 +566,7 @@ class IdaTui(App):
     #func-filter { dock: top; }
     DisasmView { width: 1fr; padding: 0 1; }
     DecompView { width: 1fr; }
+    #search { dock: bottom; height: 1; }
     #status { dock: bottom; height: 1; background: $panel; color: $text; padding: 0 1; }
     """
 
@@ -379,6 +593,7 @@ class IdaTui(App):
         self._cur_filter: str | None = None
         self._active = "disasm"  # or "decomp"
         self._cur: NavEntry | None = None
+        self._search_ctx: tuple[object | None, int] = (None, 1)
 
     # -- layout ------------------------------------------------------------ #
     def compose(self) -> ComposeResult:
@@ -390,6 +605,10 @@ class IdaTui(App):
             dv = DecompView()
             dv.display = False
             yield dv
+        si = Input(id="search")
+        si.display = False
+        si.can_focus = False
+        yield si
         yield Static("connecting…", id="status")
         yield Footer()
 
@@ -519,11 +738,29 @@ class IdaTui(App):
             self.query_one("#func-table", DataTable).focus()
 
     # -- input submit (filter / goto) ------------------------------------- #
+    def on_search_requested(self, msg: SearchRequested) -> None:
+        self._search_ctx = (msg.view, msg.direction)
+        inp = self.query_one("#search", Input)
+        inp.placeholder = "search  /" if msg.direction >= 0 else "search backward  ?"
+        inp.can_focus = True
+        inp.display = True
+        inp.value = ""
+        inp.focus()
+
     def on_input_submitted(self, event: Input.Submitted) -> None:
         value = event.value.strip()
         inp = event.input
         inp.display = False
         inp.can_focus = False
+        if inp.id == "search":
+            view, direction = self._search_ctx
+            if view is not None:
+                if value:
+                    view.set_search(value, direction)
+                else:
+                    view.search_repeat(direction)
+                view.focus()
+            return
         if getattr(self, "_goto_mode", False):
             self._goto_mode = False
             inp.placeholder = "filter (glob, e.g. sub_*)  —  Enter to apply"
