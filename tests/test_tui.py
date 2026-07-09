@@ -13,7 +13,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from idatui.app import DecompView, DisasmView, FunctionsPanel, IdaTui  # noqa: E402
-from textual.widgets import DataTable, Static  # noqa: E402
+from textual.widgets import DataTable, Input, Static  # noqa: E402
 
 PASS = FAIL = 0
 
@@ -180,6 +180,24 @@ async def run(db):
         await pilot.pause(0.1)
         check("'?' repeats to previous match", dis.cursor in dis._matches,
               f"cursor={dis.cursor}")
+
+        # Incremental search + visible bar + Esc cancel.
+        si = app.query_one("#search", Input)
+        status = app.query_one("#status", Static)
+        await pilot.press("slash")
+        await pilot.pause(0.2)
+        check("search bar visible, status hidden (no overlap)",
+              si.display and not status.display, f"si={si.display} status={status.display}")
+        for ch in term:
+            await pilot.press(ch)
+            await pilot.pause(0.1)
+        check("matches highlight incrementally (before Enter)",
+              len(dis._matches) > 0 and si.value == term, f"val={si.value!r}")
+        await pilot.press("escape")
+        await pilot.pause(0.2)
+        check("Esc cancels: status restored, matches cleared",
+              status.display and not si.display and not dis._matches,
+              f"status={status.display} si={si.display} m={len(dis._matches)}")
 
 
 def main(argv):

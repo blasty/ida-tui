@@ -125,19 +125,67 @@ class SearchMixin:
     def action_search_repeat(self, direction: int) -> None:
         self.search_repeat(direction)
 
-    # --- driven by the app's prompt ---
-    def set_search(self, term: str, direction: int) -> None:
+    # --- driven by the app's prompt (incremental / as-you-type) ---
+    def search_begin(self, direction: int) -> None:
+        self._search_origin = self.cursor
+        self._search_dir = direction
+
+    def search_update(self, term: str) -> None:
+        """Live preview: highlight all matches and jump from the origin."""
+        if not term:
+            self._term = ""
+            self._matches = []
+            self._ranges = {}
+            self.cursor = getattr(self, "_search_origin", self.cursor)
+            self.refresh()
+            self._app_status("/")
+            return
         self._term = term
         self._ci = term.islower()  # smartcase
-        self._pending_dir = direction
-        self._search_ensure(self._after_search_ready)
+        self._search_ensure(self._after_incremental)
 
-    def _after_search_ready(self) -> None:
+    def _after_incremental(self) -> None:
         self._compute_matches()
-        self._app_status(f"/{self._term}/  {len(self._matches)} matches")
         self.refresh()
-        if self._matches:
-            self.search_repeat(self._pending_dir, include_current=True)
+        self._jump_from(getattr(self, "_search_origin", 0),
+                        getattr(self, "_search_dir", 1), include_current=True)
+        n = len(self._matches)
+        self._app_status(f"/{self._term}   {n} match{'' if n == 1 else 'es'}")
+
+    def _jump_from(self, origin: int, direction: int, include_current: bool) -> None:
+        if not self._matches:
+            return
+        if direction >= 0:
+            nxt = next((m for m in self._matches
+                        if (m >= origin if include_current else m > origin)),
+                       self._matches[0])
+        else:
+            nxt = next((m for m in reversed(self._matches)
+                        if (m <= origin if include_current else m < origin)),
+                       self._matches[-1])
+        self._goto_line(nxt)
+
+    def search_commit(self) -> None:
+        if self._term:
+            self._last_term = self._term
+
+    def search_cancel(self) -> None:
+        self._term = ""
+        self._matches = []
+        self._ranges = {}
+        self.cursor = getattr(self, "_search_origin", self.cursor)
+        self.scroll_to(y=max(self.cursor - self._visible_height() // 2, 0), animate=False)
+        self.refresh()
+
+    def repeat_last(self, direction: int) -> None:
+        term = getattr(self, "_last_term", "")
+        if not term:
+            self._app_status("no previous search")
+            return
+        self._term = term
+        self._ci = term.islower()
+        self._search_ensure(lambda: (self._compute_matches(), self.refresh(),
+                                     self.search_repeat(direction)))
 
     def _compute_matches(self) -> None:
         term = self._term
@@ -566,7 +614,10 @@ class IdaTui(App):
     #func-filter { dock: top; }
     DisasmView { width: 1fr; padding: 0 1; }
     DecompView { width: 1fr; }
-    #search { dock: bottom; height: 1; }
+    #search {
+        dock: bottom; height: 1; border: none; padding: 0 1;
+        background: $primary-darken-2; color: $text;
+    }
     #status { dock: bottom; height: 1; background: $panel; color: $text; padding: 0 1; }
     """
 
@@ -740,12 +791,38 @@ class IdaTui(App):
     # -- input submit (filter / goto) ------------------------------------- #
     def on_search_requested(self, msg: SearchRequested) -> None:
         self._search_ctx = (msg.view, msg.direction)
+        msg.view.search_begin(msg.direction)
+        self.query_one("#status", Static).display = False  # give the row to search
         inp = self.query_one("#search", Input)
-        inp.placeholder = "search  /" if msg.direction >= 0 else "search backward  ?"
+        inp.placeholder = "type to search…  Enter=keep  Esc=cancel"
         inp.can_focus = True
         inp.display = True
         inp.value = ""
         inp.focus()
+
+    def on_input_changed(self, event: Input.Changed) -> None:
+        if event.input.id != "search":
+            return
+        view, _ = self._search_ctx
+        if view is not None:
+            view.search_update(event.value)
+
+    def _end_search(self, cancel: bool = False) -> None:
+        inp = self.query_one("#search", Input)
+        inp.display = False
+        inp.can_focus = False
+        self.query_one("#status", Static).display = True
+        view, _ = self._search_ctx
+        if view is not None:
+            if cancel:
+                view.search_cancel()
+            view.focus()
+
+    def on_key(self, event) -> None:  # type: ignore[no-untyped-def]
+        if event.key == "escape" and self.query_one("#search", Input).display:
+            event.stop()
+            event.prevent_default()
+            self._end_search(cancel=True)
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
         value = event.value.strip()
@@ -756,10 +833,10 @@ class IdaTui(App):
             view, direction = self._search_ctx
             if view is not None:
                 if value:
-                    view.set_search(value, direction)
+                    view.search_commit()
                 else:
-                    view.search_repeat(direction)
-                view.focus()
+                    view.repeat_last(direction)
+            self._end_search()
             return
         if getattr(self, "_goto_mode", False):
             self._goto_mode = False
