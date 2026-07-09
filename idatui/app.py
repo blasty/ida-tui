@@ -1501,7 +1501,18 @@ class IdaTui(App):
         focus = subj_name if self._looks_like_symbol(subj_name) else None
         if focus is None and fn is not None and fn.addr == subj:
             focus = fn.name
-        items = [(x.frm, f"{x.frm:08X}  {x.fn_name or '?':<24}  [{x.type}]") for x in xr]
+        items = []
+        for x in xr:
+            if x.fn_name:
+                # location = function + offset, so multiple sites in the same
+                # function are distinguishable (sub_2300+0x1c, not just sub_2300).
+                off = (x.frm - x.fn_addr) if x.fn_addr is not None else 0
+                loc = f"{x.fn_name}+{off:#x}" if off else x.fn_name
+            else:
+                # not inside a function: name the section it lives in (a GOT/reloc
+                # data slot or a loose thunk) instead of a bare '?'.
+                loc = self.program.section_of(x.frm) or "<no seg>"
+            items.append((x.frm, f"{x.frm:08X}  {loc:<26}  [{x.type}]"))
         self.app.call_from_thread(self._present_xrefs, label, items, focus)
 
     def _present_xrefs(self, label: str, items: list[tuple[int, str]],

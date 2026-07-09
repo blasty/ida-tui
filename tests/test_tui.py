@@ -453,6 +453,49 @@ async def run(db):
                 check("follows the symbol under the cursor",
                       app._cur.ea == want, f"cur={app._cur.ea:#x} want={want:#x}")
 
+        # Xref labels: function + offset (so several sites in one function are
+        # distinguishable) and a section name instead of a bare '?' for a
+        # reference that isn't inside a function.
+        from collections import Counter, defaultdict
+        multi = None
+        for cand in app.program.functions().all_loaded()[:200]:
+            callers = Counter(x.fn_addr for x in app.program.xrefs_to(cand.addr)
+                              if x.fn_name)
+            if any(n >= 2 for n in callers.values()):
+                multi = cand
+                break
+        if multi is not None:
+            table.focus()
+            await pilot.press("g")
+            await pilot.pause(0.1)
+            for ch in multi.name:
+                await pilot.press(ch)
+            await pilot.press("enter")
+            await wait_until(pilot, lambda: app._cur and app._cur.ea == multi.addr, 20)
+            if app._active != "disasm":
+                await pilot.press("tab")
+            dis.focus()
+            dis.cursor, dis.cursor_x = 0, 0
+            dis.refresh()
+            await pilot.press("x")
+            await wait_until(pilot, lambda: isinstance(app.screen, XrefsScreen), 25)
+            labels = [t for _, t in app.screen._items]
+            # location column = the text between the leading addr and the [type]
+            locs = [l.split("[")[0].split(None, 1)[1].strip() for l in labels]
+            byfn = defaultdict(set)
+            for x in locs:
+                if "+0x" in x:
+                    nm, off = x.split("+0x", 1)
+                    byfn[nm].add(off)
+            check("xref labels distinguish multiple sites in a function by offset",
+                  any(len(offs) >= 2 for offs in byfn.values()), f"locs={locs[:8]}")
+            check("no xref label is a bare '?'",
+                  all(x != "?" for x in locs), f"locs={locs[:8]}")
+            await pilot.press("escape")
+            await wait_until(pilot, lambda: not isinstance(app.screen, XrefsScreen), 25)
+        else:
+            check("found a function with multiple same-caller xrefs", False)
+
         # Mouse: single click places the cursor; double-click follows.
         table.focus()
         table.move_cursor(row=biggest_i)

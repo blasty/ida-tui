@@ -376,6 +376,7 @@ class Program:
         self._disasm: dict[int, DisasmModel] = {}
         self._decomp: dict[int, tuple[Decompilation, int]] = {}
         self._name_gen = 0  # bumped on rename; invalidates stale name caches
+        self._sections: list[tuple[int, int, str]] | None = None
         self._lock = threading.Lock()
 
     # -- prefetch plumbing ------------------------------------------------- #
@@ -396,6 +397,39 @@ class Program:
                 idx = FunctionIndex(self, filter)
                 self._indices[filter] = idx
             return idx
+
+    # -- sections / segments ---------------------------------------------- #
+    def sections(self) -> list[tuple[int, int, str]]:
+        """Sorted, non-overlapping [(start, end, name)] segment map (cached).
+        Fetched once from ``survey_binary`` (~0.7s) on first use."""
+        if self._sections is not None:
+            return self._sections
+        secs: list[tuple[int, int, str]] = []
+        try:
+            sb = self.client.call("survey_binary")
+            for s in (sb.get("segments", []) if isinstance(sb, dict) else []):
+                try:
+                    secs.append((_as_int(s["start"]), _as_int(s["end"]),
+                                 s.get("name", "")))
+                except (KeyError, ValueError, TypeError):
+                    continue
+        except Exception:  # noqa: BLE001 -- best-effort; callers handle None
+            secs = []
+        secs.sort()
+        with self._lock:
+            self._sections = secs
+        return secs
+
+    def section_of(self, ea: int) -> str | None:
+        """Name of the segment/section containing ``ea`` (e.g. '.got', '.text',
+        '.data.rel.ro', 'LOAD'), or None if unmapped."""
+        secs = self.sections()
+        if not secs:
+            return None
+        i = bisect.bisect_right([s[0] for s in secs], ea) - 1
+        if 0 <= i < len(secs) and secs[i][0] <= ea < secs[i][1]:
+            return secs[i][2]
+        return None
 
     # -- disassembly ------------------------------------------------------- #
     def disasm(self, ea: int, name: str | None = None) -> DisasmModel:
