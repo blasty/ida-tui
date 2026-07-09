@@ -592,6 +592,43 @@ async def run(db):
             check("rename reverted cleanly",
                   rr.get("summary", {}).get("ok", 0) == 1, str(rr.get("summary")))
 
+            # A Hex-Rays goto label has no rename API; pressing 'n' on one must be
+            # refused up front with a clear message, not open a prompt that then
+            # fails with a misleading 'local variable not found'.
+            def _find_label():
+                for i, t in enumerate(dec._texts):
+                    mm = re.search(r"\bLABEL_\d+\b", t)
+                    if mm:
+                        return i, mm.start(), mm.group(0)
+                return None
+            lab = _find_label()
+            if lab is None:  # current func has none; main reliably has labels
+                await pilot.press("g")
+                await pilot.pause(0.1)
+                for ch in "main":
+                    await pilot.press(ch)
+                await pilot.press("enter")
+                await wait_until(pilot, lambda: app._cur and app._cur.name == "main", 20)
+                if app._active != "decomp":
+                    await pilot.press("tab")
+                await wait_until(pilot, lambda: dec.loaded_ea == app._cur.ea, 25)
+                lab = _find_label()
+            if lab is not None:
+                li, lc, ltok = lab
+                dec.focus()
+                dec.cursor, dec.cursor_x = li, lc + 1
+                dec.refresh()
+                await pilot.pause(0.05)
+                await pilot.press("n")
+                await pilot.pause(0.1)
+                ri2 = app.query_one("#rename", Input)
+                st = str(app.query_one("#status").render())
+                check("renaming a pseudocode label is refused with a clear message",
+                      (not ri2.display) and "label" in st.lower(),
+                      f"display={ri2.display} status={st!r}")
+            else:
+                check("found a pseudocode label to test", False, "no LABEL_ found")
+
             # Decompiler follow of a name NOT in refs (the function's own name).
             await pilot.press("g")
             await pilot.pause(0.1)

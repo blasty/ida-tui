@@ -1437,9 +1437,28 @@ class IdaTui(App):
             self._goto_ea(addr, push=True)
 
     # -- rename ------------------------------------------------------------ #
+    @staticmethod
+    def _is_pseudocode_label(view, name: str) -> bool:
+        """True if ``name`` is a Hex-Rays goto label in ``view``. The rename tool
+        has no label category (only func/global/local/stack), so renaming one
+        fails with a misleading 'local variable not found'; detect it up front
+        and explain instead. A label is the default ``LABEL_n`` or any token used
+        as a ``goto`` target."""
+        if not isinstance(view, DecompView):
+            return False
+        if re.fullmatch(r"LABEL_\d+", name):
+            return True
+        body = "\n".join(getattr(view, "_texts", []) or [])
+        return re.search(rf"\bgoto\s+{re.escape(name)}\b", body) is not None
+
     def on_rename_requested(self, msg: RenameRequested) -> None:
         if not msg.name:
             self._status("nothing to rename under the cursor")
+            return
+        if self._is_pseudocode_label(msg.view, msg.name):
+            self._status(
+                f"can't rename pseudocode label '{msg.name}' "
+                "(Hex-Rays goto labels aren't renamable via the API)")
             return
         self._rename_ctx = (msg.view, msg.name)
         self.query_one("#status", Static).display = False
