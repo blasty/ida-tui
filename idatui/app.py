@@ -301,6 +301,31 @@ class ColumnCursor:
         if event.chain >= 2:  # double-click == place cursor + follow
             self.post_message(FollowRequested(self))
 
+    # -- paging (keeps the cursor at the same viewport-relative row) ------- #
+    def _page_scroll(self, lines: int) -> None:
+        total = self.total
+        if total <= 0:
+            return
+        height = self._visible_height()
+        top = round(self.scroll_offset.y)
+        max_top = max(total - height, 0)
+        new_top = max(0, min(max_top, top + lines))
+        delta = new_top - top
+        if delta == 0:  # already at an edge: jump the cursor to the extreme
+            self.cursor = (total - 1) if lines > 0 else 0
+        else:  # move cursor by the same delta -> relative row preserved
+            self.cursor = max(0, min(total - 1, self.cursor + delta))
+        self._clamp_x()
+        self.scroll_to(y=new_top, animate=False)
+        self.refresh()
+        self._after_cursor_move()
+
+    def action_page(self, direction: int) -> None:
+        self._page_scroll(direction * self._visible_height())
+
+    def action_half_page(self, direction: int) -> None:
+        self._page_scroll(direction * (self._visible_height() // 2))
+
 
 class SearchMixin:
     """Vim-style in-view search shared by the disasm and pseudocode views.
@@ -698,12 +723,6 @@ class DisasmView(SearchMixin, NavMixin, ColumnCursor, ScrollView, can_focus=True
     def action_cursor_up(self) -> None:
         self._move(-1)
 
-    def action_half_page(self, direction: int) -> None:
-        self._move(direction * (self._visible_height() // 2))
-
-    def action_page(self, direction: int) -> None:
-        self._move(direction * self._visible_height())
-
     def action_goto_top(self) -> None:
         self._move(-self.total)
 
@@ -868,12 +887,6 @@ class DecompView(SearchMixin, NavMixin, ColumnCursor, ScrollView, can_focus=True
 
     def action_cursor_up(self) -> None:
         self._move(-1)
-
-    def action_half_page(self, direction: int) -> None:
-        self._move(direction * (self._visible_height() // 2))
-
-    def action_page(self, direction: int) -> None:
-        self._move(direction * self._visible_height())
 
     def action_goto_top(self) -> None:
         self._move(-len(self._strips))

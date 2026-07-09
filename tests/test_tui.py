@@ -501,6 +501,27 @@ async def run(db):
               round(dis.scroll_offset.y) == want_sy and dis.cursor == want_cur,
               f"scroll={round(dis.scroll_offset.y)} (want {want_sy}) cursor={dis.cursor}")
 
+        # PageUp/Down keep the cursor at the same viewport-relative row.
+        await goto_name(fa.name)
+        await wait_until(pilot, lambda: dis.total > 100 and app._cur.ea == fa.addr, timeout=20)
+        if app._active != "disasm":
+            await pilot.press("tab")
+        await pilot.pause(0.2)
+        for _ in range(6):
+            await pilot.press("j")
+        await pilot.pause(0.1)
+        rel = dis.cursor - round(dis.scroll_offset.y)
+        await pilot.press("pagedown")
+        await pilot.pause(0.1)
+        check("PageDown preserves the viewport-relative row",
+              dis.cursor - round(dis.scroll_offset.y) == rel,
+              f"rel={dis.cursor - round(dis.scroll_offset.y)} want={rel}")
+        await pilot.press("pageup")
+        await pilot.pause(0.1)
+        check("PageUp preserves the viewport-relative row",
+              dis.cursor - round(dis.scroll_offset.y) == rel,
+              f"rel={dis.cursor - round(dis.scroll_offset.y)} want={rel}")
+
 
 def main(argv):
     db = None
