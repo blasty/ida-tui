@@ -50,6 +50,8 @@ _S_DIM = Style(color="grey42", italic=True)
 _S_MATCH = Style(bgcolor="#7a5c00")  # all search matches
 _S_MATCH_CUR = Style(bgcolor="#b58900", color="black")  # the current match
 _S_NAME_MATCH = Style(bgcolor="#b58900", color="black")  # filter match in a name
+_S_WORD = Style(bgcolor="#264f78")  # identifier under the cursor
+_S_CELL = Style(reverse=True)      # the block cursor cell
 
 
 @dataclass
@@ -118,6 +120,138 @@ def _overlay_ranges(strip: Strip, ranges: list[tuple[int, int]], style: Style) -
     if pos < total:
         parts.append(strip.crop(pos, total))
     return Strip.join(parts) if parts else strip
+
+
+def _word_bounds(text: str, x: int) -> tuple[int, int]:
+    """[start, end) of the identifier at column ``x`` (empty span if none)."""
+    n = len(text)
+    if n == 0:
+        return (0, 0)
+    x = max(0, min(x, n - 1))
+    isw = lambda c: c.isalnum() or c == "_"  # noqa: E731
+    if not isw(text[x]):
+        return (x, x)
+    s = x
+    while s > 0 and isw(text[s - 1]):
+        s -= 1
+    e = x
+    while e < n and isw(text[e]):
+        e += 1
+    return (s, e)
+
+
+def _overlay_over(strip: Strip, ranges: list[tuple[int, int]], style: Style) -> Strip:
+    """Like _overlay_ranges but ``style`` OVERRIDES the existing cell styles
+    (used for the cursor cell / word, which must win over the line background)."""
+    total = strip.cell_length
+    parts: list[Strip] = []
+    pos = 0
+    for a, b in ranges:
+        a, b = max(a, 0), min(b, total)
+        if a >= b:
+            continue
+        if a > pos:
+            parts.append(strip.crop(pos, a))
+        mid = strip.crop(a, b)
+        parts.append(Strip([Segment(s.text, (s.style or Style()) + style) for s in mid]))
+        pos = b
+    if pos < total:
+        parts.append(strip.crop(pos, total))
+    return Strip.join(parts) if parts else strip
+
+
+def _cursor_decorate(strip: Strip, plain: str, x: int) -> Strip:
+    """Add the cursor-line background, the word-under-cursor highlight, and the
+    block cursor cell at column ``x``."""
+    total = strip.cell_length
+    strip = strip.apply_style(_S_CURSOR)  # line background (fills empty bg)
+    if total > 0:
+        xx = max(0, min(x, total - 1))
+        ws, we = _word_bounds(plain, xx)
+        if we > ws:
+            strip = _overlay_over(strip, [(ws, we)], _S_WORD)
+        strip = _overlay_over(strip, [(xx, xx + 1)], _S_CELL)
+    return strip
+
+
+class ColumnCursor:
+    """Horizontal (column) cursor for the code views: h/l/←/→, w/b word hops,
+    0/$ line ends. Requires the view to define the ``cursor_x`` reactive and the
+    ``_line_plain(idx)`` / ``_hscroll()`` hooks.
+    """
+
+    COL_BINDINGS = [
+        Binding("l,right", "col_right", "→", show=False),
+        Binding("h,left", "col_left", "←", show=False),
+        Binding("w", "col_word(1)", "word→", show=False),
+        Binding("b", "col_word(-1)", "word←", show=False),
+        Binding("0", "col_home", "bol", show=False),
+        Binding("dollar_sign", "col_end", "eol", show=False),
+    ]
+
+    def _line_plain(self, idx: int) -> str | None:
+        raise NotImplementedError
+
+    def _hscroll(self) -> None:
+        pass
+
+    def _clamp_x(self) -> None:
+        plain = self._line_plain(self.cursor)
+        if plain is not None:
+            self.cursor_x = min(self.cursor_x, max(len(plain) - 1, 0))
+
+    def _move_x(self, dx: int) -> None:
+        plain = self._line_plain(self.cursor) or ""
+        self.cursor_x = max(0, min(max(len(plain) - 1, 0), self.cursor_x + dx))
+        self._hscroll()
+        _refresh_lines(self, self.cursor)
+
+    def action_col_left(self) -> None:
+        self._move_x(-1)
+
+    def action_col_right(self) -> None:
+        self._move_x(1)
+
+    def action_col_home(self) -> None:
+        self.cursor_x = 0
+        self._hscroll()
+        _refresh_lines(self, self.cursor)
+
+    def action_col_end(self) -> None:
+        plain = self._line_plain(self.cursor) or ""
+        self.cursor_x = max(len(plain) - 1, 0)
+        self._hscroll()
+        _refresh_lines(self, self.cursor)
+
+    def action_col_word(self, direction: int) -> None:
+        plain = self._line_plain(self.cursor) or ""
+        n = len(plain)
+        if n == 0:
+            return
+        isw = lambda c: c.isalnum() or c == "_"  # noqa: E731
+        i = max(0, min(self.cursor_x, n - 1))
+        if direction > 0:
+            while i < n and isw(plain[i]):
+                i += 1
+            while i < n and not isw(plain[i]):
+                i += 1
+            self.cursor_x = min(i, n - 1)
+        else:
+            i -= 1
+            while i > 0 and not isw(plain[i]):
+                i -= 1
+            while i > 0 and isw(plain[i - 1]):
+                i -= 1
+            self.cursor_x = max(i, 0)
+        self._hscroll()
+        _refresh_lines(self, self.cursor)
+
+    def word_under_cursor(self) -> str | None:
+        plain = self._line_plain(self.cursor)
+        if not plain:
+            return None
+        s, e = _word_bounds(plain, min(self.cursor_x, len(plain) - 1))
+        return plain[s:e] or None
 
 
 class SearchMixin:
@@ -287,7 +421,7 @@ class SearchMixin:
 # --------------------------------------------------------------------------- #
 # Virtualized disassembly view
 # --------------------------------------------------------------------------- #
-class DisasmView(SearchMixin, NavMixin, ScrollView, can_focus=True):
+class DisasmView(SearchMixin, NavMixin, ColumnCursor, ScrollView, can_focus=True):
     """A line-virtualized disassembly listing for a single function."""
 
     BINDINGS = [
@@ -295,16 +429,18 @@ class DisasmView(SearchMixin, NavMixin, ScrollView, can_focus=True):
         Binding("k,up", "cursor_up", "Up", show=False),
         Binding("ctrl+d", "half_page(1)", "½↓", show=False),
         Binding("ctrl+u", "half_page(-1)", "½↑", show=False),
-        Binding("pagedown,f", "page(1)", "PgDn", show=False),
-        Binding("pageup,b", "page(-1)", "PgUp", show=False),
+        Binding("pagedown", "page(1)", "PgDn", show=False),
+        Binding("pageup", "page(-1)", "PgUp", show=False),
         Binding("home", "goto_top", "Top", show=False),
         Binding("G,end", "goto_bottom", "Bottom", show=False),
         Binding("tab,shift+tab", "app.toggle_view", "Pseudocode", priority=True),
         *SearchMixin.SEARCH_BINDINGS,
         *NavMixin.NAV_BINDINGS,
+        *ColumnCursor.COL_BINDINGS,
     ]
 
     cursor = reactive(0, repaint=False)
+    cursor_x = reactive(0, repaint=False)
 
     class CursorMoved(Message):
         """Posted when the disasm cursor moves; carries the instruction ea."""
@@ -324,12 +460,24 @@ class DisasmView(SearchMixin, NavMixin, ScrollView, can_focus=True):
         self._ranges: dict[int, list[tuple[int, int]]] = {}
         self._search_texts: list[str] | None = None
 
+    def _line_plain(self, idx: int) -> str | None:
+        if self.model is None:
+            return None
+        line = self.model.cached_line(idx)
+        if line is None:
+            return None
+        s = f"{line.ea:08X}  "
+        if line.label:
+            s += f"{line.label}: "
+        return s + line.text
+
     # -- public API -------------------------------------------------------- #
     def load(self, model: DisasmModel, name: str, cursor: int = 0) -> None:
         self.model = model
         self._name = name
         self.total = 0
         self.cursor = cursor
+        self.cursor_x = 0
         self.virtual_size = Size(0, 0)
         self._matches = []
         self._ranges = {}
@@ -406,25 +554,23 @@ class DisasmView(SearchMixin, NavMixin, ScrollView, can_focus=True):
         if idx >= self.total:
             return Strip([Segment("".ljust(width), _S_INSN)])
         line = model.cached_line(idx)
-        cursor = idx == self.cursor
-        base = _S_CURSOR if cursor else None
+        is_cursor = idx == self.cursor
         if line is None:
-            seg = Segment(f"  {idx:>8}  …".ljust(width), (base or Style()) + _S_DIM)
-            return Strip([seg])
-        segs: list[Segment] = []
-        addr = f"{line.ea:08X}"
-        segs.append(Segment(f"{addr}  ", _join(base, _S_ADDR)))
-        if line.label:
-            segs.append(Segment(f"{line.label}: ", _join(base, _S_LABEL)))
-        text = line.text
-        mnem, _, rest = text.partition(" ")
-        segs.append(Segment(mnem, _join(base, _S_MNEM)))
-        if rest:
-            segs.append(Segment(" " + rest, _join(base, _S_INSN)))
-        strip = Strip(segs)
+            strip = Strip([Segment(f"  {idx:>8}  …", _S_DIM)])
+        else:
+            segs: list[Segment] = [Segment(f"{line.ea:08X}  ", _S_ADDR)]
+            if line.label:
+                segs.append(Segment(f"{line.label}: ", _S_LABEL))
+            mnem, _, rest = line.text.partition(" ")
+            segs.append(Segment(mnem, _S_MNEM))
+            if rest:
+                segs.append(Segment(" " + rest, _S_INSN))
+            strip = Strip(segs)
         if idx in self._ranges:
             strip = _overlay_ranges(strip, self._ranges[idx], self._match_style(idx))
-        return strip.adjust_cell_length(width, _join(base, _S_INSN) or _S_INSN)
+        if is_cursor:
+            strip = _cursor_decorate(strip, self._line_plain(idx) or "", self.cursor_x)
+        return strip.adjust_cell_length(width, _S_INSN)
 
     def _ensure_window(self, top: int) -> None:
         if self.model is None:
@@ -463,6 +609,7 @@ class DisasmView(SearchMixin, NavMixin, ScrollView, can_focus=True):
         old = self.cursor
         before = round(self.scroll_offset.y)
         self.cursor = max(0, min(self.total - 1, self.cursor + delta))
+        self._clamp_x()
         self._scroll_cursor_into_view()
         if round(self.scroll_offset.y) != before:
             self.refresh()  # scrolled: the whole viewport shifted
@@ -513,7 +660,7 @@ def _refresh_lines(view, *indices: int) -> None:
 # --------------------------------------------------------------------------- #
 # Decompiler (pseudocode) view
 # --------------------------------------------------------------------------- #
-class DecompView(SearchMixin, NavMixin, ScrollView, can_focus=True):
+class DecompView(SearchMixin, NavMixin, ColumnCursor, ScrollView, can_focus=True):
     """Read-only, line-virtualized Hex-Rays pseudocode with Pygments C
     highlighting. Lines are highlighted once at load and cached as Strips, so
     cursor movement and scrolling are O(1) (no TextArea/tree-sitter overhead).
@@ -525,15 +672,17 @@ class DecompView(SearchMixin, NavMixin, ScrollView, can_focus=True):
         Binding("k,up", "cursor_up", "Up", show=False),
         Binding("ctrl+d", "half_page(1)", "½↓", show=False),
         Binding("ctrl+u", "half_page(-1)", "½↑", show=False),
-        Binding("pagedown,f", "page(1)", "PgDn", show=False),
-        Binding("pageup,b", "page(-1)", "PgUp", show=False),
+        Binding("pagedown", "page(1)", "PgDn", show=False),
+        Binding("pageup", "page(-1)", "PgUp", show=False),
         Binding("home", "goto_top", "Top", show=False),
         Binding("G,end", "goto_bottom", "Bottom", show=False),
         *SearchMixin.SEARCH_BINDINGS,
         *NavMixin.NAV_BINDINGS,
+        *ColumnCursor.COL_BINDINGS,
     ]
 
     cursor = reactive(0, repaint=False)
+    cursor_x = reactive(0, repaint=False)
 
     def __init__(self) -> None:
         super().__init__(id="decomp")
@@ -544,12 +693,24 @@ class DecompView(SearchMixin, NavMixin, ScrollView, can_focus=True):
         self._matches: list[int] = []
         self._ranges: dict[int, list[tuple[int, int]]] = {}
 
+    def _line_plain(self, idx: int) -> str | None:
+        return self._texts[idx] if 0 <= idx < len(self._texts) else None
+
+    def _hscroll(self) -> None:
+        width = self.size.width
+        sx = round(self.scroll_offset.x)
+        if self.cursor_x < sx:
+            self.scroll_to(x=self.cursor_x, animate=False)
+        elif self.cursor_x >= sx + width:
+            self.scroll_to(x=self.cursor_x - width + 1, animate=False)
+
     def show(self, ea: int, text: str) -> None:
         seglists = highlight_c(text)
         self._strips = [Strip(segs) for segs in seglists]
         self._texts = ["".join(seg.text for seg in segs) for segs in seglists]
         self.loaded_ea = ea
         self.cursor = 0
+        self.cursor_x = 0
         self._matches = []
         self._ranges = {}
         maxw = max((s.cell_length for s in self._strips), default=0)
@@ -578,10 +739,9 @@ class DecompView(SearchMixin, NavMixin, ScrollView, can_focus=True):
         base = self._strips[idx]
         if idx in self._ranges:
             base = _overlay_ranges(base, self._ranges[idx], self._match_style(idx))
-        strip = base.crop(x, x + width).adjust_cell_length(width)
         if idx == self.cursor:
-            strip = strip.apply_style(_S_CURSOR)
-        return strip
+            base = _cursor_decorate(base, self._texts[idx], self.cursor_x)
+        return base.crop(x, x + width).adjust_cell_length(width)
 
     # -- navigation (mirrors DisasmView) ---------------------------------- #
     def _visible_height(self) -> int:
@@ -601,6 +761,7 @@ class DecompView(SearchMixin, NavMixin, ScrollView, can_focus=True):
         old = self.cursor
         before = round(self.scroll_offset.y)
         self.cursor = max(0, min(len(self._strips) - 1, self.cursor + delta))
+        self._clamp_x()
         self._scroll_cursor_into_view()
         if round(self.scroll_offset.y) != before:
             self.refresh()
@@ -933,25 +1094,42 @@ class IdaTui(App):
     # -- follow / xrefs ---------------------------------------------------- #
     def on_follow_requested(self, msg: FollowRequested) -> None:
         view = msg.view
+        word = view.word_under_cursor()
         if isinstance(view, DisasmView):
             ea = view._cursor_ea()
             if ea is not None:
-                self._follow_disasm(ea)
+                self._follow_disasm(ea, word)
         elif isinstance(view, DecompView) and view._texts:
-            self._follow_decomp(view._texts[view.cursor])
+            self._follow_decomp(view._texts[view.cursor], word)
 
     def on_xrefs_requested(self, msg: XrefsRequested) -> None:
         view = msg.view
+        word = view.word_under_cursor()
         if isinstance(view, DisasmView):
             ea = view._cursor_ea()
             if ea is not None:
-                self._xrefs_disasm(ea)
+                self._xrefs_disasm(ea, word)
         elif isinstance(view, DecompView) and view._texts:
-            self._xrefs_decomp(view._texts[view.cursor])
+            self._xrefs_decomp(view._texts[view.cursor], word)
+
+    @staticmethod
+    def _looks_like_symbol(word: str | None) -> bool:
+        # A symbol has a letter but is not a bare hex number (the address column
+        # and hex operands are hex-only, e.g. "0026D4C0" -> follow via xref).
+        if not word or not any(c.isalpha() for c in word):
+            return False
+        return not all(c in "0123456789abcdefABCDEF" for c in word)
 
     @work(thread=True, group="nav")
-    def _follow_disasm(self, ea: int) -> None:
+    def _follow_disasm(self, ea: int, word: str | None) -> None:
         assert self.program is not None
+        # Prefer the symbol under the cursor (handles multiple refs on a line).
+        if self._looks_like_symbol(word):
+            try:
+                self._do_navigate(self.program.resolve(word), push=True)
+                return
+            except Exception:  # noqa: BLE001 -- not a resolvable name; fall back
+                pass
         xr = self.program.xrefs_from(ea)
         tgt = next((x for x in xr if x.type == "code" and x.to), None)
         tgt = tgt or next((x for x in xr if x.to), None)
@@ -961,12 +1139,19 @@ class IdaTui(App):
         self._do_navigate(tgt.to, push=True)
 
     @work(thread=True, group="nav")
-    def _follow_decomp(self, line: str) -> None:
-        target = self._ref_on_line(line)
-        if target is None:
+    def _follow_decomp(self, line: str, word: str | None) -> None:
+        if self._cur is None:
+            return
+        dec = self.program.decompile(self._cur.ea)
+        addr = None
+        if word:  # the ref whose name is exactly the token under the cursor
+            addr = next((r.addr for r in dec.refs if r.name == word), None)
+        if addr is None:
+            addr = self._ref_on_line(line)
+        if addr is None:
             self.app.call_from_thread(self._status, "nothing to follow on this line")
             return
-        self._do_navigate(target, push=True)
+        self._do_navigate(addr, push=True)
 
     def _ref_on_line(self, line: str) -> int | None:
         """Address of the first decompiler ref whose name appears on ``line``."""
@@ -980,17 +1165,27 @@ class IdaTui(App):
         return None
 
     @work(thread=True, group="xrefs")
-    def _xrefs_disasm(self, ea: int) -> None:
+    def _xrefs_disasm(self, ea: int, word: str | None) -> None:
         assert self.program is not None
-        frm = self.program.xrefs_from(ea)
-        subj = next((x.to for x in frm if x.type == "code" and x.to), ea)
+        subj: int | None = None
+        if self._looks_like_symbol(word):
+            try:
+                subj = self.program.resolve(word)
+            except Exception:  # noqa: BLE001
+                subj = None
+        if subj is None:
+            frm = self.program.xrefs_from(ea)
+            subj = next((x.to for x in frm if x.type == "code" and x.to), ea)
         self._xrefs_present(subj)
 
     @work(thread=True, group="xrefs")
-    def _xrefs_decomp(self, line: str) -> None:
-        subj = self._ref_on_line(line)
-        if subj is None and self._cur is not None:
-            subj = self._cur.ea
+    def _xrefs_decomp(self, line: str, word: str | None) -> None:
+        subj: int | None = None
+        if self._cur is not None and word:
+            dec = self.program.decompile(self._cur.ea)
+            subj = next((r.addr for r in dec.refs if r.name == word), None)
+        if subj is None:
+            subj = self._ref_on_line(line) or (self._cur.ea if self._cur else None)
         if subj is not None:
             self._xrefs_present(subj)
 

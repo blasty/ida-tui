@@ -9,6 +9,7 @@ status update. Uses ~/ida-venv python (has textual).
 """
 import asyncio
 import os
+import re
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -264,6 +265,33 @@ async def run(db):
                 await pilot.pause(0.2)
                 check("Esc closes the xrefs popup",
                       not isinstance(app.screen, XrefsScreen))
+
+            # Column cursor: h/l move it; following the symbol under the cursor.
+            dis.focus()
+            dis.cursor = call_idx
+            dis.cursor_x = 5
+            dis.refresh()
+            await pilot.press("h")
+            check("h moves the column cursor left", dis.cursor_x == 4, f"x={dis.cursor_x}")
+            await pilot.press("l")
+            await pilot.press("l")
+            check("l moves the column cursor right", dis.cursor_x == 6, f"x={dis.cursor_x}")
+            plain = dis._line_plain(call_idx) or ""
+            m = re.search(r"\b(sub_[0-9A-Fa-f]+)", plain)
+            if m:
+                dis.cursor = call_idx
+                dis.cursor_x = m.start(1) + 1
+                dis.refresh()
+                await pilot.pause(0.1)
+                check("word-under-cursor is the operand symbol",
+                      dis.word_under_cursor() == m.group(1),
+                      f"{dis.word_under_cursor()!r} vs {m.group(1)!r}")
+                depth = len(app._nav)
+                want = app.program.resolve(m.group(1))
+                await pilot.press("enter")
+                await wait_until(pilot, lambda: len(app._nav) > depth, timeout=25)
+                check("follows the symbol under the cursor",
+                      app._cur.ea == want, f"cur={app._cur.ea:#x} want={want:#x}")
 
 
 def main(argv):
