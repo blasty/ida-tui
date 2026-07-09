@@ -522,6 +522,35 @@ class IDAClient:
     def db(self) -> str | None:
         return self._db
 
+    def _session_input_path(self, db: str) -> str:
+        for s in self.list_sessions():
+            if s.session_id == db:
+                if not s.input_path:
+                    raise IDASessionError(f"session {db} has no input_path to re-open")
+                return s.input_path
+        raise IDASessionError(f"session {db} not found")
+
+    def bump_idle_ttl(self, idle_ttl_sec: int = 1_000_000_000,
+                      path: str | None = None) -> None:
+        """Raise the worker's idle self-exit TTL so an interactive session never
+        gets reaped while the user is just reading.
+
+        Headless idalib workers self-exit after ``idle_ttl_sec`` (default 600s)
+        with no requests. ``idb_open`` on the already-open path is idempotent
+        (returns the same session) and re-applies the TTL, so this simply opens
+        the pinned session's path with a huge TTL. The default (~31 years) is
+        effectively 'never'.
+        """
+        p = path or self._session_input_path(self.resolve_db())
+        self.call("idb_open", input_path=p, idle_ttl_sec=int(idle_ttl_sec))
+
+    def keepalive(self, interval: float = 120.0) -> "KeepAlive":
+        """Return a (not-yet-started) heartbeat that touches the worker's idle
+        watchdog every ``interval`` seconds. Belt-and-suspenders next to
+        :meth:`bump_idle_ttl`; also covers adopted sessions we didn't open.
+        """
+        return KeepAlive(self, interval=interval)
+
     # -- convenience ------------------------------------------------------- #
     def health(self) -> dict:
         return self.call("server_health")
@@ -540,6 +569,56 @@ class IDAClient:
             if t["name"] == tool:
                 return t.get("inputSchema", {})
         raise IDAError(f"tool not found: {tool}")
+
+
+class KeepAlive:
+    """Background heartbeat that keeps an idalib worker from idling out.
+
+    Any forwarded request resets the worker's idle timer, so a periodic cheap
+    ``server_health`` is enough. Failures are swallowed (the next real call will
+    auto-recover); the heartbeat just keeps a chilling TUI's worker alive.
+    """
+
+    def __init__(self, client: "IDAClient", interval: float = 120.0):
+        if interval <= 0:
+            raise ValueError("interval must be > 0")
+        self._client = client
+        self.interval = interval
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+        self.beats = 0
+        self.failures = 0
+
+    def start(self) -> "KeepAlive":
+        if self._thread is not None:
+            return self
+        self._stop.clear()
+        self._thread = threading.Thread(
+            target=self._run, daemon=True, name="idatui-keepalive"
+        )
+        self._thread.start()
+        return self
+
+    def stop(self) -> None:
+        self._stop.set()
+        t = self._thread
+        self._thread = None
+        if t is not None:
+            t.join(timeout=2.0)
+
+    def __enter__(self) -> "KeepAlive":
+        return self.start()
+
+    def __exit__(self, *exc) -> None:
+        self.stop()
+
+    def _run(self) -> None:
+        while not self._stop.wait(self.interval):
+            try:
+                self._client.health()
+                self.beats += 1
+            except IDAError:
+                self.failures += 1
 
 
 def _is_stale_session(e: IDAToolError) -> bool:

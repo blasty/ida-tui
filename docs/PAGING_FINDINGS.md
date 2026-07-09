@@ -93,15 +93,36 @@ fall back to the disassembly view or show an error panel.
 Normal decompile bodies are server-truncated with a `[N chars total]` marker
 (still to be solved for full-body display — see Phase 2).
 
-## Workers self-exit when idle (`idle_ttl_sec`, default 600s)
+## Workers self-exit when idle (`idle_ttl_sec`, default 600s) — SOLVED
 
-A headless idalib worker self-exits after ~10 min idle. Its session then lingers
-in `idb_list` but calls fail with `"Worker for session <id> is not reachable"`
-(distinct from `"Session not found"`). Recovery differs: this needs a fresh
-`idb_open` of the same `input_path` (new worker), not just a db re-resolve. The
-TUI should (a) raise `idle_ttl_sec` when opening, and/or (b) detect
-"not reachable" and transparently re-open. Currently surfaced as a clean
-`IDAToolError`; auto-reopen is a TODO for the app layer.
+### Why it happens
+Each idalib worker runs a `WorkerLifecycle` watchdog
+(`ida_pro_mcp/worker_lifecycle.py`): if no JSON-RPC request hits its dispatcher
+for `idle_ttl_sec` (default **600s**), the worker **self-exits cleanly**. It is
+refcount-free — "activity == alive": every forwarded tool call `touch()`es the
+timer. This is deliberate resource hygiene for a *shared* supervisor (each worker
+holds an IDA license slot + the DB's RAM; default max 4 workers), aimed at
+ephemeral/agent usage that opens a DB and wanders off. For an **interactive TUI
+that should be able to just chill, it's the wrong default.** The startup binary
+passed to `idalib-mcp` on the CLI always gets 600s (no CLI flag to change it).
+
+After self-exit the session lingers in `idb_list` but calls fail with
+`"Worker for session <id> is not reachable"` (distinct from `"Session not
+found"`).
+
+### The fix (both implemented + verified in `tests/test_keepalive.py`)
+1. **`IDAClient.bump_idle_ttl(idle_ttl_sec=1e9)`** — `idb_open` on the
+   already-open path is idempotent and re-applies the TTL; `set_idle_ttl` has no
+   upper cap, so ~1e9s is effectively 'never'. This is the intended knob and the
+   primary fix: the TUI calls it once at startup.
+2. **`IDAClient.keepalive(interval=120)` -> `KeepAlive`** — a background
+   heartbeat issuing a cheap `server_health` (~2ms) that resets the watchdog.
+   Belt-and-suspenders, and it also covers *adopted* sessions whose path we don't
+   control / don't want to re-open.
+
+Recommended TUI policy: `bump_idle_ttl()` on open **and** run a `KeepAlive` as a
+safety net. "Worker not reachable" then only occurs on a real crash, which the
+app handles by re-`idb_open`.
 
 ## Writable path requirement (operational)
 

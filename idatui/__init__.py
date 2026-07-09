@@ -10,6 +10,7 @@ from .client import (
     IDAToolError,
     IDASessionError,
     Session,
+    KeepAlive,
 )
 from .domain import (
     Program,
@@ -42,4 +43,5 @@ __all__ = [
     "IDAToolError",
     "IDASessionError",
     "Session",
+    "KeepAlive",
 ]
