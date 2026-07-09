@@ -1049,6 +1049,121 @@ class XrefsScreen(ModalScreen):
 
 
 # --------------------------------------------------------------------------- #
+# Symbol palette (fuzzy finder overlay)
+# --------------------------------------------------------------------------- #
+def _fuzzy(name: str, q: str):
+    """Fuzzy subsequence match of ``q`` in ``name`` (case-insensitive). Returns
+    ``(score, positions)`` or None. Higher score = better; positions are the
+    matched character indices (for highlighting)."""
+    if not q:
+        return (0.0, ())
+    nl = name.lower()
+    pos: list[int] = []
+    i = 0
+    for ch in q:
+        j = nl.find(ch, i)
+        if j < 0:
+            return None
+        pos.append(j)
+        i = j + 1
+    span = pos[-1] - pos[0]
+    score = -(span * 2.0) - pos[0] - len(name) * 0.01
+    if q in nl:
+        score += 50.0
+    if nl.startswith(q):
+        score += 100.0
+    return (score, tuple(pos))
+
+
+class SymbolPalette(ModalScreen):
+    """A command-palette overlay: type to fuzzy-find a symbol, Enter opens it."""
+
+    BINDINGS = [
+        Binding("escape", "close", "Close"),
+        Binding("down,ctrl+n", "cursor_down", show=False),
+        Binding("up,ctrl+p", "cursor_up", show=False),
+    ]
+    LIMIT = 200
+
+    def __init__(self, funcs: list[Func]) -> None:
+        super().__init__()
+        self._funcs = funcs
+        self._results: list[Func] = []
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="pal-box"):
+            yield Static(" symbols", id="pal-title")
+            yield Input(placeholder="fuzzy find symbol…  ↑↓ select · Enter open · Esc close",
+                        id="pal-input")
+            yield OptionList(id="pal-list")
+
+    def on_mount(self) -> None:
+        self._apply("")
+        self.query_one("#pal-input", Input).focus()
+
+    def on_input_changed(self, event: Input.Changed) -> None:
+        event.stop()  # don't leak to the app's #search/#filter handlers
+        self._apply(event.value.strip())
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        event.stop()
+        self.action_choose()
+
+    def _apply(self, query: str) -> None:
+        if query:
+            scored = []
+            for f in self._funcs:
+                m = _fuzzy(f.name, query)
+                if m is not None:
+                    scored.append((m[0], m[1], f))
+            scored.sort(key=lambda t: (-t[0], t[2].name))
+            rows = [(f, pos) for _, pos, f in scored[:self.LIMIT]]
+        else:
+            rows = [(f, ()) for f in self._funcs[:self.LIMIT]]
+        self._results = [f for f, _ in rows]
+        ol = self.query_one(OptionList)
+        ol.clear_options()
+        opts = []
+        for f, pos in rows:
+            label = Text()
+            label.append(f"{f.addr:08X}  ", _S_ADDR)
+            nm = Text(f.name)
+            for p in pos:
+                if p < len(f.name):
+                    nm.stylize(_S_NAME_MATCH, p, p + 1)
+            label.append_text(nm)
+            opts.append(Option(label))
+        ol.add_options(opts)
+        if self._results:
+            ol.highlighted = 0
+        self.query_one("#pal-title", Static).update(
+            f" symbols: {len(self._results)}" + ("+" if len(self._results) == self.LIMIT else ""))
+
+    def action_cursor_down(self) -> None:
+        ol = self.query_one(OptionList)
+        if ol.option_count:
+            ol.highlighted = min((ol.highlighted or 0) + 1, ol.option_count - 1)
+
+    def action_cursor_up(self) -> None:
+        ol = self.query_one(OptionList)
+        if ol.option_count:
+            ol.highlighted = max((ol.highlighted or 0) - 1, 0)
+
+    def action_choose(self) -> None:
+        ol = self.query_one(OptionList)
+        i = ol.highlighted
+        if i is not None and 0 <= i < len(self._results):
+            self.dismiss(self._results[i].addr)
+
+    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+        if 0 <= event.option_index < len(self._results):
+            self.dismiss(self._results[event.option_index].addr)
+
+    def action_close(self) -> None:
+        self.dismiss(None)
+
+
+# --------------------------------------------------------------------------- #
 # The app
 # --------------------------------------------------------------------------- #
 class IdaTui(App):
@@ -1081,13 +1196,20 @@ class IdaTui(App):
     #xref-box { width: 84; max-height: 70%; height: auto; border: thick $accent; background: $panel; }
     #xref-title { dock: top; height: 1; background: $accent; color: $text; padding: 0 1; }
     #xref-list { height: auto; max-height: 100%; }
+    SymbolPalette { align: center middle; }
+    #pal-box { width: 96; max-width: 92%; height: auto; max-height: 80%;
+               border: thick $accent; background: $panel; }
+    #pal-title { dock: top; height: 1; background: $accent; color: $text; padding: 0 1; }
+    #pal-input { border: none; height: 1; margin: 0 1; background: $panel; color: $text; }
+    #pal-list { height: auto; max-height: 24; }
     """
 
     BINDINGS = [
         Binding("q", "quit", "Quit"),
-        Binding("slash", "filter", "Filter"),
+        Binding("ctrl+n", "symbols", "Symbols"),
         Binding("g", "goto", "Goto"),
-        Binding("ctrl+b", "toggle_functions", "Names"),
+        Binding("slash", "filter", "Filter", show=False),
+        Binding("ctrl+b", "toggle_functions", "Names", show=False),
         Binding("tab,shift+tab", "toggle_view", "Disasm/Pseudocode", priority=True),
         Binding("ctrl+s", "save", "Save"),
         Binding("escape", "back", "Back"),
@@ -1122,8 +1244,9 @@ class IdaTui(App):
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
         with Horizontal(id="panes"):
-            with FunctionsPanel(id="left"):
-                pass
+            fp = FunctionsPanel(id="left")
+            fp.display = False  # overlay-first: reveal the docked pane with Ctrl+B
+            yield fp
             yield DisasmView()
             dv = DecompView()
             dv.display = False
@@ -1147,7 +1270,9 @@ class IdaTui(App):
         # Keep the hidden command input out of the focus chain until summoned.
         inp = self.query_one("#func-filter", Input)
         inp.can_focus = False
-        self.query_one("#func-table", DataTable).focus()
+        # The names pane is an overlay now (Ctrl+N); focus a code view so app
+        # bindings work before anything is opened.
+        self.query_one(DisasmView).focus()
         self._connect()
 
     # -- status helper ----------------------------------------------------- #
@@ -1212,7 +1337,8 @@ class IdaTui(App):
         if self._filter_term:
             self.app.call_from_thread(self._apply_filter, self._filter_term)
         else:
-            self.app.call_from_thread(self._status, f"{module} — {len(idx)} functions")
+            self.app.call_from_thread(
+                self._status, f"{module} — {len(idx)} functions   (Ctrl+N: find symbol)")
 
     def _module(self) -> str:
         try:
@@ -1308,13 +1434,28 @@ class IdaTui(App):
 
     # -- actions ----------------------------------------------------------- #
     def action_toggle_functions(self) -> None:
-        """Show/hide the functions pane; give the disasm view all the width."""
+        """Show/hide the classic docked functions pane (the overlay is Ctrl+N)."""
         left = self.query_one("#left", FunctionsPanel)
         left.display = not left.display
         if not left.display:
             self.query_one(DisasmView).focus()
         else:
             self.query_one("#func-table", DataTable).focus()
+
+    def action_symbols(self) -> None:
+        """Ctrl+N: fuzzy-find a symbol in a command-palette overlay."""
+        idx = self._func_index
+        funcs = idx.all_loaded() if idx is not None else []
+        if not funcs:
+            self._status("functions still loading…")
+            return
+        self.push_screen(SymbolPalette(funcs), self._on_symbol_chosen)
+
+    def _on_symbol_chosen(self, addr: int | None) -> None:
+        if addr is None:
+            return
+        f = self._func_index.by_addr(addr) if self._func_index else None
+        self._open_function(addr, f.name if f else hex(addr))
 
     def action_toggle_view(self) -> None:
         """Tab: switch the code pane between disassembly and pseudocode."""
@@ -1348,8 +1489,10 @@ class IdaTui(App):
         if len(self._nav) > 1:
             self._nav.pop()
             self._open_entry(self._nav[-1], push=False)
-        else:
+        elif self.query_one("#left", FunctionsPanel).display:
             table.focus()
+        else:
+            self.query_one(DisasmView).focus()
 
     # -- input submit (filter / goto) ------------------------------------- #
     def on_search_requested(self, msg: SearchRequested) -> None:

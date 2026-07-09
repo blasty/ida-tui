@@ -45,6 +45,13 @@ Hard-won Textual behaviour and the patterns this app relies on. Pairs with
   the Footer (see `#search`/`#rename`/`#status`).
 - Textual ships **no C/C++ tree-sitter grammar** — `TextArea(language="cpp")` is a
   silent no-op. We highlight pseudocode with Pygments (`idatui/highlight.py`).
+- **A modal's `Input` messages bubble to the App.** `SymbolPalette` (the Ctrl+N
+  fuzzy finder) has its own `Input`; its `Input.Changed`/`Input.Submitted` bubble
+  up to the app's handlers (which would run the `#search`/`#func-filter` logic and
+  even hide the palette's input). Call `event.stop()` in the modal's handlers.
+  A single-line `Input` doesn't bind `up`/`down`, so those bubble to the modal's
+  BINDINGS (used to move the result list while the input keeps focus); `enter`
+  is consumed by the Input → handle it via `on_input_submitted`.
 
 ## App patterns
 

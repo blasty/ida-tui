@@ -19,7 +19,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from idatui.app import (  # noqa: E402
-    DecompView, DisasmView, FunctionsPanel, IdaTui, XrefsScreen,
+    DecompView, DisasmView, FunctionsPanel, IdaTui, SymbolPalette, XrefsScreen,
 )
 from textual.widgets import DataTable, Input, OptionList, Static  # noqa: E402
 from rich.text import Text  # noqa: E402
@@ -66,7 +66,13 @@ async def run(db):
 
         loaded = await wait_until(pilot, lambda: table.row_count > 0)
         check("function list populated", loaded, f"rows={table.row_count}")
+        # The names pane is an overlay now (Ctrl+N) and starts hidden; reveal the
+        # classic docked pane (Ctrl+B) for the table-driven checks below.
         left = app.query_one("#left")
+        check("names pane starts hidden (overlay-first)", not left.display,
+              f"display={left.display}")
+        await pilot.press("ctrl+b")
+        await wait_until(pilot, lambda: left.display, timeout=5)
         check("function pane width is capped (doesn't eat the screen)",
               left.size.width <= 44, f"width={left.size.width}")
 
@@ -77,6 +83,39 @@ async def run(db):
         check("function load completed (status settled)", got_all, str(status.render()))
         nfuncs = table.row_count
         print(f"    loaded {nfuncs} functions")
+
+        # Symbol palette (Ctrl+N): fuzzy find + open, overlay-style.
+        await pilot.press("ctrl+n")
+        pal_open = await wait_until(pilot, lambda: isinstance(app.screen, SymbolPalette), 10)
+        check("Ctrl+N opens the symbol palette", pal_open,
+              f"screen={type(app.screen).__name__}")
+        if pal_open:
+            pal = app.screen
+            pinp = pal.query_one(Input)
+            pinp.value = "main"
+            await wait_until(pilot, lambda: pal._results and pal._results[0].name == "main", 10)
+            check("palette fuzzy-finds (top result matches the query)",
+                  bool(pal._results) and pal._results[0].name == "main",
+                  f"top={pal._results[0].name if pal._results else None}")
+            pinp.value = "eror"  # scattered subsequence of 'error'
+            await wait_until(pilot, lambda: any(f.name == "error" for f in pal._results), 10)
+            check("palette matches a fuzzy subsequence",
+                  any(f.name == "error" for f in pal._results),
+                  f"results={[f.name for f in pal._results[:4]]}")
+            pinp.value = "main"
+            await wait_until(pilot, lambda: pal._results and pal._results[0].name == "main", 10)
+            want = pal._results[0].addr
+            await pilot.press("enter")
+            await wait_until(pilot, lambda: not isinstance(app.screen, SymbolPalette), 10)
+            await wait_until(pilot, lambda: app._cur and app._cur.ea == want, 20)
+            check("selecting a palette entry opens that function",
+                  bool(app._cur) and app._cur.ea == want,
+                  f"cur={app._cur.ea if app._cur else None}")
+        await pilot.press("ctrl+n")
+        await wait_until(pilot, lambda: isinstance(app.screen, SymbolPalette), 10)
+        await pilot.press("escape")
+        await wait_until(pilot, lambda: not isinstance(app.screen, SymbolPalette), 10)
+        check("Esc closes the palette", not isinstance(app.screen, SymbolPalette))
 
         # Open the biggest function we can find (scan a sample of rows for size).
         # Simpler: select the row whose Size column is largest among first N.
