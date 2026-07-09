@@ -493,6 +493,51 @@ async def run(db):
                   all(x != "?" for x in locs), f"locs={locs[:8]}")
             await pilot.press("escape")
             await wait_until(pilot, lambda: not isinstance(app.screen, XrefsScreen), 25)
+
+            # Pre-selection: invoking 'x' at a call SITE highlights that very
+            # site in the dialog, so a long list can be stepped without losing
+            # your place. Use the decompiler (the exact-match seam).
+            bycaller = defaultdict(list)
+            for x in app.program.xrefs_to(multi.addr):
+                if x.fn_name and x.type == "code":
+                    bycaller[x.fn_addr].append(x)
+            csites = next((sorted(v, key=lambda x: x.frm)
+                           for v in bycaller.values() if len(v) >= 2), None)
+            if csites:
+                site = csites[len(csites) // 2]
+                await pilot.press("g")
+                await pilot.pause(0.1)
+                for ch in hex(site.fn_addr):
+                    await pilot.press(ch)
+                await pilot.press("enter")
+                await wait_until(pilot, lambda: app._cur and app._cur.ea == site.fn_addr, 20)
+                if app._active != "decomp":
+                    await pilot.press("tab")
+                await wait_until(pilot, lambda: dec.loaded_ea == site.fn_addr, 25)
+                li = app._decomp_line_for(site.fn_addr, site.frm)
+                col = dec._texts[li].find(multi.name) if 0 <= li < len(dec._texts) else -1
+                if col >= 0:
+                    dec.focus()
+                    dec.cursor, dec.cursor_x = li, col + 1
+                    dec.refresh()
+                    await pilot.pause(0.05)
+                    await pilot.press("x")
+                    await wait_until(pilot, lambda: isinstance(app.screen, XrefsScreen), 25)
+                    hl = app.screen.query_one(OptionList).highlighted
+                    it = app.screen._items
+                    check("xref dialog pre-selects the site it was invoked from",
+                          hl is not None and it[hl][0] == site.frm,
+                          f"hl={hl} frm={hex(it[hl][0]) if hl is not None else None} "
+                          f"want={hex(site.frm)}")
+                    await pilot.press("escape")
+                    await wait_until(pilot, lambda: not isinstance(app.screen, XrefsScreen), 25)
+                else:
+                    check("found the callee token for preselect", False)
+                if app._active != "disasm":  # restore for the following mouse test
+                    await pilot.press("tab")
+                    await wait_until(pilot, lambda: app._active == "disasm", 10)
+            else:
+                check("found a caller with multiple sites for preselect", False)
         else:
             check("found a function with multiple same-caller xrefs", False)
 

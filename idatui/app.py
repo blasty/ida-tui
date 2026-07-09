@@ -1021,10 +1021,12 @@ class XrefsScreen(ModalScreen):
 
     BINDINGS = [Binding("escape", "close", "Close")]
 
-    def __init__(self, label: str, items: list[tuple[int, str]]) -> None:
+    def __init__(self, label: str, items: list[tuple[int, str]],
+                 preselect: int = 0) -> None:
         super().__init__()
         self._label = label
         self._items = items
+        self._preselect = preselect
 
     def compose(self) -> ComposeResult:
         with Vertical(id="xref-box"):
@@ -1032,7 +1034,12 @@ class XrefsScreen(ModalScreen):
             yield OptionList(*[Option(text) for _, text in self._items], id="xref-list")
 
     def on_mount(self) -> None:
-        self.query_one(OptionList).focus()
+        ol = self.query_one(OptionList)
+        # Start on the site we invoked xrefs from, so stepping a long list keeps
+        # your place (and scroll it into view).
+        if 0 <= self._preselect < len(self._items):
+            ol.highlighted = self._preselect
+        ol.focus()
 
     def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
         self.dismiss(self._items[event.option_index][0])
@@ -1378,9 +1385,20 @@ class IdaTui(App):
         if isinstance(view, DisasmView):
             ea = view._cursor_ea()
             if ea is not None:
-                self._xrefs_disasm(ea, word)
+                # span = this instruction .. the next, to pre-select the dialog
+                # entry for the site we invoked xrefs from.
+                nxt = view.model.cached_line(view.cursor + 1) if view.model else None
+                self._xrefs_disasm(ea, word, ea, nxt.ea if nxt else None)
         elif isinstance(view, DecompView) and view._texts:
-            self._xrefs_decomp(view._texts[view.cursor], word)
+            here = view._line_ea(view.cursor)
+            end = None
+            if here is not None:
+                for j in range(view.cursor + 1, len(view._line_eas)):
+                    e = view._line_eas[j]
+                    if e is not None and e > here:
+                        end = e
+                        break
+            self._xrefs_decomp(view._texts[view.cursor], word, here, end)
 
     @staticmethod
     def _looks_like_symbol(word: str | None) -> bool:
@@ -1454,7 +1472,8 @@ class IdaTui(App):
         return None
 
     @work(thread=True, group="xrefs")
-    def _xrefs_disasm(self, ea: int, word: str | None) -> None:
+    def _xrefs_disasm(self, ea: int, word: str | None,
+                      here_ea: int | None = None, here_end: int | None = None) -> None:
         assert self.program is not None
         subj: int | None = None
         if self._looks_like_symbol(word):
@@ -1468,10 +1487,11 @@ class IdaTui(App):
             # fall-through to the next instruction, which would point xrefs at
             # the wrong place. At a function entry, xrefs-to == the callers.)
             subj = ea
-        self._xrefs_present(subj, word)
+        self._xrefs_present(subj, word, here_ea, here_end)
 
     @work(thread=True, group="xrefs")
-    def _xrefs_decomp(self, line: str, word: str | None) -> None:
+    def _xrefs_decomp(self, line: str, word: str | None,
+                      here_ea: int | None = None, here_end: int | None = None) -> None:
         subj: int | None = None
         if self._cur is not None and word:
             dec = self.program.decompile(self._cur.ea)
@@ -1484,9 +1504,25 @@ class IdaTui(App):
         if subj is None:
             subj = self._ref_on_line(line) or (self._cur.ea if self._cur else None)
         if subj is not None:
-            self._xrefs_present(subj, word)
+            self._xrefs_present(subj, word, here_ea, here_end)
 
-    def _xrefs_present(self, subj: int, subj_name: str | None = None) -> None:  # worker
+    @staticmethod
+    def _xref_preselect(xr, here_ea, here_end) -> int:  # type: ignore[no-untyped-def]
+        """Index of the xref whose `frm` is the site we invoked xrefs from: an
+        exact match, else the one falling in the current line/instruction span."""
+        if here_ea is None:
+            return 0
+        span = None
+        for i, x in enumerate(xr):
+            if x.frm == here_ea:
+                return i
+            if span is None and here_end is not None and here_ea <= x.frm < here_end:
+                span = i
+        return span if span is not None else 0
+
+    def _xrefs_present(self, subj: int, subj_name: str | None = None,
+                       here_ea: int | None = None,
+                       here_end: int | None = None) -> None:  # worker
         assert self.program is not None
         xr = self.program.xrefs_to(subj)
         fn = self.program.function_of(subj)
@@ -1513,16 +1549,17 @@ class IdaTui(App):
                 # data slot or a loose thunk) instead of a bare '?'.
                 loc = self.program.section_of(x.frm) or "<no seg>"
             items.append((x.frm, f"{x.frm:08X}  {loc:<26}  [{x.type}]"))
-        self.app.call_from_thread(self._present_xrefs, label, items, focus)
+        preselect = self._xref_preselect(xr, here_ea, here_end)
+        self.app.call_from_thread(self._present_xrefs, label, items, focus, preselect)
 
     def _present_xrefs(self, label: str, items: list[tuple[int, str]],
-                       focus_name: str | None = None) -> None:
+                       focus_name: str | None = None, preselect: int = 0) -> None:
         if not items:
             self._status(f"{label}: none")
             return
         self._xref_focus_name = focus_name
         self._status(f"{label}: {len(items)}")
-        self.push_screen(XrefsScreen(label, items), self._on_xref_chosen)
+        self.push_screen(XrefsScreen(label, items, preselect), self._on_xref_chosen)
 
     def _on_xref_chosen(self, addr: int | None) -> None:
         if addr is not None:
