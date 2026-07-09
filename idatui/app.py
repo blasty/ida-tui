@@ -1256,6 +1256,13 @@ class IdaTui(App):
         addr = None
         if word:  # the ref whose name is exactly the token under the cursor
             addr = next((r.addr for r in dec.refs if r.name == word), None)
+        # A named function under the cursor may not be listed in refs
+        # (e.g. self-reference, or refs truncated) — resolve it directly.
+        if addr is None and self._looks_like_symbol(word):
+            try:
+                addr = self.program.resolve(word)
+            except Exception:  # noqa: BLE001
+                addr = None
         if addr is None:
             addr = self._ref_on_line(line)
         if addr is None:
@@ -1294,6 +1301,11 @@ class IdaTui(App):
         if self._cur is not None and word:
             dec = self.program.decompile(self._cur.ea)
             subj = next((r.addr for r in dec.refs if r.name == word), None)
+        if subj is None and self._looks_like_symbol(word):
+            try:
+                subj = self.program.resolve(word)
+            except Exception:  # noqa: BLE001
+                subj = None
         if subj is None:
             subj = self._ref_on_line(line) or (self._cur.ea if self._cur else None)
         if subj is not None:

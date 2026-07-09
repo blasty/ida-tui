@@ -445,6 +445,28 @@ async def run(db):
             check("rename reverted cleanly",
                   rr.get("summary", {}).get("ok", 0) == 1, str(rr.get("summary")))
 
+            # Decompiler follow of a name NOT in refs (the function's own name).
+            await pilot.press("g")
+            await pilot.pause(0.2)
+            for ch in fn.name:
+                await pilot.press(ch)
+            await pilot.press("enter")
+            await wait_until(pilot, lambda: dis.total > 0, timeout=20)
+            if app._active != "decomp":
+                await pilot.press("tab")
+            await wait_until(pilot, lambda: dec.loaded_ea == fn.addr, timeout=20)
+            nx = dec._texts[0].find(fn.name) if dec._texts else -1
+            if nx >= 0:
+                dec.focus()
+                dec.cursor, dec.cursor_x = 0, nx + 1
+                dec.refresh()
+                await pilot.pause(0.1)
+                depth = len(app._nav)
+                await pilot.press("enter")
+                moved = await wait_until(pilot, lambda: len(app._nav) > depth, timeout=25)
+                check("decompiler follows a name not in refs (resolve fallback)",
+                      moved and app._cur.ea == fn.addr, f"moved={moved}")
+
 
 def main(argv):
     db = None
