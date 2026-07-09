@@ -495,16 +495,27 @@ async def run(db):
         for _ in range(4):
             await pilot.press("ctrl+d")
         await pilot.pause(0.2)
+        # Put the cursor in the MIDDLE of the viewport so the test is
+        # non-degenerate: with rel>0, restoring only the cursor (scroll-into-view)
+        # would derive a different scroll, so this actually checks scroll restore.
+        base = round(dis.scroll_offset.y)
+        mid = base + min(dis.size.height // 2, max(dis.total - base - 1, 0))
+        dis.cursor, dis.cursor_x = mid, 0
+        dis.refresh()
+        dis._after_cursor_move()
+        await pilot.pause(0.1)
         want_sy, want_cur = round(dis.scroll_offset.y), dis.cursor
+        want_rel = want_cur - want_sy
         await goto_name(fb.name)
         await wait_until(pilot, lambda: app._cur.ea == fb.addr, timeout=20)
         await pilot.press("escape")
         await wait_until(pilot, lambda: app._cur.ea == fa.addr, timeout=20)
         await wait_until(pilot, lambda: dis.total > 40, timeout=20)
-        await pilot.pause(0.4)
-        check("disasm scroll + cursor restored on back",
-              round(dis.scroll_offset.y) == want_sy and dis.cursor == want_cur,
-              f"scroll={round(dis.scroll_offset.y)} (want {want_sy}) cursor={dis.cursor}")
+        await pilot.pause(0.5)
+        check("disasm scroll + cursor restored on back (mid-viewport)",
+              round(dis.scroll_offset.y) == want_sy and dis.cursor == want_cur and want_rel > 0,
+              f"scroll={round(dis.scroll_offset.y)} (want {want_sy}) "
+              f"cursor={dis.cursor} (want {want_cur}) rel_before={want_rel}")
 
         # PageUp/Down keep the cursor at the same viewport-relative row.
         await goto_name(fa.name)

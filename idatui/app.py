@@ -561,7 +561,8 @@ class DisasmView(SearchMixin, NavMixin, ColumnCursor, ScrollView, can_focus=True
         self.cursor = cursor
         self.cursor_x = cursor_x
         self._pending_scroll_y = scroll_y
-        self.virtual_size = Size(0, 0)
+        # NB: don't zero virtual_size here — that snaps the scroll to 0 and
+        # causes a visible jump before _on_primed restores the target scroll.
         self._matches = []
         self._ranges = {}
         self._search_texts = None
@@ -624,8 +625,9 @@ class DisasmView(SearchMixin, NavMixin, ColumnCursor, ScrollView, can_focus=True
         self._clamp_x()  # cursor line is now cached; keep the column in range
         if self._pending_scroll_y is not None and self._pending_scroll_y >= 0:
             target = min(self._pending_scroll_y, max(total - 1, 0))
-            # Defer until after layout recomputes max_scroll_y, else scroll_to
-            # clamps to 0 (virtual_size was only just set).
+            # Apply now (works when the region is already sized) and again after
+            # refresh (covers the case where max_scroll_y isn't computed yet).
+            self.scroll_to(y=target, animate=False)
             self.call_after_refresh(lambda t=target: self.scroll_to(y=t, animate=False))
         else:
             self._scroll_cursor_into_view()
