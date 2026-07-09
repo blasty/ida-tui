@@ -16,10 +16,20 @@ Hard-won Textual behaviour and the patterns this app relies on. Pairs with
   `call_after_refresh` with `refresh(layout=True)`; don't zero `virtual_size` on
   load (snaps scroll to 0 → visible flash). See `ColumnCursor._apply_scroll`,
   `DisasmView._on_primed`, `DecompView.show`.
+- **Scrolling on already-laid-out content (no reload) leaves a stale frame.** A
+  plain `scroll_to` moves `scroll_offset` but Textual only repaints on a
+  *rounded* scroll change, and with no virtual_size/content change there's no
+  layout pass to force a paint — so the pane shows the old frame until the next
+  interaction (moving the cursor auto-corrects it). Route these through
+  `_apply_scroll` too (immediate scroll + deferred `refresh(layout=True)`). Bit
+  us on same-function decompiler jumps (`DecompView.goto`); the reload path
+  (`DecompView.show`) hides it because clearing the loading cover repaints.
 - **Pilot lays out synchronously**, so programmatic scroll always has a valid
   range in tests — it MASKS the real-terminal clamp/no-repaint bug. Assert the
   **render** (trace `render_line`'s scroll at paint), not just `scroll_offset.y`.
-  (`test_tui.py`: "pane is repainted at the restored scroll".)
+  (`test_tui.py`: "pane is repainted at the restored scroll".) Note even a render
+  trace can't catch the `goto` stale-frame case (no layout pass to observe) — it
+  only shows in a real terminal.
 - **`widget.loading = True`** covers the widget via `_cover_widget` (NOT a normal
   child — `query()` won't find it; check `widget._cover_widget`) and **blurs
   focus** (focus → None), so `Tab` falls back to focus-navigation. Fix: make the

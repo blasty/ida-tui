@@ -882,19 +882,37 @@ class DecompView(SearchMixin, NavMixin, ColumnCursor, ScrollView, can_focus=True
              scroll_x: int = 0) -> None:
         """Move the cursor/scroll on the already-loaded text (no re-highlight).
         Used to jump to a target inside the function already displayed, e.g. an
-        xref/goto that resolves to this same function."""
+        xref/goto that resolves to this same function.
+
+        All scrolling routes through ``_apply_scroll`` (which re-applies after the
+        next refresh with ``layout=True``): unlike the reload path there's no new
+        layout pass to force a repaint, so a plain ``scroll_to`` would leave a
+        stale frame until the next interaction.
+        """
         total = len(self._strips)
         if total == 0:
             return
         self.cursor = max(0, min(total - 1, cursor))
         self.cursor_x = cursor_x
         self._clamp_x()
-        if scroll_y >= 0:
-            self._apply_scroll(min(scroll_y, max(total - 1, 0)), scroll_x)
-        else:
-            self._scroll_cursor_into_view()
-            self._hscroll()
-        self.refresh()
+        if scroll_y < 0:  # derive a viewport that shows the (line, column)
+            height = self._visible_height()
+            top = round(self.scroll_offset.y)
+            if self.cursor < top:
+                scroll_y = self.cursor
+            elif self.cursor >= top + height:
+                scroll_y = max(self.cursor - height + 1, 0)
+            else:
+                scroll_y = top
+            width = max(self.size.width - self._gutter, 1)
+            sx = round(self.scroll_offset.x)
+            if self.cursor_x < sx:
+                scroll_x = self.cursor_x
+            elif self.cursor_x >= sx + width:
+                scroll_x = self.cursor_x - width + 1
+            else:
+                scroll_x = sx
+        self._apply_scroll(min(max(scroll_y, 0), max(total - 1, 0)), max(scroll_x, 0))
         self._after_cursor_move()
 
     def get_loading_widget(self):  # type: ignore[override]
