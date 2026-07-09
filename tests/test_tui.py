@@ -384,6 +384,27 @@ async def run(db):
                   dec.cursor == drow and dec.word_under_cursor() == dsym,
                   f"cursor={dec.cursor} (want {drow}) word={dec.word_under_cursor()!r}")
 
+        # Column sort: click headers to sort by name / address.
+        if app._filter_term:
+            app._apply_filter("")
+            await pilot.pause(0.1)
+        await pilot.click(table, offset=(15, 0))  # Function header
+        await pilot.pause(0.3)
+        snames = [str(table.get_row_at(i)[1]) for i in range(min(20, table.row_count))]
+        check("click Function header sorts by name",
+              app._sort_col == 1 and snames == sorted(snames, key=str.lower),
+              f"sort_col={app._sort_col}")
+        first_asc = str(table.get_row_at(0)[1])
+        await pilot.click(table, offset=(15, 0))  # reverse
+        await pilot.pause(0.3)
+        check("click again reverses the sort",
+              app._sort_reverse and str(table.get_row_at(0)[1]) != first_asc)
+        await pilot.click(table, offset=(3, 0))  # Address header
+        await pilot.pause(0.3)
+        saddrs = [int(str(table.get_row_at(i)[0]), 16) for i in range(min(20, table.row_count))]
+        check("click Address header sorts by address",
+              app._sort_col == 0 and saddrs == sorted(saddrs), f"sort_col={app._sort_col}")
+
 
 def main(argv):
     db = None

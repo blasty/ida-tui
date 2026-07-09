@@ -936,6 +936,8 @@ class IdaTui(App):
         self._filter_term = ""
         self._pending_filter = ""
         self._filter_timer = None
+        self._sort_col = 0        # 0=addr, 1=name, 2=size
+        self._sort_reverse = False
         self._active = "disasm"  # or "decomp"
         self._cur: NavEntry | None = None
         self._search_ctx: tuple[object | None, int] = (None, 1)
@@ -1072,6 +1074,12 @@ class IdaTui(App):
                 i = hay.find(needle)
                 if i >= 0:
                     matched.append((f, (i, i + len(term))))
+        keyfn = {
+            0: lambda fr: fr[0].addr,
+            1: lambda fr: fr[0].name.lower(),
+            2: lambda fr: fr[0].size,
+        }[self._sort_col]
+        matched.sort(key=keyfn, reverse=self._sort_reverse)
         table = self.query_one("#func-table", DataTable)
         table.clear()
         for f, rng in matched:
@@ -1092,6 +1100,26 @@ class IdaTui(App):
 
     def clear_filter(self) -> None:
         self._apply_filter("")
+
+    def on_data_table_header_selected(self, event: DataTable.HeaderSelected) -> None:
+        """Click a column header to sort by it; click again to reverse."""
+        col = event.column_index
+        if col == self._sort_col:
+            self._sort_reverse = not self._sort_reverse
+        else:
+            self._sort_col = col
+            self._sort_reverse = False
+        self._update_sort_headers()
+        self._apply_filter(self._filter_term)
+
+    def _update_sort_headers(self) -> None:
+        table = self.query_one("#func-table", DataTable)
+        bases = ["Address", "Function", "Size"]
+        arrow = " ▼" if self._sort_reverse else " ▲"
+        for i, col in enumerate(table.columns.values()):
+            col.label = Text(bases[i] + (arrow if i == self._sort_col else ""))
+        table._require_update_dimensions = True
+        table.refresh()
 
     # -- actions ----------------------------------------------------------- #
     def action_toggle_functions(self) -> None:
