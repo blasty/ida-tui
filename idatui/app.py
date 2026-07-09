@@ -1566,12 +1566,39 @@ class IdaTui(App):
             return
         model = self.program.disasm(fn.addr, fn.name)
         idx = 0 if ea == fn.addr else model.index_of_ea(ea)
-        self.app.call_from_thread(self._open_at, fn.addr, fn.name, idx, push)
+        # The disasm cursor alone doesn't position the pseudocode pane. When it's
+        # the active view, also resolve the target address to its pseudocode line
+        # (via the per-line /*0xEA*/ markers) so the jump lands on the reference
+        # there too (e.g. selecting an xref while in the decompiler view).
+        dec_idx = self._decomp_line_for(fn.addr, ea) if self._active == "decomp" else -1
+        self.app.call_from_thread(self._open_at, fn.addr, fn.name, idx, push, dec_idx)
 
-    def _open_at(self, ea: int, name: str, cursor: int, push: bool) -> None:
+    def _decomp_line_for(self, fn_addr: int, ea: int) -> int:
+        """Pseudocode line index best matching address ``ea``: the line whose
+        /*0xEA*/ marker is the largest address <= ``ea``. -1 if unavailable
+        (decompile failed / no markers). Runs in a worker (decompile is sync)."""
+        assert self.program is not None
+        try:
+            dec = self.program.decompile(fn_addr)
+        except Exception:  # noqa: BLE001
+            return -1
+        if dec.failed or not dec.code:
+            return -1
+        best_idx, best_ea = -1, -1
+        for i, line in enumerate(dec.code.splitlines()):
+            for m in re.findall(r"/\*\s*0x([0-9A-Fa-f]+)\s*\*/", line):
+                e = int(m, 16)
+                if best_ea < e <= ea:
+                    best_ea, best_idx = e, i
+        return best_idx
+
+    def _open_at(self, ea: int, name: str, cursor: int, push: bool,
+                 dec_cursor: int = -1) -> None:
         if push:
             self._save_current_pos()
         entry = NavEntry(ea=ea, name=name, cursor=cursor)
+        if dec_cursor >= 0:
+            entry.dec_cursor = dec_cursor
         if push:
             self._nav.append(entry)
         self._open_entry(entry, push=False)

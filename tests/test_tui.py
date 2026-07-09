@@ -32,7 +32,10 @@ def check(name, cond, detail=""):
         print(f"  FAIL {name}   {detail}")
 
 
-async def wait_until(pilot, pred, timeout=30.0, step=0.2):
+async def wait_until(pilot, pred, timeout=30.0, step=0.02):
+    # Poll finely so a condition that resolves quickly (the common case on a warm
+    # session) is detected promptly instead of up to `step` late across the ~50
+    # call sites; the timeout ceiling is unchanged.
     waited = 0.0
     while waited < timeout:
         if pred():
@@ -74,7 +77,7 @@ async def run(db):
                 biggest_sz, biggest_i = sz, i
 
         table.move_cursor(row=biggest_i)
-        await pilot.pause(0.1)
+        await pilot.pause(0.05)
         table.focus()
         await pilot.press("enter")
 
@@ -93,7 +96,7 @@ async def run(db):
         # Scroll down a page and confirm cursor advances + status shows an ea.
         for _ in range(5):
             await pilot.press("pagedown")
-            await pilot.pause(0.05)
+            await pilot.pause(0.025)
         moved = view.cursor > 0
         check("pagedown moved the cursor", moved, f"cursor={view.cursor}")
         await wait_until(pilot, lambda: view.model.cached_line(view.cursor) is not None, 15)
@@ -103,7 +106,7 @@ async def run(db):
 
         # Jump to bottom of a (possibly huge) function; must not hang.
         await pilot.press("end")
-        await pilot.pause(0.1)
+        await pilot.pause(0.05)
         check("goto-bottom lands near end",
               view.cursor >= view.total - 1, f"cursor={view.cursor}/{view.total}")
 
@@ -111,9 +114,9 @@ async def run(db):
         # function table is focused (and searches when a code view is focused),
         # so focus the table first.
         table.focus()
-        await pilot.pause(0.1)
+        await pilot.pause(0.05)
         await pilot.press("slash")
-        await pilot.pause(0.1)
+        await pilot.pause(0.05)
         for ch in "sub_1*":
             await pilot.press(ch if ch != "*" else "asterisk")
         await pilot.press("enter")
@@ -125,12 +128,12 @@ async def run(db):
         # Toggle the functions pane show/hide.
         left = app.query_one("#left", FunctionsPanel)
         await pilot.press("ctrl+b")
-        await pilot.pause(0.1)
+        await pilot.pause(0.05)
         check("ctrl+b hides functions pane + focuses disasm",
               not left.display and isinstance(app.focused, DisasmView),
               f"display={left.display} focus={type(app.focused).__name__}")
         await pilot.press("ctrl+b")
-        await pilot.pause(0.1)
+        await pilot.pause(0.05)
         check("ctrl+b again restores pane + focuses table",
               left.display and isinstance(app.focused, DataTable),
               f"display={left.display} focus={type(app.focused).__name__}")
@@ -160,7 +163,7 @@ async def run(db):
         )
         check("pseudocode is syntax-highlighted", styled)
         await pilot.press("shift+tab")
-        await pilot.pause(0.2)
+        await pilot.pause(0.1)
         check("shift+tab returns to disassembly",
               app._active == "disasm" and dis.display and not dec.display,
               f"active={app._active}")
@@ -183,7 +186,7 @@ async def run(db):
               not dec.loading and dec._cover_widget is None)
         # Line-number gutter.
         dec.scroll_to(0, 0, animate=False)
-        await pilot.pause(0.05)
+        await pilot.pause(0.025)
         row0 = "".join(seg.text for seg in dec.render_line(0))
         check("pseudocode has a numbered gutter (line 1 first)",
               dec._gutter > 0 and row0[:dec._gutter].strip() == "1",
@@ -196,7 +199,7 @@ async def run(db):
         raw = (line0.text.split() or ["push"])[0] if line0 else "push"
         term = "".join(c for c in raw if c.isalnum())[:4] or "push"
         await pilot.press("slash")
-        await pilot.pause(0.2)
+        await pilot.pause(0.1)
         for ch in term:
             await pilot.press(ch)
         await pilot.press("enter")
@@ -210,15 +213,15 @@ async def run(db):
               f"cursor_x={dis.cursor_x} ranges={dis._ranges.get(dis.cursor)}")
         prev = dis.cursor
         await pilot.press("slash")
-        await pilot.pause(0.1)
+        await pilot.pause(0.05)
         await pilot.press("enter")
-        await pilot.pause(0.1)
+        await pilot.pause(0.05)
         check("'/' repeats to next match",
               dis.cursor != prev and dis.cursor in dis._matches, f"cursor={dis.cursor}")
         await pilot.press("question_mark")
-        await pilot.pause(0.1)
+        await pilot.pause(0.05)
         await pilot.press("enter")
-        await pilot.pause(0.1)
+        await pilot.pause(0.05)
         check("'?' repeats to previous match", dis.cursor in dis._matches,
               f"cursor={dis.cursor}")
 
@@ -226,7 +229,7 @@ async def run(db):
         si = app.query_one("#search", Input)
         status = app.query_one("#status", Static)
         await pilot.press("slash")
-        await pilot.pause(0.2)
+        await pilot.pause(0.1)
         check("search bar visible, status hidden (no overlap)",
               si.display and not status.display, f"si={si.display} status={status.display}")
         from textual.widgets import Footer as _Footer
@@ -236,46 +239,46 @@ async def run(db):
               f"search={si.region} footer={footer.region}")
         for ch in term:
             await pilot.press(ch)
-            await pilot.pause(0.1)
+            await pilot.pause(0.05)
         check("matches highlight incrementally (before Enter)",
               len(dis._matches) > 0 and si.value == term, f"val={si.value!r}")
         await pilot.press("escape")
-        await pilot.pause(0.2)
+        await pilot.pause(0.1)
         check("Esc cancels: status restored, matches cleared",
               status.display and not si.display and not dis._matches,
               f"status={status.display} si={si.display} m={len(dis._matches)}")
 
         # Incremental function-name filter + highlight + Esc-clear.
         table.focus()
-        await pilot.pause(0.1)
+        await pilot.pause(0.05)
         if app._filter_term:  # clear any leftover filter from earlier
             await pilot.press("escape")
-            await pilot.pause(0.2)
+            await pilot.pause(0.1)
         full = table.row_count
         await pilot.press("slash")
-        await pilot.pause(0.2)
+        await pilot.pause(0.1)
         for ch in "sub_":
             await pilot.press(ch)
-            await pilot.pause(0.1)
-        await pilot.pause(0.2)
+            await pilot.pause(0.05)
+        await pilot.pause(0.1)
         check("filter narrows incrementally as you type",
               0 < table.row_count < full, f"{table.row_count}/{full}")
         cell = table.get_row_at(0)[1]
         check("filter highlights matched substring in name",
               isinstance(cell, Text) and any(s.style for s in cell.spans), repr(str(cell)))
         await pilot.press("enter")
-        await pilot.pause(0.2)
+        await pilot.pause(0.1)
         check("Enter keeps filter + focuses table",
               isinstance(app.focused, DataTable) and table.row_count < full)
         await pilot.press("escape")
-        await pilot.pause(0.3)
+        await pilot.pause(0.15)
         check("Esc on the list clears the filter", table.row_count == full,
               f"{table.row_count}/{full}")
 
         # Follow (Enter) + back (Esc) + xrefs (x), using a real call site.
         dis = app.query_one(DisasmView)
         dis.focus()
-        await pilot.pause(0.1)
+        await pilot.pause(0.05)
         lines = dis.model.lines(0, 400, prefetch=False)
         call_idx = next((i for i, ln in enumerate(lines)
                          if ln.text.startswith("call ")), None)
@@ -292,7 +295,7 @@ async def run(db):
             check("Enter follows the call into another function",
                   app._cur.ea != orig and len(app._nav) > depth, f"cur={app._cur.ea:#x}")
             await pilot.press("escape")
-            await pilot.pause(0.2)
+            await pilot.pause(0.1)
             check("Esc returns from the follow", app._cur.ea == orig, f"cur={app._cur.ea:#x}")
             dis.cursor = call_idx
             dis.refresh()
@@ -305,7 +308,7 @@ async def run(db):
                 check("xrefs popup has entries",
                       app.screen.query_one(OptionList).option_count >= 1)
                 await pilot.press("escape")
-                await pilot.pause(0.2)
+                await pilot.pause(0.1)
                 check("Esc closes the xrefs popup",
                       not isinstance(app.screen, XrefsScreen))
 
@@ -324,7 +327,7 @@ async def run(db):
                 xfn, xref = xf
                 xexp = app.program.disasm(xref.fn_addr).index_of_ea(xref.frm)
                 await pilot.press("g")
-                await pilot.pause(0.2)
+                await pilot.pause(0.1)
                 for ch in xfn.name:
                     await pilot.press(ch)
                 await pilot.press("enter")
@@ -338,11 +341,39 @@ async def run(db):
                 await pilot.press("enter")
                 await wait_until(pilot, lambda: not isinstance(app.screen, XrefsScreen), 25)
                 await wait_until(pilot, lambda: app._cur.ea == xref.fn_addr, timeout=25)
-                await pilot.pause(0.3)
+                await pilot.pause(0.15)
                 check("xref-select lands on the referencing function + line",
                       app._cur.ea == xref.fn_addr and dis.cursor == xexp,
                       f"cur={app._cur.ea:#x} (want {xref.fn_addr:#x}) "
                       f"cursor={dis.cursor} (want {xexp})")
+
+                # Same jump, but with the DECOMPILER pane active: it must land on
+                # the reference LINE in pseudocode, not the top of the function.
+                # (Repro of the reported bug; _on_xref_chosen is the dialog's
+                # selection callback, the exact seam that was broken.)
+                dec = app.query_one(DecompView)
+                dcode = app.program.decompile(xref.fn_addr)
+                dexp, be = -1, -1  # expected pseudocode line for the ref site
+                if not dcode.failed and dcode.code:
+                    for i, ln in enumerate(dcode.code.splitlines()):
+                        for mm in re.findall(r"/\*\s*0x([0-9A-Fa-f]+)\s*\*/", ln):
+                            e = int(mm, 16)
+                            if be < e <= xref.frm:
+                                be, dexp = e, i
+                if dexp >= 0:
+                    app._open_function(xfn.addr, xfn.name)  # start elsewhere
+                    await wait_until(pilot, lambda: app._cur.ea == xfn.addr, 20)
+                    app._active = "decomp"
+                    app._show_active()
+                    await wait_until(pilot, lambda: dec.loaded_ea == xfn.addr, 25)
+                    app._on_xref_chosen(xref.frm)  # pick the caller from the dialog
+                    await wait_until(pilot, lambda: dec.loaded_ea == xref.fn_addr, 25)
+                    await pilot.pause(0.1)
+                    check("xref-select lands on the reference LINE in pseudocode",
+                          dec.cursor == dexp, f"dec.cursor={dec.cursor} want={dexp}")
+                    app._active = "disasm"     # restore for the following blocks
+                    app._show_active()
+                    await pilot.pause(0.05)
 
             # The xref-select sub-test above navigated 'dis' to another function;
             # return to the original and materialize the call line so the column
@@ -355,7 +386,7 @@ async def run(db):
             dis.cursor = call_idx
             dis.cursor_x = 5
             dis.refresh()
-            await pilot.pause(0.05)
+            await pilot.pause(0.025)
             await pilot.press("h")
             check("h moves the column cursor left", dis.cursor_x == 4, f"x={dis.cursor_x}")
             await pilot.press("l")
@@ -367,7 +398,7 @@ async def run(db):
                 dis.cursor = call_idx
                 dis.cursor_x = m.start(1) + 1
                 dis.refresh()
-                await pilot.pause(0.1)
+                await pilot.pause(0.05)
                 check("word-under-cursor is the operand symbol",
                       dis.word_under_cursor() == m.group(1),
                       f"{dis.word_under_cursor()!r} vs {m.group(1)!r}")
@@ -384,7 +415,7 @@ async def run(db):
         await pilot.press("enter")
         await wait_until(pilot, lambda: dis.total > 0, timeout=20)
         dis.focus()
-        await pilot.pause(0.2)
+        await pilot.pause(0.1)
         mrow = mcol = msym = mline = None
         for _ in range(40):  # page down until a 'call sub_' is on screen
             top = round(dis.scroll_offset.y)
@@ -399,12 +430,12 @@ async def run(db):
             if mrow is not None:
                 break
             await pilot.press("pagedown")
-            await pilot.pause(0.05)
+            await pilot.pause(0.025)
         if mrow is None:
             check("found a call line for the mouse test", False, "no visible call sub_")
         else:
             await pilot.click(dis, offset=(mcol + 1, mrow))  # +1: left padding
-            await pilot.pause(0.1)
+            await pilot.pause(0.05)
             check("single click places the cursor on the clicked token",
                   dis.cursor == mline and dis.word_under_cursor() == msym,
                   f"cursor={dis.cursor} (want {mline}) word={dis.word_under_cursor()!r}")
@@ -448,7 +479,7 @@ async def run(db):
         else:
             fn, drow, dcol, dsym = pick
             await pilot.press("g")
-            await pilot.pause(0.2)
+            await pilot.pause(0.1)
             for ch in fn.name:
                 await pilot.press(ch)
             await pilot.press("enter")
@@ -458,13 +489,13 @@ async def run(db):
             dec.cursor = drow
             dec.cursor_x = dcol
             dec._after_cursor_move()
-            await pilot.pause(0.1)
+            await pilot.pause(0.05)
             depth = len(app._nav)
             await pilot.press("enter")  # follow the sym under the pseudocode cursor
             await wait_until(pilot, lambda: len(app._nav) > depth, timeout=25)
             await pilot.press("escape")
             await wait_until(pilot, lambda: dec.loaded_ea == fn.addr, timeout=25)
-            await pilot.pause(0.2)
+            await pilot.pause(0.1)
             check("pseudocode-view position restored after jump+back",
                   dec.cursor == drow and dec.word_under_cursor() == dsym,
                   f"cursor={dec.cursor} (want {drow}) word={dec.word_under_cursor()!r}")
@@ -491,20 +522,20 @@ async def run(db):
         # Column sort: click headers to sort by name / address.
         if app._filter_term:
             app._apply_filter("")
-            await pilot.pause(0.1)
+            await pilot.pause(0.05)
         await pilot.click(table, offset=(15, 0))  # Function header
-        await pilot.pause(0.3)
+        await pilot.pause(0.15)
         snames = [str(table.get_row_at(i)[1]) for i in range(min(20, table.row_count))]
         check("click Function header sorts by name",
               app._sort_col == 1 and snames == sorted(snames, key=str.lower),
               f"sort_col={app._sort_col}")
         first_asc = str(table.get_row_at(0)[1])
         await pilot.click(table, offset=(15, 0))  # reverse
-        await pilot.pause(0.3)
+        await pilot.pause(0.15)
         check("click again reverses the sort",
               app._sort_reverse and str(table.get_row_at(0)[1]) != first_asc)
         await pilot.click(table, offset=(3, 0))  # Address header
-        await pilot.pause(0.3)
+        await pilot.pause(0.15)
         saddrs = [int(str(table.get_row_at(i)[0]), 16) for i in range(min(20, table.row_count))]
         check("click Address header sorts by address",
               app._sort_col == 0 and saddrs == sorted(saddrs), f"sort_col={app._sort_col}")
@@ -514,7 +545,7 @@ async def run(db):
             fn, drow, dcol, dsym = pick
             dtarget = app.program.resolve(dsym)
             await pilot.press("g")
-            await pilot.pause(0.2)
+            await pilot.pause(0.1)
             for ch in fn.name:
                 await pilot.press(ch)
             await pilot.press("enter")
@@ -525,10 +556,10 @@ async def run(db):
             dec.focus()
             dec.cursor, dec.cursor_x = drow, dcol + 1
             dec.refresh()
-            await pilot.pause(0.1)
+            await pilot.pause(0.05)
             newname = f"ren_{os.getpid()}"
             await pilot.press("n")
-            await pilot.pause(0.2)
+            await pilot.pause(0.1)
             ri = app.query_one("#rename", Input)
             check("'n' opens the rename prompt prefilled with the symbol",
                   ri.display and ri.value == dsym, f"val={ri.value!r}")
@@ -551,7 +582,7 @@ async def run(db):
 
             # Decompiler follow of a name NOT in refs (the function's own name).
             await pilot.press("g")
-            await pilot.pause(0.2)
+            await pilot.pause(0.1)
             for ch in fn.name:
                 await pilot.press(ch)
             await pilot.press("enter")
@@ -564,7 +595,7 @@ async def run(db):
                 dec.focus()
                 dec.cursor, dec.cursor_x = 0, nx + 1
                 dec.refresh()
-                await pilot.pause(0.1)
+                await pilot.pause(0.05)
                 depth = len(app._nav)
                 await pilot.press("enter")
                 moved = await wait_until(pilot, lambda: len(app._nav) > depth, timeout=25)
@@ -574,7 +605,7 @@ async def run(db):
         # Scroll position (not just the cursor) is restored on back, both views.
         async def goto_name(name):
             await pilot.press("g")
-            await pilot.pause(0.2)
+            await pilot.pause(0.1)
             for ch in name:
                 await pilot.press(ch)
             await pilot.press("enter")
@@ -587,10 +618,10 @@ async def run(db):
         await wait_until(pilot, lambda: dis.total > 40 and app._cur.ea == fa.addr, timeout=20)
         if app._active != "disasm":
             await pilot.press("tab")
-        await pilot.pause(0.2)
+        await pilot.pause(0.1)
         for _ in range(4):
             await pilot.press("ctrl+d")
-        await pilot.pause(0.2)
+        await pilot.pause(0.1)
         # Put the cursor in the MIDDLE of the viewport so the test is
         # non-degenerate: with rel>0, restoring only the cursor (scroll-into-view)
         # would derive a different scroll, so this actually checks scroll restore.
@@ -599,7 +630,7 @@ async def run(db):
         dis.cursor, dis.cursor_x = mid, 0
         dis.refresh()
         dis._after_cursor_move()
-        await pilot.pause(0.1)
+        await pilot.pause(0.05)
         want_sy, want_cur = round(dis.scroll_offset.y), dis.cursor
         want_rel = want_cur - want_sy
         await goto_name(fb.name)
@@ -616,7 +647,7 @@ async def run(db):
         await pilot.press("escape")
         await wait_until(pilot, lambda: app._cur.ea == fa.addr, timeout=20)
         await wait_until(pilot, lambda: dis.total > 40, timeout=20)
-        await pilot.pause(0.5)
+        await pilot.pause(0.25)
         check("disasm scroll + cursor restored on back (mid-viewport)",
               round(dis.scroll_offset.y) == want_sy and dis.cursor == want_cur and want_rel > 0,
               f"scroll={round(dis.scroll_offset.y)} (want {want_sy}) "
@@ -631,18 +662,18 @@ async def run(db):
         await wait_until(pilot, lambda: dis.total > 100 and app._cur.ea == fa.addr, timeout=20)
         if app._active != "disasm":
             await pilot.press("tab")
-        await pilot.pause(0.2)
+        await pilot.pause(0.1)
         for _ in range(6):
             await pilot.press("j")
-        await pilot.pause(0.1)
+        await pilot.pause(0.05)
         rel = dis.cursor - round(dis.scroll_offset.y)
         await pilot.press("pagedown")
-        await pilot.pause(0.1)
+        await pilot.pause(0.05)
         check("PageDown preserves the viewport-relative row",
               dis.cursor - round(dis.scroll_offset.y) == rel,
               f"rel={dis.cursor - round(dis.scroll_offset.y)} want={rel}")
         await pilot.press("pageup")
-        await pilot.pause(0.1)
+        await pilot.pause(0.05)
         check("PageUp preserves the viewport-relative row",
               dis.cursor - round(dis.scroll_offset.y) == rel,
               f"rel={dis.cursor - round(dis.scroll_offset.y)} want={rel}")
@@ -659,7 +690,7 @@ async def run(db):
         await wait_until(pilot, lambda: dec.loaded_ea == bea, timeout=20)
         await pilot.press("tab")
         dis.focus()
-        await pilot.pause(0.2)
+        await pilot.pause(0.1)
         hrow = hsym = None
         for _ in range(40):
             top = round(dis.scroll_offset.y)
@@ -674,11 +705,11 @@ async def run(db):
             if hrow is not None:
                 break
             await pilot.press("pagedown")
-            await pilot.pause(0.05)
+            await pilot.pause(0.025)
         if hrow is not None:
             htarget = app.program.resolve(hsym)
             await pilot.press("g")
-            await pilot.pause(0.2)
+            await pilot.pause(0.1)
             for ch in hsym:
                 await pilot.press(ch)
             await pilot.press("enter")
@@ -691,10 +722,10 @@ async def run(db):
                 dec.focus()
                 dec.cursor, dec.cursor_x = 0, nx + 1
                 dec.refresh()
-                await pilot.pause(0.1)
+                await pilot.pause(0.05)
                 hnew = f"h_{os.getpid()}"
                 await pilot.press("n")
-                await pilot.pause(0.2)
+                await pilot.pause(0.1)
                 app.query_one("#rename", Input).value = hnew
                 await pilot.press("enter")
                 await wait_until(
@@ -708,16 +739,16 @@ async def run(db):
                 await pilot.press("escape")
                 await wait_until(
                     pilot, lambda: dis.total > 0 and app._cur.ea != htarget, timeout=25)
-                await pilot.pause(0.4)
-                dis.model.lines(hrow, 4, prefetch=False)
                 await pilot.pause(0.2)
+                dis.model.lines(hrow, 4, prefetch=False)
+                await pilot.pause(0.1)
                 hline = dis._line_plain(hrow)
                 check("caller disasm shows renamed callee after 'back'",
                       hline is not None and hnew in hline, f"line={hline!r}")
                 # and the caller's cached pseudocode must refresh too
                 await pilot.press("tab")
                 await wait_until(pilot, lambda: dec.loaded_ea == bea, timeout=25)
-                await pilot.pause(0.3)
+                await pilot.pause(0.15)
                 check("caller pseudocode shows renamed callee after 'back'",
                       any(hnew in tx for tx in dec._texts),
                       "pseudocode still stale")
