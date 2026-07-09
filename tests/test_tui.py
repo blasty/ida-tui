@@ -629,6 +629,35 @@ async def run(db):
             else:
                 check("found a pseudocode label to test", False, "no LABEL_ found")
 
+            # Add a comment on the current pseudocode line via ';' and confirm it
+            # renders after the decompiler refreshes.
+            cline = next((i for i, t in enumerate(dec._texts)
+                          if i > 5 and "/*0x" in t and t.strip() and "//" not in t), None)
+            if cline is not None:
+                cea = dec._line_ea(cline)
+                dec.focus()
+                dec.cursor, dec.cursor_x = cline, 2
+                dec.refresh()
+                await pilot.pause(0.05)
+                await pilot.press("semicolon")
+                await pilot.pause(0.1)
+                ci = app.query_one("#comment", Input)
+                cnote = f"note_{os.getpid()}"
+                check("';' opens the comment prompt on the current line", ci.display,
+                      f"display={ci.display}")
+                ci.value = cnote
+                await pilot.press("enter")
+                await wait_until(
+                    pilot, lambda: dec.loaded_ea == app._cur.ea
+                    and any(cnote in t for t in dec._texts), timeout=25)
+                check("comment appears in the pseudocode after ';'",
+                      any(cnote in t for t in dec._texts), "comment not shown")
+                # revert via the API for clean, race-free cleanup
+                app.program.client.call(
+                    "set_comments", items=[{"addr": hex(cea), "comment": ""}])
+            else:
+                check("found a pseudocode line to comment", False, "no marker line")
+
             # Decompiler follow of a name NOT in refs (the function's own name).
             await pilot.press("g")
             await pilot.pause(0.1)

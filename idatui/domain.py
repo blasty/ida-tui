@@ -508,6 +508,13 @@ class Program:
             raise KeyError(f"cannot resolve {target!r}")
         return _as_int(fn["addr"])
 
+    # -- comments ---------------------------------------------------------- #
+    def set_comment(self, ea: int, text: str):
+        """Set (empty text clears) the comment at ``ea``; affects both the disasm
+        and decompiler views. Returns the raw payload so the caller can surface a
+        soft per-item error. The caller must invalidate/recompile to see it."""
+        return self.client.call("set_comments", items=[{"addr": hex(ea), "comment": text}])
+
     # -- invalidation (after edits) --------------------------------------- #
     def invalidate(self, ea: int) -> None:
         """Drop caches for a function after a rename/comment/patch/etc."""

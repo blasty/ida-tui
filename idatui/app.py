@@ -103,6 +103,14 @@ class RenameRequested(Message):
         self.name = name
 
 
+class CommentRequested(Message):
+    """A code view asks to set a comment on the current line."""
+
+    def __init__(self, view) -> None:  # type: ignore[no-untyped-def]
+        super().__init__()
+        self.view = view
+
+
 class NavMixin:
     """Follow / xrefs actions shared by the code views (bindings live on each
     view since Textual only merges BINDINGS from DOMNode subclasses)."""
@@ -111,6 +119,7 @@ class NavMixin:
         Binding("enter", "follow", "Follow"),
         Binding("x", "xrefs", "Xrefs"),
         Binding("n", "rename", "Rename"),
+        Binding("semicolon", "comment", "Comment"),
     ]
 
     def action_follow(self) -> None:
@@ -121,6 +130,9 @@ class NavMixin:
 
     def action_rename(self) -> None:
         self.post_message(RenameRequested(self, self.word_under_cursor()))
+
+    def action_comment(self) -> None:
+        self.post_message(CommentRequested(self))
 
 
 def _overlay_ranges(strip: Strip, ranges: list[tuple[int, int]], style: Style) -> Strip:
@@ -997,6 +1009,10 @@ class IdaTui(App):
         height: 1; border: none; padding: 0 1;
         background: $warning-darken-2; color: $text;
     }
+    #comment {
+        height: 1; border: none; padding: 0 1;
+        background: $success-darken-2; color: $text;
+    }
     #status { height: 1; background: $panel; color: $text; padding: 0 1; }
     .decomp-loading {
         width: 100%; height: 100%; content-align: center middle;
@@ -1039,6 +1055,7 @@ class IdaTui(App):
         self._cur: NavEntry | None = None
         self._search_ctx: tuple[object | None, int] = (None, 1)
         self._rename_ctx: tuple[object | None, str] = (None, "")
+        self._comment_ctx: tuple[object | None, int, str] = (None, 0, "")
         self._dirty = False
 
     # -- layout ------------------------------------------------------------ #
@@ -1059,6 +1076,10 @@ class IdaTui(App):
         ri.display = False
         ri.can_focus = False
         yield ri
+        ci = Input(id="comment")
+        ci.display = False
+        ci.can_focus = False
+        yield ci
         yield Static("connecting…", id="status")
         yield Footer()
 
@@ -1478,6 +1499,78 @@ class IdaTui(App):
         if view is not None:
             view.focus()
 
+    # -- comments ---------------------------------------------------------- #
+    def _line_ea_for(self, view) -> int | None:  # type: ignore[no-untyped-def]
+        """Address of the line under the cursor in either code view."""
+        if isinstance(view, DisasmView):
+            return view._cursor_ea()
+        if isinstance(view, DecompView):
+            return view._line_ea(view.cursor)
+        return None
+
+    @staticmethod
+    def _existing_comment(view) -> str:
+        """Current line comment (for prefill), parsed from the rendered text. In
+        pseudocode a comment is `// text` before the trailing /*0xEA*/ markers;
+        C has no `//` operator, so the last `//` is unambiguously the comment."""
+        if isinstance(view, DecompView) and 0 <= view.cursor < len(view._texts):
+            s = re.sub(r"(?:/\*\s*0x[0-9A-Fa-f]+\s*\*/\s*)+$", "", view._texts[view.cursor])
+            i = s.rfind("//")
+            return s[i + 2:].strip() if i >= 0 else ""
+        return ""
+
+    def on_comment_requested(self, msg: CommentRequested) -> None:
+        ea = self._line_ea_for(msg.view)
+        if ea is None:
+            self._status("no address on this line to comment")
+            return
+        existing = self._existing_comment(msg.view)
+        self._comment_ctx = (msg.view, ea, existing)
+        self.query_one("#status", Static).display = False
+        inp = self.query_one("#comment", Input)
+        inp.placeholder = f"comment @ {ea:#x} —  Enter=apply (empty=clear)  Esc=cancel"
+        inp.can_focus = True
+        inp.display = True
+        inp.value = existing
+        inp.focus()
+
+    def _end_comment(self) -> None:
+        inp = self.query_one("#comment", Input)
+        inp.display = False
+        inp.can_focus = False
+        self.query_one("#status", Static).display = True
+        view, _, _ = self._comment_ctx
+        if view is not None:
+            view.focus()
+
+    @work(thread=True, exclusive=True, group="comment")
+    def _do_comment(self, ea: int, text: str) -> None:
+        assert self.program is not None
+        try:
+            res = self.program.set_comment(ea, text)
+        except IDAToolError as e:
+            self.app.call_from_thread(self._status, f"comment failed: {e.message}")
+            return
+        data = res.get("result") if isinstance(res, dict) else None
+        if isinstance(data, list) and data and isinstance(data[0], dict) and data[0].get("error"):
+            self.app.call_from_thread(self._status, f"comment failed: {data[0]['error']}")
+            return
+        self.app.call_from_thread(self._after_comment, ea, text)
+
+    def _after_comment(self, ea: int, text: str) -> None:
+        cur = self._cur
+        # A comment shows in both views but only after Hex-Rays recompiles, so
+        # reuse the name-generation invalidation (bumps gen -> decompile is
+        # force_recompiled lazily; disasm block caches are cleared).
+        self.program.bump_names()
+        if cur is not None:
+            self._save_current_pos()
+            self.query_one(DecompView).loaded_ea = None  # force pseudocode reload
+            self._open_entry(cur, push=False)
+        self._dirty = True
+        verb = "cleared comment" if not text else "commented"
+        self._status(f"{verb} @ {ea:#x}   (Ctrl+S to save)")
+
     @work(thread=True, exclusive=True, group="rename")
     def _do_rename(self, view, old: str, new: str) -> None:  # type: ignore[no-untyped-def]
         assert self.program is not None
@@ -1661,6 +1754,11 @@ class IdaTui(App):
             event.prevent_default()
             self._end_rename()
             return
+        if self.query_one("#comment", Input).display:
+            event.stop()
+            event.prevent_default()
+            self._end_comment()
+            return
         fi = self.query_one("#func-filter", Input)
         if fi.display:
             event.stop()
@@ -1692,6 +1790,12 @@ class IdaTui(App):
             self._end_rename()
             if view is not None and value and value != old:
                 self._do_rename(view, old, value)
+            return
+        if inp.id == "comment":
+            view, ea, existing = self._comment_ctx
+            self._end_comment()
+            if view is not None and value != existing:  # empty value clears it
+                self._do_comment(ea, value)
             return
         if getattr(self, "_goto_mode", False):
             self._goto_mode = False
