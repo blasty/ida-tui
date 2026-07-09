@@ -326,6 +326,21 @@ class ColumnCursor:
     def action_half_page(self, direction: int) -> None:
         self._page_scroll(direction * (self._visible_height() // 2))
 
+    def _apply_scroll(self, y: int, x: int = 0) -> None:
+        """Set the scroll offset reliably after a (re)load. Applied now and again
+        after the next refresh — when the view was just shown its size isn't
+        computed yet, so an immediate scroll_to clamps to 0; the deferred pass
+        re-applies it and forces a repaint so the pane never shows a stale frame.
+        """
+        y = max(0, y)
+        self.scroll_to(x=x, y=y, animate=False)
+
+        def _fix(yy: int = y, xx: int = x) -> None:
+            self.scroll_to(x=xx, y=yy, animate=False)
+            self.refresh(layout=True)
+
+        self.call_after_refresh(_fix)
+
 
 class SearchMixin:
     """Vim-style in-view search shared by the disasm and pseudocode views.
@@ -624,14 +639,7 @@ class DisasmView(SearchMixin, NavMixin, ColumnCursor, ScrollView, can_focus=True
         self.virtual_size = Size(0, total)
         self._clamp_x()  # cursor line is now cached; keep the column in range
         if self._pending_scroll_y is not None and self._pending_scroll_y >= 0:
-            target = min(self._pending_scroll_y, max(total - 1, 0))
-            # Apply now (works when the region is already sized) and again after
-            # refresh (covers the case where max_scroll_y isn't computed yet).
-            # The deferred call also forces a repaint, so the pane is never left
-            # showing a stale frame at the top with scroll_offset already moved.
-            self.scroll_to(y=target, animate=False)
-            self.call_after_refresh(
-                lambda t=target: (self.scroll_to(y=t, animate=False), self.refresh()))
+            self._apply_scroll(min(self._pending_scroll_y, max(total - 1, 0)))
         else:
             self._scroll_cursor_into_view()
         self._pending_scroll_y = None
@@ -820,7 +828,7 @@ class DecompView(SearchMixin, NavMixin, ColumnCursor, ScrollView, can_focus=True
         self.virtual_size = Size(maxw, total)
         self._clamp_x()
         if scroll_y >= 0:
-            self.scroll_to(x=scroll_x, y=min(scroll_y, max(total - 1, 0)), animate=False)
+            self._apply_scroll(min(scroll_y, max(total - 1, 0)), scroll_x)
         else:
             self.scroll_to(0, 0, animate=False)
             self._scroll_cursor_into_view()
