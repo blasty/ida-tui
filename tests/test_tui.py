@@ -303,6 +303,41 @@ async def run(db):
                 check("Esc closes the xrefs popup",
                       not isinstance(app.screen, XrefsScreen))
 
+            # Selecting an xref must land on the referencing SITE (right function
+            # AND line), not the function under the cursor.
+            xf = None
+            for cand in app.program.functions().all_loaded()[:600]:
+                codex = [x for x in app.program.xrefs_to(cand.addr)
+                         if x.type == "code" and x.frm]
+                if codex:
+                    xf = (cand, codex[0])
+                    break
+            if xf is None:
+                check("found a function with a code xref", False)
+            else:
+                xfn, xref = xf
+                xexp = app.program.disasm(xref.fn_addr).index_of_ea(xref.frm)
+                await pilot.press("g")
+                await pilot.pause(0.2)
+                for ch in xfn.name:
+                    await pilot.press(ch)
+                await pilot.press("enter")
+                await wait_until(pilot, lambda: dis.total > 0 and app._cur.ea == xfn.addr,
+                                 timeout=20)
+                dis.focus()
+                dis.cursor, dis.cursor_x = 0, 0  # on the entry (address column)
+                await pilot.press("x")
+                await wait_until(pilot, lambda: isinstance(app.screen, XrefsScreen), 25)
+                app.screen.query_one(OptionList).highlighted = 0
+                await pilot.press("enter")
+                await wait_until(pilot, lambda: not isinstance(app.screen, XrefsScreen), 25)
+                await wait_until(pilot, lambda: app._cur.ea == xref.fn_addr, timeout=25)
+                await pilot.pause(0.3)
+                check("xref-select lands on the referencing function + line",
+                      app._cur.ea == xref.fn_addr and dis.cursor == xexp,
+                      f"cur={app._cur.ea:#x} (want {xref.fn_addr:#x}) "
+                      f"cursor={dis.cursor} (want {xexp})")
+
             # Column cursor: h/l move it; following the symbol under the cursor.
             dis.focus()
             dis.cursor = call_idx

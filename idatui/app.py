@@ -1380,8 +1380,11 @@ class IdaTui(App):
             except Exception:  # noqa: BLE001
                 subj = None
         if subj is None:
-            frm = self.program.xrefs_from(ea)
-            subj = next((x.to for x in frm if x.type == "code" and x.to), ea)
+            # xrefs to the current address itself. (Do NOT chase a from-xref: on
+            # a plain instruction the only code from-xref is the ordinary-flow
+            # fall-through to the next instruction, which would point xrefs at
+            # the wrong place. At a function entry, xrefs-to == the callers.)
+            subj = ea
         self._xrefs_present(subj)
 
     @work(thread=True, group="xrefs")
