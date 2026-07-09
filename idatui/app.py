@@ -247,10 +247,12 @@ class IdaTui(App):
         Binding("escape", "back", "Back"),
     ]
 
-    def __init__(self, url: str, db: str | None, keepalive: bool = True) -> None:
+    def __init__(self, url: str, db: str | None, keepalive: bool = True,
+                 open_path: str | None = None) -> None:
         super().__init__()
         self._url = url
         self._db = db
+        self._open_path = open_path
         self._do_keepalive = keepalive
         self.client: IDAClient | None = None
         self.program: Program | None = None
@@ -285,7 +287,18 @@ class IdaTui(App):
         try:
             client = IDAClient(self._url, db=self._db)
             client.connect()
-            if self._db is None:
+            if self._open_path is not None:
+                self.app.call_from_thread(self._status, f"opening {self._open_path}…")
+                import os
+                path = os.path.abspath(os.path.expanduser(self._open_path))
+                res = client.call("idb_open", input_path=path,
+                                  idle_ttl_sec=1_000_000_000, timeout=1800.0)
+                if not (isinstance(res, dict) and res.get("success")):
+                    err = res.get("error") if isinstance(res, dict) else res
+                    self.app.call_from_thread(self._status, f"open failed: {err}")
+                    return
+                client.set_db(res["session"]["session_id"])
+            elif self._db is None:
                 client.set_db(client.resolve_db())
             health = client.health()
             module = health.get("module", "?")
