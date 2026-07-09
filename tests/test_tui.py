@@ -383,6 +383,25 @@ async def run(db):
                     await pilot.pause(0.1)
                     check("xref-select lands on the reference LINE in pseudocode",
                           dec.cursor == dexp, f"dec.cursor={dec.cursor} want={dexp}")
+
+                    # And a jump whose target is INSIDE the already-displayed
+                    # function must still move the cursor (the decompiler pane
+                    # isn't reloaded in that case, so it needs explicit repos).
+                    anch = [(i, dec._line_ea(i)) for i in range(len(dec._texts))
+                            if dec._line_ea(i) is not None]
+                    if len(anch) >= 4:
+                        start_ln = anch[1][0]
+                        far_ea = anch[len(anch) // 2][1]
+                        exp2 = app._decomp_line_for(app._cur.ea, far_ea)
+                        dec.focus()
+                        dec.cursor = start_ln
+                        dec.refresh()
+                        await pilot.pause(0.05)
+                        app._on_xref_chosen(far_ea)  # target within this function
+                        await wait_until(pilot, lambda: dec.cursor == exp2, timeout=20)
+                        check("xref-select moves the cursor within the same function",
+                              dec.cursor == exp2 and exp2 != start_ln,
+                              f"dec.cursor={dec.cursor} want={exp2} start={start_ln}")
                     app._active = "disasm"     # restore for the following blocks
                     app._show_active()
                     await pilot.pause(0.05)

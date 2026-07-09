@@ -878,6 +878,25 @@ class DecompView(SearchMixin, NavMixin, ColumnCursor, ScrollView, can_focus=True
             self._hscroll()
         self.refresh()
 
+    def goto(self, cursor: int, cursor_x: int = 0, scroll_y: int = -1,
+             scroll_x: int = 0) -> None:
+        """Move the cursor/scroll on the already-loaded text (no re-highlight).
+        Used to jump to a target inside the function already displayed, e.g. an
+        xref/goto that resolves to this same function."""
+        total = len(self._strips)
+        if total == 0:
+            return
+        self.cursor = max(0, min(total - 1, cursor))
+        self.cursor_x = cursor_x
+        self._clamp_x()
+        if scroll_y >= 0:
+            self._apply_scroll(min(scroll_y, max(total - 1, 0)), scroll_x)
+        else:
+            self._scroll_cursor_into_view()
+            self._hscroll()
+        self.refresh()
+        self._after_cursor_move()
+
     def get_loading_widget(self):  # type: ignore[override]
         # Shown (grayed, centered) while a (re)decompile is in flight.
         return Static("― decompiling… ―", classes="decomp-loading")
@@ -1872,7 +1891,15 @@ class IdaTui(App):
         sy = entry.scroll_y if entry.scroll_y >= 0 else None
         self.query_one(DisasmView).load(
             model, entry.name, cursor=entry.cursor, cursor_x=entry.cursor_x, scroll_y=sy)
+        dec = self.query_one(DecompView)
+        # If the decompiler already shows this function, _show_active won't reload
+        # it (and thus won't reposition), so move its cursor to the target line
+        # here — e.g. an xref/goto whose target is inside the current function.
+        reposition_dec = dec.loaded_ea == entry.ea
         self._show_active()
+        if reposition_dec and self._active == "decomp":
+            dsy = entry.dec_scroll_y if entry.dec_scroll_y >= 0 else -1
+            dec.goto(entry.dec_cursor, entry.dec_cursor_x, dsy, entry.dec_scroll_x)
 
     def _show_active(self) -> None:
         dis = self.query_one(DisasmView)
