@@ -1347,6 +1347,14 @@ class IdaTui(App):
         if addr is None:
             addr = self._ref_on_line(line)
         if addr is None:
+            # Address-based fallback: use the line's /*0xEA*/ marker and follow a
+            # code xref from that statement. Immune to a stale name (e.g. right
+            # after a rename, before the pseudocode text catches up).
+            m = re.search(r"/\*\s*0x([0-9A-Fa-f]+)\s*\*/", line or "")
+            if m:
+                xr = self.program.xrefs_from(int(m.group(1), 16))
+                addr = next((x.to for x in xr if x.type == "code" and x.to), None)
+        if addr is None:
             self.app.call_from_thread(self._status, "nothing to follow on this line")
             return
         self._do_navigate(addr, push=True)
