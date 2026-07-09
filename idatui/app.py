@@ -1232,7 +1232,8 @@ class IdaTui(App):
         self._filter_timer = None
         self._sort_col = 0        # 0=addr, 1=name, 2=size
         self._sort_reverse = False
-        self._active = "decomp"  # default code view (or "disasm")
+        self._pref = "decomp"    # preferred code view (changed by Tab)
+        self._active = "decomp"  # currently shown view (falls back on decomp fail)
         self._cur: NavEntry | None = None
         self._search_ctx: tuple[object | None, int] = (None, 1)
         self._rename_ctx: tuple[object | None, str] = (None, "")
@@ -1463,6 +1464,7 @@ class IdaTui(App):
         if self._cur is None:
             return
         self._active = "decomp" if self._active == "disasm" else "disasm"
+        self._pref = self._active  # an explicit toggle sets the preference
         self._show_active()
 
     def action_filter(self) -> None:
@@ -2130,6 +2132,9 @@ class IdaTui(App):
         if self.program is None:
             return
         self._cur = entry
+        # Each open honours the preferred view; a decomp failure last time fell
+        # back to disasm without changing the preference, so retry decomp here.
+        self._active = self._pref
         model = self.program.disasm(entry.ea, entry.name)
         sy = entry.scroll_y if entry.scroll_y >= 0 else None
         self.query_one(DisasmView).load(
@@ -2176,6 +2181,17 @@ class IdaTui(App):
     def _apply_decomp(self, ea: int, name: str, dec) -> None:  # type: ignore[no-untyped-def]
         view = self.query_one(DecompView)
         view.loading = False
+        if dec.failed:
+            # No pseudocode for this function: fall back to the disassembly view
+            # rather than showing an error panel. Keep the pseudocode preference
+            # so the next (decompilable) function still opens as pseudocode.
+            if self._cur is None or self._cur.ea != ea:
+                return  # navigated away; stale result
+            self._active = "disasm"
+            self._show_active()
+            self._status(
+                f"{name} — no pseudocode (decompile failed); showing disassembly")
+            return
         if self._active == "decomp":
             view.focus()  # loading cover had blurred it; restore focus
         # Restore the saved pseudocode position when returning to this function.
@@ -2185,13 +2201,9 @@ class IdaTui(App):
         cx = cur.dec_cursor_x if same else 0
         sy = cur.dec_scroll_y if (same and cur.dec_scroll_y >= 0) else -1
         sx = cur.dec_scroll_x if same else 0
-        if dec.failed:
-            view.show(ea, f"/* decompilation failed at {ea:#x}: {dec.error} */\n")
-            self._status(f"{name} — decompile failed; Tab for disasm")
-        else:
-            note = "  (truncated)" if dec.truncated else ""
-            view.show(ea, dec.code or "", cursor=c, cursor_x=cx, scroll_y=sy, scroll_x=sx)
-            self._status(f"{name}  @ {ea:#x}   [pseudocode {len(dec.code or '')} chars]{note}")
+        note = "  (truncated)" if dec.truncated else ""
+        view.show(ea, dec.code or "", cursor=c, cursor_x=cx, scroll_y=sy, scroll_x=sx)
+        self._status(f"{name}  @ {ea:#x}   [pseudocode {len(dec.code or '')} chars]{note}")
 
     def on_decomp_view_cursor_moved(self, msg: DecompView.CursorMoved) -> None:
         if self._nav:

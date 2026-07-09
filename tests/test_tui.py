@@ -117,6 +117,32 @@ async def run(db):
         await wait_until(pilot, lambda: not isinstance(app.screen, SymbolPalette), 10)
         check("Esc closes the palette", not isinstance(app.screen, SymbolPalette))
 
+        # Decompile-failure fallback: a function that can't be decompiled opens
+        # in disassembly (not an error panel), and the pseudocode preference is
+        # kept so the next decompilable function still opens as pseudocode.
+        # (Import/PLT stubs at high addresses fail fast; scan from the top.)
+        d_view = app.query_one(DisasmView)
+        c_view = app.query_one(DecompView)
+        failing = next((f for f in reversed(app.program.functions().all_loaded())
+                        if app.program.decompile(f.addr).failed), None)
+        if failing is not None and app._pref == "decomp":
+            app._goto(hex(failing.addr))
+            await wait_until(pilot, lambda: app._cur and app._cur.ea == failing.addr, 20)
+            await wait_until(pilot, lambda: app._active == "disasm", 20)
+            check("decompile failure falls back to disassembly (preference kept)",
+                  app._active == "disasm" and d_view.display and not c_view.display
+                  and app._pref == "decomp",
+                  f"active={app._active} pref={app._pref} "
+                  f"disp(dis={d_view.display},dec={c_view.display})")
+            app._goto("main")
+            await wait_until(pilot, lambda: app._cur and app._cur.name == "main", 20)
+            await wait_until(pilot, lambda: app._active == "decomp" and c_view.display, 25)
+            check("preference preserved: next function opens as pseudocode",
+                  app._active == "decomp" and c_view.display, f"active={app._active}")
+        else:
+            check("found a decompile-failing function", failing is not None,
+                  f"pref={app._pref}")
+
         # Open the biggest function we can find (scan a sample of rows for size).
         # Simpler: select the row whose Size column is largest among first N.
         biggest_i, biggest_sz = 0, -1
@@ -430,10 +456,10 @@ async def run(db):
                             if be < e <= xref.frm:
                                 be, dexp = e, i
                 if dexp >= 0:
+                    app._pref = "decomp"  # navigation honours the preferred view
                     app._open_function(xfn.addr, xfn.name)  # start elsewhere
-                    await wait_until(pilot, lambda: app._cur.ea == xfn.addr, 20)
-                    app._active = "decomp"
-                    app._show_active()
+                    await wait_until(pilot, lambda: app._cur.ea == xfn.addr
+                                     and app._active == "decomp", 20)
                     await wait_until(pilot, lambda: dec.loaded_ea == xfn.addr, 25)
                     # xfn is the referenced function; its name is the token that
                     # appears at the call site the xref points to.
@@ -472,7 +498,8 @@ async def run(db):
                         check("xref-select moves the cursor within the same function",
                               dec.cursor == exp2 and exp2 != start_ln,
                               f"dec.cursor={dec.cursor} want={exp2} start={start_ln}")
-                    app._active = "disasm"     # restore for the following blocks
+                    app._pref = "disasm"       # restore for the following blocks
+                    app._active = "disasm"
                     app._show_active()
                     await pilot.pause(0.05)
 
