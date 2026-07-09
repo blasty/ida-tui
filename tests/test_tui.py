@@ -517,13 +517,15 @@ async def run(db):
             # fallback follows by address regardless of the (old) token.
             dstale = app.program.resolve(dsym)
             old_line = dec._texts[drow] if drow < len(dec._texts) else ""
-            if "/*0x" in old_line and dsym in old_line:
+            old_ea = dec._line_ea(drow)
+            if old_ea is not None and dsym in old_line:
                 tmpname = f"stale_{os.getpid()}"
                 app.program.client.call(
                     "rename", batch={"func": {"addr": hex(dstale), "name": tmpname}})
                 app.program.bump_names()
                 d2 = len(app._nav)
-                app._follow_decomp(old_line, dsym)  # dsym is now the OLD name
+                # dsym is now the OLD name; follow must fall back to the line's ea
+                app._follow_decomp(old_line, dsym, old_ea)
                 await wait_until(pilot, lambda: len(app._nav) > d2, timeout=25)
                 check("decomp follow works with a stale name (ea-marker fallback)",
                       app._cur.ea == dstale, f"cur={app._cur.ea:#x} want={dstale:#x}")
@@ -631,8 +633,9 @@ async def run(db):
 
             # Add a comment on the current pseudocode line via ';' and confirm it
             # renders after the decompiler refreshes.
-            cline = next((i for i, t in enumerate(dec._texts)
-                          if i > 5 and "/*0x" in t and t.strip() and "//" not in t), None)
+            cline = next((i for i in range(len(dec._texts))
+                          if i > 5 and dec._line_ea(i) is not None
+                          and dec._texts[i].strip() and "//" not in dec._texts[i]), None)
             if cline is not None:
                 cea = dec._line_ea(cline)
                 dec.focus()

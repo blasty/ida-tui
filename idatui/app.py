@@ -55,6 +55,12 @@ _S_CELL = Style(reverse=True)      # the block cursor cell
 _S_LINENO = Style(color="grey37")             # pseudocode line-number gutter
 _S_LINENO_CUR = Style(color="grey66", bold=True)  # gutter on the cursor line
 
+# Hex-Rays appends a `/*0xEA*/` address marker to each pseudocode line (we fetch
+# with include_addresses so we have a per-line anchor). Matched here to extract
+# the address and strip the marker from the display.
+_ADDR_MARK_RE = re.compile(r"/\*\s*0x([0-9A-Fa-f]+)\s*\*/")
+_ADDR_MARK_STRIP_RE = re.compile(r"\s*/\*\s*0x[0-9A-Fa-f]+\s*\*/")
+
 
 @dataclass
 class NavEntry:
@@ -818,6 +824,7 @@ class DecompView(SearchMixin, NavMixin, ColumnCursor, ScrollView, can_focus=True
         self._strips: list[Strip] = []
         self._texts: list[str] = []
         self._gutter = 0  # line-number gutter width (cells)
+        self._line_eas: list[int | None] = []  # per-line address (marker stripped)
         self._term = ""
         self._matches: list[int] = []
         self._ranges: dict[int, list[tuple[int, int]]] = {}
@@ -838,11 +845,22 @@ class DecompView(SearchMixin, NavMixin, ColumnCursor, ScrollView, can_focus=True
 
     def show(self, ea: int, text: str, cursor: int = 0, cursor_x: int = 0,
              scroll_y: int = -1, scroll_x: int = 0) -> None:
-        seglists = highlight_c(text)
+        # Pull each line's `/*0xEA*/` marker into _line_eas, then strip it from
+        # the displayed text (clutter) before highlighting. Stripping only edits
+        # within lines, so line indices still align with the domain's raw code.
+        line_eas: list[int | None] = []
+        clean: list[str] = []
+        for ln in text.split("\n"):
+            eas = _ADDR_MARK_RE.findall(ln)
+            line_eas.append(int(eas[-1], 16) if eas else None)
+            clean.append(_ADDR_MARK_STRIP_RE.sub("", ln).rstrip())
+        seglists = highlight_c("\n".join(clean))
         self._strips = [Strip(segs) for segs in seglists]
         self._texts = ["".join(seg.text for seg in segs) for segs in seglists]
-        self.loaded_ea = ea
         total = len(self._strips)
+        # highlight_c may drop a lone trailing blank line; keep _line_eas aligned.
+        self._line_eas = (line_eas[:total] + [None] * total)[:total]
+        self.loaded_ea = ea
         self.cursor = max(0, min(max(total - 1, 0), cursor))
         self.cursor_x = cursor_x
         self._matches = []
@@ -865,10 +883,7 @@ class DecompView(SearchMixin, NavMixin, ColumnCursor, ScrollView, can_focus=True
         return Static("― decompiling… ―", classes="decomp-loading")
 
     def _line_ea(self, idx: int) -> int | None:
-        if not (0 <= idx < len(self._texts)):
-            return None
-        ms = re.findall(r"/\*\s*0x([0-9A-Fa-f]+)\s*\*/", self._texts[idx])
-        return int(ms[-1], 16) if ms else None
+        return self._line_eas[idx] if 0 <= idx < len(self._line_eas) else None
 
     def _after_cursor_move(self) -> None:
         self.post_message(DecompView.CursorMoved(self.cursor, self._line_ea(self.cursor)))
@@ -1316,7 +1331,8 @@ class IdaTui(App):
             if ea is not None:
                 self._follow_disasm(ea, word, nxt.ea if nxt else None)
         elif isinstance(view, DecompView) and view._texts:
-            self._follow_decomp(view._texts[view.cursor], word)
+            self._follow_decomp(view._texts[view.cursor], word,
+                                view._line_ea(view.cursor))
 
     def on_xrefs_requested(self, msg: XrefsRequested) -> None:
         view = msg.view
@@ -1360,7 +1376,8 @@ class IdaTui(App):
         self._do_navigate(tgt.to, push=True)
 
     @work(thread=True, group="nav")
-    def _follow_decomp(self, line: str, word: str | None) -> None:
+    def _follow_decomp(self, line: str, word: str | None,
+                       line_ea: int | None = None) -> None:
         if self._cur is None:
             return
         dec = self.program.decompile(self._cur.ea)
@@ -1376,14 +1393,12 @@ class IdaTui(App):
                 addr = None
         if addr is None:
             addr = self._ref_on_line(line)
-        if addr is None:
-            # Address-based fallback: use the line's /*0xEA*/ marker and follow a
-            # code xref from that statement. Immune to a stale name (e.g. right
+        if addr is None and line_ea is not None:
+            # Address-based fallback: follow a code xref from this statement's ea
+            # (the stripped /*0xEA*/ anchor). Immune to a stale name (e.g. right
             # after a rename, before the pseudocode text catches up).
-            m = re.search(r"/\*\s*0x([0-9A-Fa-f]+)\s*\*/", line or "")
-            if m:
-                xr = self.program.xrefs_from(int(m.group(1), 16))
-                addr = next((x.to for x in xr if x.type == "code" and x.to), None)
+            xr = self.program.xrefs_from(line_ea)
+            addr = next((x.to for x in xr if x.type == "code" and x.to), None)
         if addr is None:
             self.app.call_from_thread(self._status, "nothing to follow on this line")
             return
