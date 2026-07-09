@@ -508,6 +508,15 @@ async def run(db):
         want_rel = want_cur - want_sy
         await goto_name(fb.name)
         await wait_until(pilot, lambda: app._cur.ea == fb.addr, timeout=20)
+        # Record the scroll at each repaint so we catch the "scroll_offset moved
+        # but the pane wasn't repainted" bug (which scroll_offset checks miss).
+        renders: list[int] = []
+        _orig_rl = dis.render_line
+        def _traced(y, _o=_orig_rl):
+            if y == 0:
+                renders.append(round(dis.scroll_offset.y))
+            return _o(y)
+        dis.render_line = _traced
         await pilot.press("escape")
         await wait_until(pilot, lambda: app._cur.ea == fa.addr, timeout=20)
         await wait_until(pilot, lambda: dis.total > 40, timeout=20)
@@ -516,6 +525,10 @@ async def run(db):
               round(dis.scroll_offset.y) == want_sy and dis.cursor == want_cur and want_rel > 0,
               f"scroll={round(dis.scroll_offset.y)} (want {want_sy}) "
               f"cursor={dis.cursor} (want {want_cur}) rel_before={want_rel}")
+        check("pane is repainted at the restored scroll (no stale top frame)",
+              bool(renders) and renders[-1] == want_sy,
+              f"last repaint scroll={renders[-1] if renders else None} (want {want_sy})")
+        dis.render_line = _orig_rl
 
         # PageUp/Down keep the cursor at the same viewport-relative row.
         await goto_name(fa.name)

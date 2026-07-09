@@ -627,8 +627,11 @@ class DisasmView(SearchMixin, NavMixin, ColumnCursor, ScrollView, can_focus=True
             target = min(self._pending_scroll_y, max(total - 1, 0))
             # Apply now (works when the region is already sized) and again after
             # refresh (covers the case where max_scroll_y isn't computed yet).
+            # The deferred call also forces a repaint, so the pane is never left
+            # showing a stale frame at the top with scroll_offset already moved.
             self.scroll_to(y=target, animate=False)
-            self.call_after_refresh(lambda t=target: self.scroll_to(y=t, animate=False))
+            self.call_after_refresh(
+                lambda t=target: (self.scroll_to(y=t, animate=False), self.refresh()))
         else:
             self._scroll_cursor_into_view()
         self._pending_scroll_y = None
