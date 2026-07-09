@@ -58,7 +58,8 @@ _S_CELL = Style(reverse=True)      # the block cursor cell
 class NavEntry:
     ea: int
     name: str
-    cursor: int = 0
+    cursor: int = 0      # line index (disasm instruction index)
+    cursor_x: int = 0    # column
 
 
 class SearchRequested(Message):
@@ -501,12 +502,13 @@ class DisasmView(SearchMixin, NavMixin, ColumnCursor, ScrollView, can_focus=True
         return s + line.text
 
     # -- public API -------------------------------------------------------- #
-    def load(self, model: DisasmModel, name: str, cursor: int = 0) -> None:
+    def load(self, model: DisasmModel, name: str, cursor: int = 0,
+             cursor_x: int = 0) -> None:
         self.model = model
         self._name = name
         self.total = 0
         self.cursor = cursor
-        self.cursor_x = 0
+        self.cursor_x = cursor_x
         self.virtual_size = Size(0, 0)
         self._matches = []
         self._ranges = {}
@@ -567,6 +569,7 @@ class DisasmView(SearchMixin, NavMixin, ColumnCursor, ScrollView, can_focus=True
     def _on_primed(self, total: int) -> None:
         self.total = total
         self.virtual_size = Size(0, total)
+        self._clamp_x()  # cursor line is now cached; keep the column in range
         self._scroll_cursor_into_view()
         self.refresh()
 
@@ -1363,7 +1366,8 @@ class IdaTui(App):
             return
         self._cur = entry
         model = self.program.disasm(entry.ea, entry.name)
-        self.query_one(DisasmView).load(model, entry.name, cursor=entry.cursor)
+        self.query_one(DisasmView).load(
+            model, entry.name, cursor=entry.cursor, cursor_x=entry.cursor_x)
         self._show_active()
 
     def _show_active(self) -> None:
@@ -1406,7 +1410,10 @@ class IdaTui(App):
 
     def on_disasm_view_cursor_moved(self, msg: DisasmView.CursorMoved) -> None:
         if self._nav:
+            # Keep the top-of-history position current (line + column) so that
+            # returning here later lands exactly where we left.
             self._nav[-1].cursor = msg.index
+            self._nav[-1].cursor_x = self.query_one(DisasmView).cursor_x
         ea = msg.ea
         if ea is not None:
             name = self._nav[-1].name if self._nav else ""

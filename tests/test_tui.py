@@ -329,6 +329,13 @@ async def run(db):
             await wait_until(pilot, lambda: len(app._nav) > depth, timeout=25)
             check("double-click follows the symbol", app._cur.ea == want,
                   f"cur={app._cur.ea:#x} want={want:#x}")
+            # Back restores the exact cursor position (line AND column).
+            await pilot.press("escape")
+            await wait_until(pilot, lambda: app._cur.ea != want, timeout=20)
+            await wait_until(pilot, lambda: dis.total > 0 and dis.cursor == mline, timeout=20)
+            check("back restores the exact line + column",
+                  dis.cursor == mline and dis.word_under_cursor() == msym,
+                  f"cursor={dis.cursor} (want {mline}) word={dis.word_under_cursor()!r}")
 
 
 def main(argv):
