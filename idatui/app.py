@@ -1288,8 +1288,12 @@ class IdaTui(App):
         word = view.word_under_cursor()
         if isinstance(view, DisasmView):
             ea = view._cursor_ea()
+            # The instruction's ordinary fall-through edge (to the next line) is
+            # an indistinguishable 'code' xref; pass it so follow can skip it and
+            # land on a call/jump's real target instead of the next instruction.
+            nxt = view.model.cached_line(view.cursor + 1) if view.model else None
             if ea is not None:
-                self._follow_disasm(ea, word)
+                self._follow_disasm(ea, word, nxt.ea if nxt else None)
         elif isinstance(view, DecompView) and view._texts:
             self._follow_decomp(view._texts[view.cursor], word)
 
@@ -1312,7 +1316,8 @@ class IdaTui(App):
         return not all(c in "0123456789abcdefABCDEF" for c in word)
 
     @work(thread=True, group="nav")
-    def _follow_disasm(self, ea: int, word: str | None) -> None:
+    def _follow_disasm(self, ea: int, word: str | None,
+                       next_ea: int | None = None) -> None:
         assert self.program is not None
         # Prefer the symbol under the cursor (handles multiple refs on a line).
         if self._looks_like_symbol(word):
@@ -1322,8 +1327,12 @@ class IdaTui(App):
             except Exception:  # noqa: BLE001 -- not a resolvable name; fall back
                 pass
         xr = self.program.xrefs_from(ea)
-        tgt = next((x for x in xr if x.type == "code" and x.to), None)
-        tgt = tgt or next((x for x in xr if x.to), None)
+        # Drop the ordinary fall-through edge (its target is the next
+        # instruction): on a call/branch it would otherwise be picked before the
+        # real target and 'follow' would just step to the next line.
+        cand = [x for x in xr if x.to and x.to != next_ea]
+        tgt = next((x for x in cand if x.type == "code"), None)
+        tgt = tgt or next((x for x in cand), None)
         if tgt is None or tgt.to is None:
             self.app.call_from_thread(self._status, "nothing to follow here")
             return
