@@ -426,7 +426,7 @@ class Program:
                 # Cached before a rename: names may be stale. Drop the server's
                 # Hex-Rays cache so the refetch reflects the new names.
                 try:
-                    self.client.call("force_recompile", addr=hex(ea))
+                    self.client.call("force_recompile", items=[{"addr": hex(ea)}])
                 except Exception:  # noqa: BLE001
                     pass
         envelope = self.client.call_envelope("decompile", addr=hex(ea))

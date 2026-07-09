@@ -533,6 +533,11 @@ async def run(db):
         table.move_cursor(row=biggest_i)
         await pilot.press("enter")
         await wait_until(pilot, lambda: dis.total > 0, timeout=20)
+        bea = app._cur.ea
+        # cache the caller's pseudocode too, so the stale-decomp path is exercised
+        await pilot.press("tab")
+        await wait_until(pilot, lambda: dec.loaded_ea == bea, timeout=20)
+        await pilot.press("tab")
         dis.focus()
         await pilot.pause(0.2)
         hrow = hsym = None
@@ -587,8 +592,15 @@ async def run(db):
                 dis.model.lines(hrow, 4, prefetch=False)
                 await pilot.pause(0.2)
                 hline = dis._line_plain(hrow)
-                check("caller shows renamed callee after 'back' (cache refresh)",
+                check("caller disasm shows renamed callee after 'back'",
                       hline is not None and hnew in hline, f"line={hline!r}")
+                # and the caller's cached pseudocode must refresh too
+                await pilot.press("tab")
+                await wait_until(pilot, lambda: dec.loaded_ea == bea, timeout=25)
+                await pilot.pause(0.3)
+                check("caller pseudocode shows renamed callee after 'back'",
+                      any(hnew in tx for tx in dec._texts),
+                      "pseudocode still stale")
                 app.program.client.call(
                     "rename", batch={"func": {"addr": hex(htarget), "name": hsym}})
 
