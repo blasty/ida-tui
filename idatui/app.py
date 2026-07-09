@@ -1108,6 +1108,7 @@ class IdaTui(App):
         self._search_ctx: tuple[object | None, int] = (None, 1)
         self._rename_ctx: tuple[object | None, str] = (None, "")
         self._comment_ctx: tuple[object | None, int, str] = (None, 0, "")
+        self._xref_focus_name: str | None = None
         self._dirty = False
 
     # -- layout ------------------------------------------------------------ #
@@ -1467,7 +1468,7 @@ class IdaTui(App):
             # fall-through to the next instruction, which would point xrefs at
             # the wrong place. At a function entry, xrefs-to == the callers.)
             subj = ea
-        self._xrefs_present(subj)
+        self._xrefs_present(subj, word)
 
     @work(thread=True, group="xrefs")
     def _xrefs_decomp(self, line: str, word: str | None) -> None:
@@ -1483,9 +1484,9 @@ class IdaTui(App):
         if subj is None:
             subj = self._ref_on_line(line) or (self._cur.ea if self._cur else None)
         if subj is not None:
-            self._xrefs_present(subj)
+            self._xrefs_present(subj, word)
 
-    def _xrefs_present(self, subj: int) -> None:  # worker context
+    def _xrefs_present(self, subj: int, subj_name: str | None = None) -> None:  # worker
         assert self.program is not None
         xr = self.program.xrefs_to(subj)
         fn = self.program.function_of(subj)
@@ -1495,19 +1496,26 @@ class IdaTui(App):
                 label += f"+{subj - fn.addr:#x}"
         else:
             label = f"xrefs to {subj:#x}"
+        # Token to land the cursor on at each site: the symbol xrefs was invoked
+        # on, else the referenced function's name.
+        focus = subj_name if self._looks_like_symbol(subj_name) else None
+        if focus is None and fn is not None and fn.addr == subj:
+            focus = fn.name
         items = [(x.frm, f"{x.frm:08X}  {x.fn_name or '?':<24}  [{x.type}]") for x in xr]
-        self.app.call_from_thread(self._present_xrefs, label, items)
+        self.app.call_from_thread(self._present_xrefs, label, items, focus)
 
-    def _present_xrefs(self, label: str, items: list[tuple[int, str]]) -> None:
+    def _present_xrefs(self, label: str, items: list[tuple[int, str]],
+                       focus_name: str | None = None) -> None:
         if not items:
             self._status(f"{label}: none")
             return
+        self._xref_focus_name = focus_name
         self._status(f"{label}: {len(items)}")
         self.push_screen(XrefsScreen(label, items), self._on_xref_chosen)
 
     def _on_xref_chosen(self, addr: int | None) -> None:
         if addr is not None:
-            self._goto_ea(addr, push=True)
+            self._goto_ea(addr, push=True, focus_name=self._xref_focus_name)
 
     # -- rename ------------------------------------------------------------ #
     @staticmethod
@@ -1719,10 +1727,12 @@ class IdaTui(App):
 
     # -- navigation to an arbitrary address ------------------------------- #
     @work(thread=True, group="nav")
-    def _goto_ea(self, ea: int, push: bool = True) -> None:
-        self._do_navigate(ea, push)
+    def _goto_ea(self, ea: int, push: bool = True,
+                 focus_name: str | None = None) -> None:
+        self._do_navigate(ea, push, focus_name)
 
-    def _do_navigate(self, ea: int, push: bool) -> None:  # worker context
+    def _do_navigate(self, ea: int, push: bool,
+                     focus_name: str | None = None) -> None:  # worker context
         assert self.program is not None
         fn = self.program.function_of(ea)
         if fn is None:
@@ -1735,10 +1745,31 @@ class IdaTui(App):
         # its pseudocode line (via the per-line /*0xEA*/ markers) so the jump
         # lands on the reference there too (e.g. selecting an xref). A plain
         # function-entry jump is line 0 in both views -> skip the decompile.
-        dec_idx = -1
+        # With a focus_name (the symbol the xref was on), also land the column
+        # on that token where it appears in the line.
+        dec_idx, dec_col = -1, 0
         if self._active == "decomp" and ea != fn.addr:
             dec_idx = self._decomp_line_for(fn.addr, ea)
-        self.app.call_from_thread(self._open_at, fn.addr, fn.name, idx, push, dec_idx)
+            if dec_idx >= 0 and focus_name:
+                dec_col = self._decomp_col_for(fn.addr, dec_idx, focus_name)
+        self.app.call_from_thread(
+            self._open_at, fn.addr, fn.name, idx, push, dec_idx, dec_col)
+
+    def _decomp_col_for(self, fn_addr: int, line_idx: int, name: str) -> int:
+        """Column of ``name`` (whole-word) on pseudocode line ``line_idx``, so an
+        xref jump lands on the referenced token, not the line start. 0 if absent.
+        Computed on the marker-stripped line so it matches the displayed text."""
+        assert self.program is not None
+        try:
+            dec = self.program.decompile(fn_addr)
+        except Exception:  # noqa: BLE001
+            return 0
+        lines = (dec.code or "").splitlines()
+        if not (0 <= line_idx < len(lines)):
+            return 0
+        clean = _ADDR_MARK_STRIP_RE.sub("", lines[line_idx])
+        m = re.search(rf"\b{re.escape(name)}\b", clean)
+        return m.start() if m else 0
 
     def _decomp_line_for(self, fn_addr: int, ea: int) -> int:
         """Pseudocode line index best matching address ``ea``: the line whose
@@ -1760,12 +1791,13 @@ class IdaTui(App):
         return best_idx
 
     def _open_at(self, ea: int, name: str, cursor: int, push: bool,
-                 dec_cursor: int = -1) -> None:
+                 dec_cursor: int = -1, dec_cursor_x: int = 0) -> None:
         if push:
             self._save_current_pos()
         entry = NavEntry(ea=ea, name=name, cursor=cursor)
         if dec_cursor >= 0:
             entry.dec_cursor = dec_cursor
+            entry.dec_cursor_x = dec_cursor_x
         if push:
             self._nav.append(entry)
         self._open_entry(entry, push=False)

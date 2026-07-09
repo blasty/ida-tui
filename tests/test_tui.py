@@ -378,11 +378,24 @@ async def run(db):
                     app._active = "decomp"
                     app._show_active()
                     await wait_until(pilot, lambda: dec.loaded_ea == xfn.addr, 25)
+                    # xfn is the referenced function; its name is the token that
+                    # appears at the call site the xref points to.
+                    app._xref_focus_name = xfn.name
                     app._on_xref_chosen(xref.frm)  # pick the caller from the dialog
                     await wait_until(pilot, lambda: dec.loaded_ea == xref.fn_addr, 25)
                     await pilot.pause(0.1)
                     check("xref-select lands on the reference LINE in pseudocode",
                           dec.cursor == dexp, f"dec.cursor={dec.cursor} want={dexp}")
+                    # Cursor lands on the reference token's column (or the line
+                    # start if that token isn't literally on the line, e.g. a
+                    # stale Hex-Rays cache renders a different name).
+                    landed = dec._texts[dec.cursor] if dec.cursor < len(dec._texts) else ""
+                    tokm = re.search(rf"\b{re.escape(xfn.name)}\b", landed)
+                    want_col = tokm.start() if tokm else 0
+                    check("xref-select lands the column on the reference token",
+                          dec.cursor_x == want_col,
+                          f"cursor_x={dec.cursor_x} want={want_col} "
+                          f"token={xfn.name!r} line={landed.strip()!r}")
 
                     # And a jump whose target is INSIDE the already-displayed
                     # function must still move the cursor (the decompiler pane
