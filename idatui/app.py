@@ -58,10 +58,13 @@ _S_CELL = Style(reverse=True)      # the block cursor cell
 class NavEntry:
     ea: int
     name: str
-    cursor: int = 0       # disasm line (instruction index)
-    cursor_x: int = 0     # disasm column
-    dec_cursor: int = 0   # pseudocode line
-    dec_cursor_x: int = 0 # pseudocode column
+    cursor: int = 0        # disasm line (instruction index)
+    cursor_x: int = 0      # disasm column
+    scroll_y: int = -1     # disasm viewport top (-1 = derive from cursor)
+    dec_cursor: int = 0    # pseudocode line
+    dec_cursor_x: int = 0  # pseudocode column
+    dec_scroll_y: int = -1 # pseudocode viewport top (-1 = derive)
+    dec_scroll_x: int = 0  # pseudocode horizontal scroll
 
 
 class SearchRequested(Message):
@@ -499,6 +502,7 @@ class DisasmView(SearchMixin, NavMixin, ColumnCursor, ScrollView, can_focus=True
         self.model: DisasmModel | None = None
         self.total = 0
         self._name = ""
+        self._pending_scroll_y: int | None = None
         self._term = ""
         self._matches: list[int] = []
         self._ranges: dict[int, list[tuple[int, int]]] = {}
@@ -517,12 +521,13 @@ class DisasmView(SearchMixin, NavMixin, ColumnCursor, ScrollView, can_focus=True
 
     # -- public API -------------------------------------------------------- #
     def load(self, model: DisasmModel, name: str, cursor: int = 0,
-             cursor_x: int = 0) -> None:
+             cursor_x: int = 0, scroll_y: int | None = None) -> None:
         self.model = model
         self._name = name
         self.total = 0
         self.cursor = cursor
         self.cursor_x = cursor_x
+        self._pending_scroll_y = scroll_y
         self.virtual_size = Size(0, 0)
         self._matches = []
         self._ranges = {}
@@ -584,7 +589,14 @@ class DisasmView(SearchMixin, NavMixin, ColumnCursor, ScrollView, can_focus=True
         self.total = total
         self.virtual_size = Size(0, total)
         self._clamp_x()  # cursor line is now cached; keep the column in range
-        self._scroll_cursor_into_view()
+        if self._pending_scroll_y is not None and self._pending_scroll_y >= 0:
+            target = min(self._pending_scroll_y, max(total - 1, 0))
+            # Defer until after layout recomputes max_scroll_y, else scroll_to
+            # clamps to 0 (virtual_size was only just set).
+            self.call_after_refresh(lambda t=target: self.scroll_to(y=t, animate=False))
+        else:
+            self._scroll_cursor_into_view()
+        self._pending_scroll_y = None
         self.refresh()
 
     # -- rendering --------------------------------------------------------- #
@@ -761,7 +773,8 @@ class DecompView(SearchMixin, NavMixin, ColumnCursor, ScrollView, can_focus=True
         elif self.cursor_x >= sx + width:
             self.scroll_to(x=self.cursor_x - width + 1, animate=False)
 
-    def show(self, ea: int, text: str, cursor: int = 0, cursor_x: int = 0) -> None:
+    def show(self, ea: int, text: str, cursor: int = 0, cursor_x: int = 0,
+             scroll_y: int = -1, scroll_x: int = 0) -> None:
         seglists = highlight_c(text)
         self._strips = [Strip(segs) for segs in seglists]
         self._texts = ["".join(seg.text for seg in segs) for segs in seglists]
@@ -773,10 +786,13 @@ class DecompView(SearchMixin, NavMixin, ColumnCursor, ScrollView, can_focus=True
         self._ranges = {}
         maxw = max((s.cell_length for s in self._strips), default=0)
         self.virtual_size = Size(maxw, total)
-        self.scroll_to(0, 0, animate=False)
         self._clamp_x()
-        self._scroll_cursor_into_view()
-        self._hscroll()
+        if scroll_y >= 0:
+            self.scroll_to(x=scroll_x, y=min(scroll_y, max(total - 1, 0)), animate=False)
+        else:
+            self.scroll_to(0, 0, animate=False)
+            self._scroll_cursor_into_view()
+            self._hscroll()
         self.refresh()
 
     def _line_ea(self, idx: int) -> int | None:
@@ -1437,15 +1453,9 @@ class IdaTui(App):
         except Exception:  # noqa: BLE001
             pass
         self.program.invalidate(cur.ea)
-        dis = self.query_one(DisasmView)
-        dec = self.query_one(DecompView)
-        cur.cursor, cur.cursor_x = dis.cursor, dis.cursor_x
-        if dec.loaded_ea == cur.ea:
-            cur.dec_cursor, cur.dec_cursor_x = dec.cursor, dec.cursor_x
-        dec.loaded_ea = None  # force pseudocode reload with new names
-        model = self.program.disasm(cur.ea, cur.name)
-        dis.load(model, cur.name, cursor=cur.cursor, cursor_x=cur.cursor_x)
-        self._show_active()
+        self._save_current_pos()  # capture cursor + scroll before reloading
+        self.query_one(DecompView).loaded_ea = None  # force pseudocode reload
+        self._open_entry(cur, push=False)
 
     @work(thread=True, exclusive=True, group="save")
     def _save(self) -> None:
@@ -1480,6 +1490,8 @@ class IdaTui(App):
         self.app.call_from_thread(self._open_at, fn.addr, fn.name, idx, push)
 
     def _open_at(self, ea: int, name: str, cursor: int, push: bool) -> None:
+        if push:
+            self._save_current_pos()
         entry = NavEntry(ea=ea, name=name, cursor=cursor)
         if push:
             self._nav.append(entry)
@@ -1582,7 +1594,24 @@ class IdaTui(App):
         name = f.name if f else hex(ea)
         self._open_function(ea, name)
 
+    def _save_current_pos(self) -> None:
+        """Snapshot the active views' cursor + scroll into the top history entry
+        (called just before we navigate away)."""
+        if not self._nav:
+            return
+        e = self._nav[-1]
+        dis = self.query_one(DisasmView)
+        e.cursor, e.cursor_x = dis.cursor, dis.cursor_x
+        e.scroll_y = round(dis.scroll_offset.y)
+        dec = self.query_one(DecompView)
+        if dec.loaded_ea == e.ea:
+            e.dec_cursor, e.dec_cursor_x = dec.cursor, dec.cursor_x
+            e.dec_scroll_y = round(dec.scroll_offset.y)
+            e.dec_scroll_x = round(dec.scroll_offset.x)
+
     def _open_function(self, ea: int, name: str, push: bool = True) -> None:
+        if push:
+            self._save_current_pos()
         entry = NavEntry(ea=ea, name=name, cursor=0)
         if push:
             self._nav.append(entry)
@@ -1593,8 +1622,9 @@ class IdaTui(App):
             return
         self._cur = entry
         model = self.program.disasm(entry.ea, entry.name)
+        sy = entry.scroll_y if entry.scroll_y >= 0 else None
         self.query_one(DisasmView).load(
-            model, entry.name, cursor=entry.cursor, cursor_x=entry.cursor_x)
+            model, entry.name, cursor=entry.cursor, cursor_x=entry.cursor_x, scroll_y=sy)
         self._show_active()
 
     def _show_active(self) -> None:
@@ -1629,14 +1659,17 @@ class IdaTui(App):
         view = self.query_one(DecompView)
         # Restore the saved pseudocode position when returning to this function.
         cur = self._cur
-        c = cur.dec_cursor if (cur is not None and cur.ea == ea) else 0
-        cx = cur.dec_cursor_x if (cur is not None and cur.ea == ea) else 0
+        same = cur is not None and cur.ea == ea
+        c = cur.dec_cursor if same else 0
+        cx = cur.dec_cursor_x if same else 0
+        sy = cur.dec_scroll_y if (same and cur.dec_scroll_y >= 0) else -1
+        sx = cur.dec_scroll_x if same else 0
         if dec.failed:
             view.show(ea, f"/* decompilation failed at {ea:#x}: {dec.error} */\n")
             self._status(f"{name} — decompile failed; Tab for disasm")
         else:
             note = "  (truncated)" if dec.truncated else ""
-            view.show(ea, dec.code or "", cursor=c, cursor_x=cx)
+            view.show(ea, dec.code or "", cursor=c, cursor_x=cx, scroll_y=sy, scroll_x=sx)
             self._status(f"{name}  @ {ea:#x}   [pseudocode {len(dec.code or '')} chars]{note}")
 
     def on_decomp_view_cursor_moved(self, msg: DecompView.CursorMoved) -> None:

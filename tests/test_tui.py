@@ -467,6 +467,37 @@ async def run(db):
                 check("decompiler follows a name not in refs (resolve fallback)",
                       moved and app._cur.ea == fn.addr, f"moved={moved}")
 
+        # Scroll position (not just the cursor) is restored on back, both views.
+        async def goto_name(name):
+            await pilot.press("g")
+            await pilot.pause(0.2)
+            for ch in name:
+                await pilot.press(ch)
+            await pilot.press("enter")
+
+        # pick two distinct, decently-sized functions
+        big = sorted(fi.all_loaded(), key=lambda f: f.size, reverse=True)
+        fa = next((f for f in big if f.size > 0x400), big[0])
+        fb = next((f for f in big if f.addr != fa.addr), big[-1])
+        await goto_name(fa.name)
+        await wait_until(pilot, lambda: dis.total > 40 and app._cur.ea == fa.addr, timeout=20)
+        if app._active != "disasm":
+            await pilot.press("tab")
+        await pilot.pause(0.2)
+        for _ in range(4):
+            await pilot.press("ctrl+d")
+        await pilot.pause(0.2)
+        want_sy, want_cur = round(dis.scroll_offset.y), dis.cursor
+        await goto_name(fb.name)
+        await wait_until(pilot, lambda: app._cur.ea == fb.addr, timeout=20)
+        await pilot.press("escape")
+        await wait_until(pilot, lambda: app._cur.ea == fa.addr, timeout=20)
+        await wait_until(pilot, lambda: dis.total > 40, timeout=20)
+        await pilot.pause(0.4)
+        check("disasm scroll + cursor restored on back",
+              round(dis.scroll_offset.y) == want_sy and dis.cursor == want_cur,
+              f"scroll={round(dis.scroll_offset.y)} (want {want_sy}) cursor={dis.cursor}")
+
 
 def main(argv):
     db = None
