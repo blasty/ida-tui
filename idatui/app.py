@@ -24,12 +24,14 @@ from textual import work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
-from textual.geometry import Size
+from textual.geometry import Region, Size
 from textual.message import Message
 from textual.reactive import reactive
 from textual.scroll_view import ScrollView
 from textual.strip import Strip
-from textual.widgets import DataTable, Footer, Header, Input, Static, TextArea
+from textual.widgets import DataTable, Footer, Header, Input, Static
+
+from .highlight import highlight_c
 
 from .client import IDAClient
 from .domain import DisasmModel, Func, Program
@@ -68,7 +70,7 @@ class DisasmView(ScrollView, can_focus=True):
         Binding("tab,shift+tab", "app.toggle_view", "Pseudocode", priority=True),
     ]
 
-    cursor = reactive(0)
+    cursor = reactive(0, repaint=False)
 
     class CursorMoved(Message):
         """Posted when the disasm cursor moves; carries the instruction ea."""
@@ -176,9 +178,14 @@ class DisasmView(ScrollView, can_focus=True):
     def _move(self, delta: int) -> None:
         if self.total == 0:
             return
+        old = self.cursor
+        before = round(self.scroll_offset.y)
         self.cursor = max(0, min(self.total - 1, self.cursor + delta))
         self._scroll_cursor_into_view()
-        self.refresh()
+        if round(self.scroll_offset.y) != before:
+            self.refresh()  # scrolled: the whole viewport shifted
+        else:
+            _refresh_lines(self, old, self.cursor)  # only the two changed rows
         self.post_message(DisasmView.CursorMoved(self.cursor, self._cursor_ea()))
 
     def _cursor_ea(self) -> int | None:
@@ -210,30 +217,113 @@ def _join(base: Style | None, style: Style) -> Style:
     return (base + style) if base is not None else style
 
 
+def _refresh_lines(view, *indices: int) -> None:
+    """Repaint only the given virtual line indices (cheap in-place cursor move)."""
+    top = round(view.scroll_offset.y)
+    height = view.size.height
+    width = view.size.width
+    for idx in indices:
+        row = idx - top
+        if 0 <= row < height:
+            view.refresh(Region(0, row, width, 1))
+
+
 # --------------------------------------------------------------------------- #
 # Decompiler (pseudocode) view
 # --------------------------------------------------------------------------- #
-class DecompView(TextArea):
-    """Read-only Hex-Rays pseudocode for one function. Bounded text (the domain
-    fetches the full body even when the server truncates), so a plain scrollable
-    TextArea is the right tool."""
+class DecompView(ScrollView, can_focus=True):
+    """Read-only, line-virtualized Hex-Rays pseudocode with Pygments C
+    highlighting. Lines are highlighted once at load and cached as Strips, so
+    cursor movement and scrolling are O(1) (no TextArea/tree-sitter overhead).
+    """
 
-    BINDINGS = [Binding("tab,shift+tab", "app.toggle_view", "Disasm", priority=True)]
+    BINDINGS = [
+        Binding("tab,shift+tab", "app.toggle_view", "Disasm", priority=True),
+        Binding("j,down", "cursor_down", "Down", show=False),
+        Binding("k,up", "cursor_up", "Up", show=False),
+        Binding("ctrl+d", "half_page(1)", "½↓", show=False),
+        Binding("ctrl+u", "half_page(-1)", "½↑", show=False),
+        Binding("pagedown,f", "page(1)", "PgDn", show=False),
+        Binding("pageup,b", "page(-1)", "PgUp", show=False),
+        Binding("home", "goto_top", "Top", show=False),
+        Binding("G,end", "goto_bottom", "Bottom", show=False),
+    ]
+
+    cursor = reactive(0, repaint=False)
 
     def __init__(self) -> None:
-        super().__init__("", read_only=True, show_line_numbers=True, id="decomp")
+        super().__init__(id="decomp")
         self.loaded_ea: int | None = None
-
-    def on_mount(self) -> None:
-        try:
-            self.language = "cpp"  # best-effort syntax highlighting
-        except Exception:  # noqa: BLE001 -- no tree-sitter grammar available
-            pass
+        self._strips: list[Strip] = []
+        self._widths: list[int] = []
 
     def show(self, ea: int, text: str) -> None:
-        self.load_text(text)
+        self._strips = [Strip(segs) for segs in highlight_c(text)]
+        self._widths = [s.cell_length for s in self._strips]
         self.loaded_ea = ea
-        self.move_cursor((0, 0))
+        self.cursor = 0
+        maxw = max(self._widths, default=0)
+        self.virtual_size = Size(maxw, len(self._strips))
+        self.scroll_to(0, 0, animate=False)
+        self.refresh()
+
+    @property
+    def total(self) -> int:
+        return len(self._strips)
+
+    def render_line(self, y: int) -> Strip:
+        width = self.size.width
+        top = round(self.scroll_offset.y)
+        idx = top + y
+        if idx >= len(self._strips):
+            return Strip.blank(width)
+        x = round(self.scroll_offset.x)
+        strip = self._strips[idx].crop(x, x + width).adjust_cell_length(width)
+        if idx == self.cursor:
+            strip = strip.apply_style(_S_CURSOR)
+        return strip
+
+    # -- navigation (mirrors DisasmView) ---------------------------------- #
+    def _visible_height(self) -> int:
+        return max(self.size.height, 1)
+
+    def _scroll_cursor_into_view(self) -> None:
+        height = self._visible_height()
+        top = round(self.scroll_offset.y)
+        if self.cursor < top:
+            self.scroll_to(y=self.cursor, animate=False)
+        elif self.cursor >= top + height:
+            self.scroll_to(y=max(self.cursor - height + 1, 0), animate=False)
+
+    def _move(self, delta: int) -> None:
+        if not self._strips:
+            return
+        old = self.cursor
+        before = round(self.scroll_offset.y)
+        self.cursor = max(0, min(len(self._strips) - 1, self.cursor + delta))
+        self._scroll_cursor_into_view()
+        if round(self.scroll_offset.y) != before:
+            self.refresh()
+        else:
+            _refresh_lines(self, old, self.cursor)
+
+    def action_cursor_down(self) -> None:
+        self._move(1)
+
+    def action_cursor_up(self) -> None:
+        self._move(-1)
+
+    def action_half_page(self, direction: int) -> None:
+        self._move(direction * (self._visible_height() // 2))
+
+    def action_page(self, direction: int) -> None:
+        self._move(direction * self._visible_height())
+
+    def action_goto_top(self) -> None:
+        self._move(-len(self._strips))
+
+    def action_goto_bottom(self) -> None:
+        self._move(len(self._strips))
 
 
 # --------------------------------------------------------------------------- #

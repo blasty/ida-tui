@@ -135,8 +135,14 @@ async def run(db):
         pc = await wait_until(pilot, lambda: dec.display and dec.loaded_ea is not None, 25)
         check("tab shows pseudocode", pc and app._active == "decomp",
               f"active={app._active} disp={dec.display}")
-        check("pseudocode has real body (not 1KB stub)", len(dec.text) > 1200,
-              f"len={len(dec.text)}")
+        check("pseudocode has many lines", dec.total > 20, f"lines={dec.total}")
+        # Highlighting: at least one styled (colored) segment across the body.
+        styled = any(
+            seg.style is not None and seg.style.color is not None
+            for strip in dec._strips[: min(dec.total, 200)]
+            for seg in strip
+        )
+        check("pseudocode is syntax-highlighted", styled)
         await pilot.press("shift+tab")
         await pilot.pause(0.2)
         check("shift+tab returns to disassembly",

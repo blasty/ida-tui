@@ -9,7 +9,7 @@ dependencies = []
 
 [project.optional-dependencies]
 # The TUI layer pulls in Textual; the client/domain layers are stdlib-only.
-tui = ["textual>=8"]
+tui = ["textual>=8", "pygments>=2"]  # pygments ships with rich; explicit for the C lexer
 dev = ["pytest>=8"]
 
 [project.scripts]
