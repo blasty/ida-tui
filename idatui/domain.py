@@ -21,11 +21,13 @@ Textual worker threads; the internal prefetch pool is separate and small.
 
 from __future__ import annotations
 
+import json
 import re
 import threading
+import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
-from typing import Callable, Iterable
+from typing import Callable
 
 from .client import IDAClient, IDAToolError
 
@@ -352,16 +354,41 @@ class Program:
 
     # -- decompilation ----------------------------------------------------- #
     def decompile(self, ea: int, refresh: bool = False) -> Decompilation:
+        """Full pseudocode for a function.
+
+        The server truncates responses over 50KB (strings clipped to 1000
+        chars) but caches the full output and exposes it at
+        ``_meta.ida_mcp.download_url``. We transparently fetch that so the view
+        always gets the complete body, not a 1KB stub.
+        """
         if not refresh:
             with self._lock:
                 hit = self._decomp.get(ea)
                 if hit is not None:
                     return hit
-        payload = self.client.call("decompile", addr=hex(ea))
-        result = _parse_decompilation(ea, payload)
+        envelope = self.client.call_envelope("decompile", addr=hex(ea))
+        result = envelope.get("result", {})
+        payload = result.get("structuredContent")
+        if payload is None:  # fall back to text content
+            payload = self.client._extract_payload("decompile", result)
+        meta = (result.get("_meta") or {}).get("ida_mcp")
+        if isinstance(meta, dict) and meta.get("download_url"):
+            full = self._fetch_output(meta["download_url"])
+            if isinstance(full, dict) and full.get("code"):
+                payload = full
+        dec = _parse_decompilation(ea, payload)
         with self._lock:
-            self._decomp[ea] = result
-        return result
+            self._decomp[ea] = dec
+        return dec
+
+    @staticmethod
+    def _fetch_output(url: str, timeout: float = 15.0):
+        """GET the server's cached full-output blob (plain HTTP, not MCP)."""
+        try:
+            with urllib.request.urlopen(url, timeout=timeout) as r:
+                return json.loads(r.read().decode("utf-8", "replace"))
+        except Exception:  # noqa: BLE001 -- fall back to the truncated preview
+            return None
 
     # -- address resolution ------------------------------------------------ #
     def resolve(self, target: int | str) -> int:

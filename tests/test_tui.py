@@ -12,7 +12,7 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from idatui.app import DisasmView, FunctionsPanel, IdaTui  # noqa: E402
+from idatui.app import DecompView, DisasmView, FunctionsPanel, IdaTui  # noqa: E402
 from textual.widgets import DataTable, Static  # noqa: E402
 
 PASS = FAIL = 0
@@ -123,6 +123,25 @@ async def run(db):
         check("ctrl+b again restores pane + focuses table",
               left.display and isinstance(app.focused, DataTable),
               f"display={left.display} focus={type(app.focused).__name__}")
+
+        # Decompiler toggle: open a function, Tab -> pseudocode, Shift+Tab -> back.
+        table.focus()
+        table.move_cursor(row=biggest_i)
+        await pilot.press("enter")
+        dis = app.query_one(DisasmView)
+        dec = app.query_one(DecompView)
+        await wait_until(pilot, lambda: dis.total > 0, timeout=20)
+        await pilot.press("tab")
+        pc = await wait_until(pilot, lambda: dec.display and dec.loaded_ea is not None, 25)
+        check("tab shows pseudocode", pc and app._active == "decomp",
+              f"active={app._active} disp={dec.display}")
+        check("pseudocode has real body (not 1KB stub)", len(dec.text) > 1200,
+              f"len={len(dec.text)}")
+        await pilot.press("shift+tab")
+        await pilot.pause(0.2)
+        check("shift+tab returns to disassembly",
+              app._active == "disasm" and dis.display and not dec.display,
+              f"active={app._active}")
 
 
 def main(argv):

@@ -29,7 +29,7 @@ from textual.message import Message
 from textual.reactive import reactive
 from textual.scroll_view import ScrollView
 from textual.strip import Strip
-from textual.widgets import DataTable, Footer, Header, Input, Static
+from textual.widgets import DataTable, Footer, Header, Input, Static, TextArea
 
 from .client import IDAClient
 from .domain import DisasmModel, Func, Program
@@ -65,6 +65,7 @@ class DisasmView(ScrollView, can_focus=True):
         Binding("pageup,b", "page(-1)", "PgUp", show=False),
         Binding("home", "goto_top", "Top", show=False),
         Binding("G,end", "goto_bottom", "Bottom", show=False),
+        Binding("tab,shift+tab", "app.toggle_view", "Pseudocode", priority=True),
     ]
 
     cursor = reactive(0)
@@ -210,6 +211,32 @@ def _join(base: Style | None, style: Style) -> Style:
 
 
 # --------------------------------------------------------------------------- #
+# Decompiler (pseudocode) view
+# --------------------------------------------------------------------------- #
+class DecompView(TextArea):
+    """Read-only Hex-Rays pseudocode for one function. Bounded text (the domain
+    fetches the full body even when the server truncates), so a plain scrollable
+    TextArea is the right tool."""
+
+    BINDINGS = [Binding("tab,shift+tab", "app.toggle_view", "Disasm", priority=True)]
+
+    def __init__(self) -> None:
+        super().__init__("", read_only=True, show_line_numbers=True, id="decomp")
+        self.loaded_ea: int | None = None
+
+    def on_mount(self) -> None:
+        try:
+            self.language = "cpp"  # best-effort syntax highlighting
+        except Exception:  # noqa: BLE001 -- no tree-sitter grammar available
+            pass
+
+    def show(self, ea: int, text: str) -> None:
+        self.load_text(text)
+        self.loaded_ea = ea
+        self.move_cursor((0, 0))
+
+
+# --------------------------------------------------------------------------- #
 # Function list panel
 # --------------------------------------------------------------------------- #
 class FunctionsPanel(Vertical):
@@ -235,6 +262,7 @@ class IdaTui(App):
     #func-table { height: 1fr; }
     #func-filter { dock: top; }
     DisasmView { width: 1fr; padding: 0 1; }
+    DecompView { width: 1fr; }
     #status { dock: bottom; height: 1; background: $panel; color: $text; padding: 0 1; }
     """
 
@@ -243,7 +271,7 @@ class IdaTui(App):
         Binding("slash", "filter", "Filter"),
         Binding("g", "goto", "Goto"),
         Binding("ctrl+b", "toggle_functions", "Names"),
-        Binding("tab", "toggle_focus", "Switch pane"),
+        Binding("tab,shift+tab", "toggle_view", "Disasm/Pseudocode"),
         Binding("escape", "back", "Back"),
     ]
 
@@ -259,6 +287,8 @@ class IdaTui(App):
         self._ka = None
         self._nav: list[NavEntry] = []
         self._cur_filter: str | None = None
+        self._active = "disasm"  # or "decomp"
+        self._cur: NavEntry | None = None
 
     # -- layout ------------------------------------------------------------ #
     def compose(self) -> ComposeResult:
@@ -267,6 +297,9 @@ class IdaTui(App):
             with FunctionsPanel(id="left"):
                 pass
             yield DisasmView()
+            dv = DecompView()
+            dv.display = False
+            yield dv
         yield Static("connecting…", id="status")
         yield Footer()
 
@@ -364,12 +397,12 @@ class IdaTui(App):
         else:
             self.query_one("#func-table", DataTable).focus()
 
-    def action_toggle_focus(self) -> None:
-        table = self.query_one("#func-table", DataTable)
-        if self.focused is table:
-            self.query_one(DisasmView).focus()
-        else:
-            table.focus()
+    def action_toggle_view(self) -> None:
+        """Tab: switch the code pane between disassembly and pseudocode."""
+        if self._cur is None:
+            return
+        self._active = "decomp" if self._active == "disasm" else "disasm"
+        self._show_active()
 
     def action_filter(self) -> None:
         inp = self.query_one("#func-filter", Input)
@@ -442,11 +475,48 @@ class IdaTui(App):
     def _open_entry(self, entry: NavEntry, push: bool) -> None:
         if self.program is None:
             return
-        view = self.query_one(DisasmView)
+        self._cur = entry
         model = self.program.disasm(entry.ea, entry.name)
-        view.load(model, entry.name, cursor=entry.cursor)
-        view.focus()
-        self._status(f"{entry.name}  @ {entry.ea:#x}")
+        self.query_one(DisasmView).load(model, entry.name, cursor=entry.cursor)
+        self._show_active()
+
+    def _show_active(self) -> None:
+        dis = self.query_one(DisasmView)
+        dec = self.query_one(DecompView)
+        if self._active == "disasm":
+            dec.display = False
+            dis.display = True
+            dis.focus()
+            self._status_for_cur("disasm")
+        else:
+            dis.display = False
+            dec.display = True
+            dec.focus()
+            if self._cur is not None and dec.loaded_ea != self._cur.ea:
+                self._status(f"{self._cur.name} — decompiling…")
+                self._load_decomp(self._cur.ea, self._cur.name)
+            else:
+                self._status_for_cur("pseudocode")
+
+    def _status_for_cur(self, mode: str) -> None:
+        if self._cur is not None:
+            self._status(f"{self._cur.name}  @ {self._cur.ea:#x}   [{mode}]")
+
+    @work(thread=True, exclusive=True, group="decomp")
+    def _load_decomp(self, ea: int, name: str) -> None:
+        assert self.program is not None
+        dec = self.program.decompile(ea)
+        self.app.call_from_thread(self._apply_decomp, ea, name, dec)
+
+    def _apply_decomp(self, ea: int, name: str, dec) -> None:  # type: ignore[no-untyped-def]
+        view = self.query_one(DecompView)
+        if dec.failed:
+            view.show(ea, f"/* decompilation failed at {ea:#x}: {dec.error} */\n")
+            self._status(f"{name} — decompile failed; Tab for disasm")
+        else:
+            note = "  (truncated)" if dec.truncated else ""
+            view.show(ea, dec.code or "")
+            self._status(f"{name}  @ {ea:#x}   [pseudocode {len(dec.code or '')} chars]{note}")
 
     def on_disasm_view_cursor_moved(self, msg: DisasmView.CursorMoved) -> None:
         if self._nav:
