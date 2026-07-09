@@ -10,3 +10,6 @@ build/
 *.id2
 *.nam
 *.til
+
+# large analysis targets (copied in, not source)
+targets/
