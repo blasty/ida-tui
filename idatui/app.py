@@ -1040,8 +1040,11 @@ class IdaTui(App):
                 self.app.call_from_thread(self._status, f"opening {self._open_path}…")
                 import os
                 path = os.path.abspath(os.path.expanduser(self._open_path))
+                # Moderate idle TTL: the keepalive heartbeat (below) keeps the
+                # session alive while the TUI runs; once it exits the worker
+                # idles out and frees its slot (avoids piling up to max-workers).
                 res = client.call("idb_open", input_path=path,
-                                  idle_ttl_sec=1_000_000_000, timeout=1800.0)
+                                  idle_ttl_sec=1800, timeout=1800.0)
                 if not (isinstance(res, dict) and res.get("success")):
                     err = res.get("error") if isinstance(res, dict) else res
                     self.app.call_from_thread(self._status, f"open failed: {err}")
@@ -1052,10 +1055,8 @@ class IdaTui(App):
             health = client.health()
             module = health.get("module", "?")
             if self._do_keepalive:
-                try:
-                    client.bump_idle_ttl()
-                except Exception:
-                    pass
+                # Keep the session warm while we run; don't make it immortal, so
+                # it's reclaimed after the TUI closes.
                 self._ka = client.keepalive(interval=120.0).start()
             program = Program(client)
         except Exception as e:  # noqa: BLE001

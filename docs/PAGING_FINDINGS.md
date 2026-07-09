@@ -120,9 +120,25 @@ found"`).
    Belt-and-suspenders, and it also covers *adopted* sessions whose path we don't
    control / don't want to re-open.
 
-Recommended TUI policy: `bump_idle_ttl()` on open **and** run a `KeepAlive` as a
-safety net. "Worker not reachable" then only occurs on a real crash, which the
-app handles by re-`idb_open`.
+Recommended TUI policy: run a `KeepAlive` heartbeat (interval < TTL) to keep the
+*running* session warm, and use a **moderate** idle TTL (not ‘never’) so the
+worker is reclaimed after the TUI exits. "Worker not reachable" then only occurs
+on a real crash, which the app handles by re-`idb_open`.
+
+## Supervisor worker cap (`max_workers`, default 4)
+
+The supervisor allows at most `max_workers` concurrently-open binaries; a 5th
+`idb_open` fails with "Maximum idalib worker count reached". Before counting it
+**prunes unreachable workers**, so a dead/killed worker frees its slot on the
+next open. Two consequences drove design choices:
+
+* Do **not** make sessions immortal (`bump_idle_ttl(1e9)`) — they pile up to the
+  cap and never free. Instead: `KeepAlive` while running + a moderate TTL
+  (idatui uses 1800s on `--open`) so idle sessions self-exit after the TUI
+  closes and free their slot.
+* `spawn.sh` sets `IDA_MCP_MAX_WORKERS` (default raised to 8) for headroom; to
+  free a stuck slot immediately, kill the idle worker process (it gets pruned on
+  the next open).
 
 ## Writable path requirement (operational)
 
