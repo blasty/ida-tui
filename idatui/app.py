@@ -253,6 +253,35 @@ class ColumnCursor:
         s, e = _word_bounds(plain, min(self.cursor_x, len(plain) - 1))
         return plain[s:e] or None
 
+    # -- mouse ------------------------------------------------------------- #
+    def _after_cursor_move(self) -> None:
+        pass
+
+    def _set_cursor_at(self, line: int, col: int) -> None:
+        total = self.total
+        if total <= 0:
+            return
+        self.cursor = max(0, min(total - 1, line))
+        plain = self._line_plain(self.cursor)
+        maxx = max(len(plain) - 1, 0) if plain is not None else col
+        self.cursor_x = max(0, min(maxx, col))
+        self._scroll_cursor_into_view()
+        self._hscroll()
+        self.refresh()
+        self._after_cursor_move()
+
+    def on_click(self, event) -> None:  # type: ignore[no-untyped-def]
+        off = event.get_content_offset(self)
+        if off is None:
+            return
+        line = round(self.scroll_offset.y) + off.y
+        if line >= self.total:
+            return
+        self.focus()
+        self._set_cursor_at(line, round(self.scroll_offset.x) + off.x)
+        if event.chain >= 2:  # double-click == place cursor + follow
+            self.post_message(FollowRequested(self))
+
 
 class SearchMixin:
     """Vim-style in-view search shared by the disasm and pseudocode views.
@@ -615,6 +644,9 @@ class DisasmView(SearchMixin, NavMixin, ColumnCursor, ScrollView, can_focus=True
             self.refresh()  # scrolled: the whole viewport shifted
         else:
             _refresh_lines(self, old, self.cursor)  # only the two changed rows
+        self.post_message(DisasmView.CursorMoved(self.cursor, self._cursor_ea()))
+
+    def _after_cursor_move(self) -> None:
         self.post_message(DisasmView.CursorMoved(self.cursor, self._cursor_ea()))
 
     def _cursor_ea(self) -> int | None:

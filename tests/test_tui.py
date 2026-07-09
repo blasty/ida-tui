@@ -293,6 +293,43 @@ async def run(db):
                 check("follows the symbol under the cursor",
                       app._cur.ea == want, f"cur={app._cur.ea:#x} want={want:#x}")
 
+        # Mouse: single click places the cursor; double-click follows.
+        table.focus()
+        table.move_cursor(row=biggest_i)
+        await pilot.press("enter")
+        await wait_until(pilot, lambda: dis.total > 0, timeout=20)
+        dis.focus()
+        await pilot.pause(0.2)
+        mrow = mcol = msym = mline = None
+        for _ in range(40):  # page down until a 'call sub_' is on screen
+            top = round(dis.scroll_offset.y)
+            dis.model.lines(top, dis.size.height + 2, prefetch=False)
+            for r in range(min(dis.size.height, dis.total - top)):
+                plain = dis._line_plain(top + r)
+                if plain and "call" in plain:
+                    mm = re.search(r"\b(sub_[0-9A-Fa-f]+)", plain)
+                    if mm:
+                        mrow, mcol, msym, mline = r, mm.start(1), mm.group(1), top + r
+                        break
+            if mrow is not None:
+                break
+            await pilot.press("pagedown")
+            await pilot.pause(0.05)
+        if mrow is None:
+            check("found a call line for the mouse test", False, "no visible call sub_")
+        else:
+            await pilot.click(dis, offset=(mcol + 1, mrow))  # +1: left padding
+            await pilot.pause(0.1)
+            check("single click places the cursor on the clicked token",
+                  dis.cursor == mline and dis.word_under_cursor() == msym,
+                  f"cursor={dis.cursor} (want {mline}) word={dis.word_under_cursor()!r}")
+            depth = len(app._nav)
+            want = app.program.resolve(msym)
+            await pilot.click(dis, offset=(mcol + 1, mrow), times=2)
+            await wait_until(pilot, lambda: len(app._nav) > depth, timeout=25)
+            check("double-click follows the symbol", app._cur.ea == want,
+                  f"cur={app._cur.ea:#x} want={want:#x}")
+
 
 def main(argv):
     db = None
