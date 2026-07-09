@@ -51,6 +51,9 @@ async def run(db):
 
         loaded = await wait_until(pilot, lambda: table.row_count > 0)
         check("function list populated", loaded, f"rows={table.row_count}")
+        left = app.query_one("#left")
+        check("function pane width is capped (doesn't eat the screen)",
+              left.size.width <= 44, f"width={left.size.width}")
 
         got_all = await wait_until(
             pilot, lambda: "functions" in str(status.render()) and "…" not in str(status.render()),

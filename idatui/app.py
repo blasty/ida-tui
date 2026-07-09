@@ -943,9 +943,9 @@ class FunctionsPanel(Vertical):
         self._filter.display = False
         yield self._filter
         table = DataTable(id="func-table", cursor_type="row", zebra_stripes=True)
-        table.add_column("Address", width=12)
-        table.add_column("Function", width=28)
-        table.add_column("Size", width=8)
+        table.add_column("Address", width=10)
+        table.add_column("Function", width=21)
+        table.add_column("Size", width=7)
         yield table
 
 
@@ -984,7 +984,7 @@ class IdaTui(App):
     CSS = """
     Screen { layout: vertical; }
     #panes { height: 1fr; }
-    #left { width: 42%; border-right: solid $panel; }
+    #left { width: 30%; min-width: 42; max-width: 44; border-right: solid $panel; }
     #func-table { height: 1fr; }
     #func-filter { dock: top; }
     DisasmView { width: 1fr; padding: 0 1; }
