@@ -2,10 +2,15 @@
 """Headless pilot test for the Phase-1 TUI (no real terminal needed).
 
     python3 tests/test_tui.py --db <session_id>
+    python3 tests/test_tui.py --db <session_id> --stop-after "search finds"
 
 Drives the app via Textual's Pilot: boots, loads the function list, opens a
 function into the virtualized disasm view, scrolls it, and checks the cursor /
 status update. Uses ~/ida-venv python (has textual).
+
+--stop-after <substr> ends the run once a check whose name contains <substr> has
+been evaluated, skipping the (often expensive) tail -- handy for fast iteration
+on a single feature. The default (no flag) runs the whole suite.
 """
 import asyncio
 import os
@@ -20,6 +25,11 @@ from textual.widgets import DataTable, Input, OptionList, Static  # noqa: E402
 from rich.text import Text  # noqa: E402
 
 PASS = FAIL = 0
+STOP_AFTER = None  # --stop-after <substr>: end the run once a matching check ran
+
+
+class _StopSuite(Exception):
+    """Unwind cleanly once the requested --stop-after check has been evaluated."""
 
 
 def check(name, cond, detail=""):
@@ -30,6 +40,8 @@ def check(name, cond, detail=""):
     else:
         FAIL += 1
         print(f"  FAIL {name}   {detail}")
+    if STOP_AFTER and STOP_AFTER in name:
+        raise _StopSuite
 
 
 async def wait_until(pilot, pred, timeout=30.0, step=0.02):
@@ -757,12 +769,21 @@ async def run(db):
 
 
 def main(argv):
+    global STOP_AFTER
     db = None
     it = iter(argv)
     for a in it:
         if a == "--db":
             db = next(it)
-    asyncio.run(run(db))
+        elif a == "--stop-after":
+            # Iterate fast on one feature: run up to (and including) the first
+            # check whose name contains this substring, then stop (skips the
+            # expensive tail). Full run is the default (no flag).
+            STOP_AFTER = next(it)
+    try:
+        asyncio.run(run(db))
+    except _StopSuite:
+        print(f"  … stopped after '{STOP_AFTER}'")
     print(f"\n{PASS} passed, {FAIL} failed")
     return 1 if FAIL else 0
 

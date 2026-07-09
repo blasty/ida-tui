@@ -1566,11 +1566,14 @@ class IdaTui(App):
             return
         model = self.program.disasm(fn.addr, fn.name)
         idx = 0 if ea == fn.addr else model.index_of_ea(ea)
-        # The disasm cursor alone doesn't position the pseudocode pane. When it's
-        # the active view, also resolve the target address to its pseudocode line
-        # (via the per-line /*0xEA*/ markers) so the jump lands on the reference
-        # there too (e.g. selecting an xref while in the decompiler view).
-        dec_idx = self._decomp_line_for(fn.addr, ea) if self._active == "decomp" else -1
+        # The disasm cursor alone doesn't position the pseudocode pane. For a
+        # mid-function target with the decompiler active, resolve the address to
+        # its pseudocode line (via the per-line /*0xEA*/ markers) so the jump
+        # lands on the reference there too (e.g. selecting an xref). A plain
+        # function-entry jump is line 0 in both views -> skip the decompile.
+        dec_idx = -1
+        if self._active == "decomp" and ea != fn.addr:
+            dec_idx = self._decomp_line_for(fn.addr, ea)
         self.app.call_from_thread(self._open_at, fn.addr, fn.name, idx, push, dec_idx)
 
     def _decomp_line_for(self, fn_addr: int, ea: int) -> int:
