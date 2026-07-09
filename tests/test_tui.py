@@ -135,6 +135,11 @@ async def run(db):
               left.display and isinstance(app.focused, DataTable),
               f"display={left.display} focus={type(app.focused).__name__}")
 
+        # The 'sub_1*' round-trip above left the list filtered; clear it so the
+        # full table is back and biggest_i (an unfiltered row index) is valid.
+        app.clear_filter()
+        await wait_until(pilot, lambda: table.row_count == nfuncs, timeout=15)
+
         # Decompiler toggle: open a function, Tab -> pseudocode, Shift+Tab -> back.
         table.focus()
         table.move_cursor(row=biggest_i)
@@ -280,6 +285,7 @@ async def run(db):
             dis.cursor = call_idx
             dis.refresh()
             orig = app._cur.ea
+            orig_name = app._cur.name
             depth = len(app._nav)
             await pilot.press("enter")
             await wait_until(pilot, lambda: len(app._nav) > depth, timeout=25)
@@ -338,11 +344,18 @@ async def run(db):
                       f"cur={app._cur.ea:#x} (want {xref.fn_addr:#x}) "
                       f"cursor={dis.cursor} (want {xexp})")
 
+            # The xref-select sub-test above navigated 'dis' to another function;
+            # return to the original and materialize the call line so the column
+            # cursor operates on a cached (non-empty) line.
+            app._open_function(orig, orig_name)
+            await wait_until(pilot, lambda: dis.total > 0 and app._cur.ea == orig, 20)
+            dis.model.lines(0, 400, prefetch=False)
             # Column cursor: h/l move it; following the symbol under the cursor.
             dis.focus()
             dis.cursor = call_idx
             dis.cursor_x = 5
             dis.refresh()
+            await pilot.pause(0.05)
             await pilot.press("h")
             check("h moves the column cursor left", dis.cursor_x == 4, f"x={dis.cursor_x}")
             await pilot.press("l")
