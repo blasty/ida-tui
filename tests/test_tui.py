@@ -137,6 +137,18 @@ async def run(db):
         check("disasm view opened with a total", opened, f"total={view.total}")
         print(f"    opened func with {view.total} instructions")
 
+        # Pseudocode is the DEFAULT view: the first function opens into it.
+        dec0 = app.query_one(DecompView)
+        pc = await wait_until(
+            pilot, lambda: app._active == "decomp" and dec0.display
+            and dec0.loaded_ea is not None, 25)
+        check("opening a function shows pseudocode by default", pc,
+              f"active={app._active} disp={dec0.display}")
+        # Switch to disassembly for the disasm scrolling checks below.
+        await pilot.press("tab")
+        await wait_until(pilot, lambda: app._active == "disasm", 10)
+        view.focus()
+
         # Wait for the first lines to be cached, then verify a rendered line.
         cached = await wait_until(
             pilot, lambda: view.model is not None and view.model.cached_line(0) is not None,
@@ -194,17 +206,20 @@ async def run(db):
         app.clear_filter()
         await wait_until(pilot, lambda: table.row_count == nfuncs, timeout=15)
 
-        # Decompiler toggle: open a function, Tab -> pseudocode, Shift+Tab -> back.
+        # Tab toggles between pseudocode and disassembly (view state persists
+        # across opens, so normalize to pseudocode first).
         table.focus()
         table.move_cursor(row=biggest_i)
         await pilot.press("enter")
         dis = app.query_one(DisasmView)
         dec = app.query_one(DecompView)
         await wait_until(pilot, lambda: dis.total > 0, timeout=20)
-        await pilot.press("tab")
-        pc = await wait_until(pilot, lambda: dec.display and dec.loaded_ea is not None, 25)
-        check("tab shows pseudocode", pc and app._active == "decomp",
-              f"active={app._active} disp={dec.display}")
+        if app._active != "decomp":
+            await pilot.press("tab")
+        pc = await wait_until(
+            pilot, lambda: dec.display and dec.loaded_ea is not None
+            and app._active == "decomp", 25)
+        check("tab shows pseudocode", pc, f"active={app._active} disp={dec.display}")
         check("pseudocode has many lines", dec.total > 20, f"lines={dec.total}")
         # Highlighting: at least one styled (colored) segment across the body.
         styled = any(
@@ -213,14 +228,17 @@ async def run(db):
             for seg in strip
         )
         check("pseudocode is syntax-highlighted", styled)
-        await pilot.press("shift+tab")
+        await pilot.press("tab")
         await pilot.pause(0.1)
-        check("shift+tab returns to disassembly",
+        check("tab switches to disassembly",
               app._active == "disasm" and dis.display and not dec.display,
               f"active={app._active}")
+        await pilot.press("tab")  # back to pseudocode for the overlay/gutter checks
+        await wait_until(pilot, lambda: app._active == "decomp", 10)
 
         # A (re)decompile shows a grayed 'decompiling…' overlay while it runs.
-        await pilot.press("tab")
+        if app._active != "decomp":
+            await pilot.press("tab")
         await wait_until(pilot, lambda: app._active == "decomp", timeout=10)
         await wait_until(pilot, lambda: dec.loaded_ea is not None, timeout=20)
         dec.loaded_ea = None            # force a reload (as rename/refresh does)

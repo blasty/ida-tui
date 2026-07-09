@@ -1232,7 +1232,7 @@ class IdaTui(App):
         self._filter_timer = None
         self._sort_col = 0        # 0=addr, 1=name, 2=size
         self._sort_reverse = False
-        self._active = "disasm"  # or "decomp"
+        self._active = "decomp"  # default code view (or "disasm")
         self._cur: NavEntry | None = None
         self._search_ctx: tuple[object | None, int] = (None, 1)
         self._rename_ctx: tuple[object | None, str] = (None, "")
@@ -1247,10 +1247,10 @@ class IdaTui(App):
             fp = FunctionsPanel(id="left")
             fp.display = False  # overlay-first: reveal the docked pane with Ctrl+B
             yield fp
-            yield DisasmView()
-            dv = DecompView()
-            dv.display = False
-            yield dv
+            dis = DisasmView()
+            dis.display = False
+            yield dis
+            yield DecompView()  # pseudocode is the default view
         si = Input(id="search")
         si.display = False
         si.can_focus = False
@@ -1270,9 +1270,9 @@ class IdaTui(App):
         # Keep the hidden command input out of the focus chain until summoned.
         inp = self.query_one("#func-filter", Input)
         inp.can_focus = False
-        # The names pane is an overlay now (Ctrl+N); focus a code view so app
-        # bindings work before anything is opened.
-        self.query_one(DisasmView).focus()
+        # The names pane is an overlay now (Ctrl+N); focus the default code view
+        # (pseudocode) so app bindings work before anything is opened.
+        self.query_one(DecompView).focus()
         self._connect()
 
     # -- status helper ----------------------------------------------------- #
@@ -1438,7 +1438,8 @@ class IdaTui(App):
         left = self.query_one("#left", FunctionsPanel)
         left.display = not left.display
         if not left.display:
-            self.query_one(DisasmView).focus()
+            self.query_one(DecompView if self._active == "decomp"
+                           else DisasmView).focus()
         else:
             self.query_one("#func-table", DataTable).focus()
 
@@ -1492,7 +1493,8 @@ class IdaTui(App):
         elif self.query_one("#left", FunctionsPanel).display:
             table.focus()
         else:
-            self.query_one(DisasmView).focus()
+            self.query_one(DecompView if self._active == "decomp"
+                           else DisasmView).focus()
 
     # -- input submit (filter / goto) ------------------------------------- #
     def on_search_requested(self, msg: SearchRequested) -> None:
