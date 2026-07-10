@@ -1334,9 +1334,18 @@ class StructEditor(ModalScreen):
             return
         m = re.search(r"\b(?:struct|union)\s+([A-Za-z_]\w*)", text)
         name = m.group(1) if m else None
-        self.app.call_from_thread(self._after_save, name, err, text)
+        # On success, pull the canonical source back so the editor shows the
+        # normalized layout/types (auto-format on save).
+        formatted = None
+        if not err and name:
+            try:
+                formatted = self._program.struct_source(name)
+            except Exception:  # noqa: BLE001
+                formatted = None
+        self.app.call_from_thread(self._after_save, name, err, text, formatted)
 
-    def _after_save(self, name: str | None, err: str | None, text: str) -> None:
+    def _after_save(self, name: str | None, err: str | None, text: str,
+                    formatted: str | None) -> None:
         if err:
             # IDA's parse error is usually empty/cryptic; name the likely cause.
             msg = err.strip()
@@ -1348,7 +1357,13 @@ class StructEditor(ModalScreen):
             self._set_status(f"save failed — {msg}", error=True)
             return
         self._loaded = name
-        self._loaded_src = text.strip()  # editor now matches the saved type
+        if formatted:
+            # Reformat the editor to IDA's canonical layout (keeps cursor at top).
+            ta = self.query_one("#se-edit", TextArea)
+            ta.text = formatted
+            self._loaded_src = formatted
+        else:
+            self._loaded_src = text.strip()  # editor already matches the saved type
         if getattr(self.app, "_dirty", None) is not None:
             self.app._dirty = True  # unsaved-to-disk until Ctrl+S in the app
         self._refresh(select=name)

@@ -180,6 +180,11 @@ async def run(db):
             await wait_until(pilot, lambda: any(s.name == sname for s in se._structs), 15)
             check("Ctrl+S declares a new struct",
                   any(s.name == sname for s in se._structs), "not created")
+            # save auto-formats the (one-line) definition to canonical layout
+            await wait_until(pilot, lambda: "\n" in ta.text, 10)
+            check("save auto-formats the definition in the editor",
+                  ta.text.count("\n") >= 3 and f"struct {sname}" in ta.text
+                  and not se._is_dirty(), f"text={ta.text[:50]!r}")
             # update it (add a field -> member count grows)
             idx = next(i for i, s in enumerate(se._structs) if s.name == sname)
             se.on_option_list_option_selected(type("E", (), {"option_index": idx})())
