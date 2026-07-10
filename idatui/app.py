@@ -1024,6 +1024,205 @@ class DecompView(SearchMixin, NavMixin, ColumnCursor, ScrollView, can_focus=True
 
 
 # --------------------------------------------------------------------------- #
+# Hex view (raw bytes of the loaded image, VA-addressed, virtualized)
+# --------------------------------------------------------------------------- #
+_S_HEX = Style(color="grey74")
+_S_ASCII = Style(color="#6a9955")
+
+
+class HexView(ScrollView, can_focus=True):
+    """A line-virtualized hex dump of the whole loaded image (16 bytes/row),
+    addressed by virtual address. The cursor is a byte offset; it can be synced
+    to/from the code views to see the naked bytes under the disasm/pseudocode
+    cursor."""
+
+    BINDINGS = [
+        Binding("j,down", "move(16)", show=False),
+        Binding("k,up", "move(-16)", show=False),
+        Binding("l,right", "move(1)", show=False),
+        Binding("h,left", "move(-1)", show=False),
+        Binding("ctrl+d", "half_page(1)", show=False),
+        Binding("ctrl+u", "half_page(-1)", show=False),
+        Binding("pagedown", "page(1)", show=False),
+        Binding("pageup", "page(-1)", show=False),
+        Binding("home", "goto_top", show=False),
+        Binding("G,end", "goto_bottom", show=False),
+        Binding("enter", "to_code", "To code"),
+        Binding("escape", "leave", "Back"),
+        Binding("tab,shift+tab", "app.toggle_view", "Code", priority=True),
+    ]
+
+    cursor = reactive(0, repaint=False)
+
+    class Moved(Message):
+        def __init__(self, va: int) -> None:
+            super().__init__()
+            self.va = va
+
+    class Leave(Message):
+        pass
+
+    class ToCode(Message):
+        def __init__(self, va: int) -> None:
+            super().__init__()
+            self.va = va
+
+    def __init__(self) -> None:
+        super().__init__(id="hex")
+        self.model = None
+        self.total = 0
+
+    # -- public API -------------------------------------------------------- #
+    def load(self, model, va: int | None = None) -> None:  # type: ignore[no-untyped-def]
+        self.model = model
+        self.total = model.total_rows()
+        self.virtual_size = Size(0, self.total)
+        if va is not None:
+            off = max(0, min(model.size - 1, va - model.start))
+            self.cursor = off
+        self._prime(center=True)
+
+    def goto_va(self, va: int) -> None:
+        if self.model is None:
+            return
+        self.cursor = max(0, min(self.model.size - 1, va - self.model.start))
+        self._prime(center=True)
+
+    def cursor_va(self) -> int:
+        return (self.model.start + self.cursor) if self.model else 0
+
+    @work(thread=True, exclusive=True, group="hex-prime")
+    def _prime(self, center: bool = False) -> None:
+        model = self.model
+        if model is None:
+            return
+        row = self.cursor // 16
+        height = max(self.size.height, 1)
+        model.ensure(max(row - 2, 0), height + 4)
+        self.app.call_from_thread(self._after_prime, center)
+
+    def _after_prime(self, center: bool) -> None:
+        self._scroll_to_cursor(center=center)
+        self.refresh()
+        self.post_message(HexView.Moved(self.cursor_va()))
+
+    # -- scrolling --------------------------------------------------------- #
+    def _visible_height(self) -> int:
+        return max(self.size.height, 1)
+
+    def _apply_scroll(self, y: int) -> None:
+        y = max(0, y)
+        self.scroll_to(y=y, animate=False)
+
+        def _fix(yy: int = y) -> None:
+            self.scroll_to(y=yy, animate=False)
+            self.refresh(layout=True)
+
+        self.call_after_refresh(_fix)
+
+    def _scroll_to_cursor(self, center: bool = False) -> None:
+        height = self._visible_height()
+        row = self.cursor // 16
+        if center:
+            top = max(row - height // 2, 0)
+        else:
+            top = round(self.scroll_offset.y)
+            if row < top:
+                top = row
+            elif row >= top + height:
+                top = row - height + 1
+        top = max(0, min(top, max(self.total - 1, 0)))
+        self._apply_scroll(top)
+
+    # -- navigation -------------------------------------------------------- #
+    def _move(self, delta: int) -> None:
+        if self.model is None or self.model.size == 0:
+            return
+        before = round(self.scroll_offset.y)
+        self.cursor = max(0, min(self.model.size - 1, self.cursor + delta))
+        self._scroll_to_cursor(center=False)
+        if round(self.scroll_offset.y) == before:
+            self.refresh()  # cursor moved within the viewport
+        self.post_message(HexView.Moved(self.cursor_va()))
+
+    def action_move(self, delta: int) -> None:
+        self._move(delta)
+
+    def action_page(self, direction: int) -> None:
+        self._move(direction * self._visible_height() * 16)
+
+    def action_half_page(self, direction: int) -> None:
+        self._move(direction * (self._visible_height() // 2) * 16)
+
+    def action_goto_top(self) -> None:
+        self._move(-self.cursor)
+
+    def action_goto_bottom(self) -> None:
+        self._move(self.model.size if self.model else 0)
+
+    def action_to_code(self) -> None:
+        self.post_message(HexView.ToCode(self.cursor_va()))
+
+    def action_leave(self) -> None:
+        self.post_message(HexView.Leave())
+
+    # -- rendering --------------------------------------------------------- #
+    def _ensure_window(self, top: int) -> None:
+        if self.model is None:
+            return
+        height = max(self.size.height, 1)
+        if not self.model.is_cached(top, height):
+            self._fetch_window(top, height)
+        else:
+            self.model.ensure_async(top, height)
+
+    @work(thread=True, exclusive=False, group="hex-fetch")
+    def _fetch_window(self, top: int, height: int) -> None:
+        model = self.model
+        if model is None:
+            return
+        model.ensure(max(top - 2, 0), height + 4)
+        self.app.call_from_thread(self.refresh)
+
+    def render_line(self, y: int) -> Strip:
+        model = self.model
+        width = self.size.width
+        if model is None or self.total == 0:
+            return Strip([Segment("".ljust(width), _S_DIM)])
+        top = round(self.scroll_offset.y)
+        if y == 0:
+            self._ensure_window(top)
+        r = top + y
+        if r >= self.total:
+            return Strip([Segment("".ljust(width), _S_HEX)])
+        va, data = model.row(r)
+        cur_row, cur_col = self.cursor // 16, self.cursor % 16
+        segs: list[Segment] = [Segment(f"{va:08X}  ", _S_ADDR)]
+        if data is None:
+            segs.append(Segment("… fetching", _S_DIM))
+        else:
+            n = len(data)
+            for i in range(16):
+                if i == 8:
+                    segs.append(Segment(" ", _S_HEX))
+                if i < n:
+                    st = _S_CELL if (r == cur_row and i == cur_col) else _S_HEX
+                    segs.append(Segment(f"{data[i]:02X} ", st))
+                else:
+                    segs.append(Segment("   ", _S_HEX))
+            segs.append(Segment(" |", _S_DIM))
+            for i in range(16):
+                if i < n:
+                    ch = chr(data[i]) if 32 <= data[i] < 127 else "."
+                    st = _S_CELL if (r == cur_row and i == cur_col) else _S_ASCII
+                else:
+                    ch, st = " ", _S_ASCII
+                segs.append(Segment(ch, st))
+            segs.append(Segment("|", _S_DIM))
+        return Strip(segs).adjust_cell_length(width, _S_HEX)
+
+
+# --------------------------------------------------------------------------- #
 # Function list panel
 # --------------------------------------------------------------------------- #
 class FunctionsPanel(Vertical):
@@ -1460,6 +1659,7 @@ class IdaTui(App):
     #func-filter { dock: top; }
     DisasmView { width: 1fr; padding: 0 1; }
     DecompView { width: 1fr; }
+    HexView { width: 1fr; padding: 0 1; }
     #search {
         height: 1; border: none; padding: 0 1;
         background: $primary-darken-2; color: $text;
@@ -1511,6 +1711,7 @@ class IdaTui(App):
         Binding("q", "quit", "Quit"),
         Binding("ctrl+n", "symbols", "Symbols"),
         Binding("ctrl+t", "structs", "Structs"),
+        Binding("backslash", "hex", "Hex"),
         Binding("g", "goto", "Goto"),
         Binding("slash", "filter", "Filter", show=False),
         Binding("ctrl+b", "toggle_functions", "Names", show=False),
@@ -1538,6 +1739,7 @@ class IdaTui(App):
         self._sort_reverse = False
         self._pref = "decomp"    # preferred code view (changed by Tab)
         self._active = "decomp"  # currently shown view (falls back on decomp fail)
+        self._hex_pending_ea: int | None = None
         self._cur: NavEntry | None = None
         self._search_ctx: tuple[object | None, int] = (None, 1)
         self._rename_ctx: tuple[object | None, str] = (None, "")
@@ -1557,6 +1759,9 @@ class IdaTui(App):
             dis.display = False
             yield dis
             yield DecompView()  # pseudocode is the default view
+            hx = HexView()
+            hx.display = False
+            yield hx
         si = Input(id="search")
         si.display = False
         si.can_focus = False
@@ -1797,11 +2002,34 @@ class IdaTui(App):
         self._open_function(addr, f.name if f else hex(addr))
 
     def action_toggle_view(self) -> None:
-        """Tab: switch the code pane between disassembly and pseudocode."""
+        """Tab: switch the code pane between disassembly and pseudocode (or leave
+        the hex view back to the preferred code view)."""
         if self._cur is None:
+            return
+        if self._active == "hex":
+            self._active = self._pref
+            self._show_active()
             return
         self._active = "decomp" if self._active == "disasm" else "disasm"
         self._pref = self._active  # an explicit toggle sets the preference
+        self._show_active()
+
+    def action_hex(self) -> None:
+        """Backslash: show the raw bytes of the loaded image, synced to the code
+        cursor; press again (or Tab/Esc) to return to the code view."""
+        if self._cur is None or self.program is None:
+            return
+        if self._active == "hex":
+            self._active = self._pref
+            self._show_active()
+            return
+        if self._active == "disasm":
+            ea = self.query_one(DisasmView)._cursor_ea()
+        else:
+            dec = self.query_one(DecompView)
+            ea = dec._line_ea(dec.cursor)
+        self._hex_pending_ea = ea if ea is not None else self._cur.ea
+        self._active = "hex"
         self._show_active()
 
     def action_filter(self) -> None:
@@ -2584,13 +2812,25 @@ class IdaTui(App):
     def _show_active(self) -> None:
         dis = self.query_one(DisasmView)
         dec = self.query_one(DecompView)
+        hx = self.query_one(HexView)
+        dis.display = dec.display = hx.display = False
         if self._active == "disasm":
-            dec.display = False
             dis.display = True
             dis.focus()
             self._status_for_cur("disasm")
+        elif self._active == "hex":
+            hx.display = True
+            hx.focus()
+            ea = getattr(self, "_hex_pending_ea", None)
+            self._hex_pending_ea = None
+            if hx.model is None:
+                self._status("hex — loading image…")
+                self._load_hex_model(ea)
+            elif ea is not None:
+                hx.goto_va(ea)
+            else:
+                self._hex_status(hx.cursor_va())
         else:
-            dis.display = False
             dec.display = True
             dec.focus()
             if self._cur is not None and dec.loaded_ea != self._cur.ea:
@@ -2599,6 +2839,37 @@ class IdaTui(App):
                 self._load_decomp(self._cur.ea, self._cur.name)
             else:
                 self._status_for_cur("pseudocode")
+
+    # -- hex view ---------------------------------------------------------- #
+    @work(thread=True, exclusive=True, group="hex-load")
+    def _load_hex_model(self, ea: int | None) -> None:
+        assert self.program is not None
+        model = self.program.hex_model()
+        self.app.call_from_thread(self._apply_hex_model, model, ea)
+
+    def _apply_hex_model(self, model, ea: int | None) -> None:  # type: ignore[no-untyped-def]
+        hx = self.query_one(HexView)
+        if model is None:
+            self._status("hex: no loaded segments")
+            return
+        hx.load(model, ea)
+        if self._active == "hex":
+            hx.focus()
+
+    def _hex_status(self, va: int) -> None:
+        sec = self.program.section_of(va) if self.program else None
+        self._status(f"hex  @ {va:#x}   [{sec or '?'}]   (Enter→code, Tab/Esc/\\→back)")
+
+    def on_hex_view_moved(self, msg: HexView.Moved) -> None:
+        self._hex_status(msg.va)
+
+    def on_hex_view_leave(self, msg: HexView.Leave) -> None:
+        self._active = self._pref
+        self._show_active()
+
+    def on_hex_view_to_code(self, msg: HexView.ToCode) -> None:
+        self._active = self._pref
+        self._goto_ea(msg.va, push=True)
 
     def _status_for_cur(self, mode: str) -> None:
         if self._cur is not None:

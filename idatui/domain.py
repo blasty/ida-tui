@@ -35,6 +35,7 @@ from .client import IDAClient, IDAToolError
 # Clamps derived from measured caps (list ~700, disasm ~500). Margin included.
 LIST_PAGE = 500
 DISASM_BLOCK = 256  # instructions per cached/fetched block (<= disasm cap)
+HEX_BLOCK = 4096    # bytes per cached/fetched hex block
 
 _TRUNC_RE = re.compile(r"\[(\d+) chars total\]\s*$")
 
@@ -396,6 +397,86 @@ class DisasmModel:
 
 
 # --------------------------------------------------------------------------- #
+# Hex model: block-cached byte view over the loaded image (VA-addressed)
+# --------------------------------------------------------------------------- #
+class HexModel:
+    """Windowed, block-cached raw bytes of the loaded image, addressed by virtual
+    address. Format-agnostic: the range/segments come from IDA, not from any
+    file header. Gaps between segments read back as zeros."""
+
+    BLOCK = HEX_BLOCK
+
+    def __init__(self, program: "Program", start: int, end: int):
+        self._prog = program
+        self.start = start
+        self.end = end
+        self.size = max(end - start, 0)
+        self._blocks: dict[int, bytes] = {}
+        self._lock = threading.Lock()
+        self._inflight: set[int] = set()
+
+    def total_rows(self) -> int:
+        return (self.size + 15) // 16
+
+    def _fetch_block(self, b: int) -> bytes:
+        addr = self.start + b * self.BLOCK
+        n = min(self.BLOCK, self.end - addr)
+        data = self._prog.read_bytes(addr, n) if n > 0 else b""
+        with self._lock:
+            self._blocks[b] = data
+            self._inflight.discard(b)
+        return data
+
+    def _prefetch(self, b: int) -> None:
+        if b < 0 or b * self.BLOCK >= self.size:
+            return
+        with self._lock:
+            if b in self._blocks or b in self._inflight:
+                return
+            self._inflight.add(b)
+        self._prog.submit(self._fetch_block, b)
+
+    def row(self, r: int, prefetch: bool = True) -> tuple[int, bytes | None]:
+        """Return (va, bytes<=16) for row ``r``, or (va, None) if not yet cached.
+        Non-blocking; used by the virtualized view's render path."""
+        off = r * 16
+        va = self.start + off
+        b = off // self.BLOCK
+        with self._lock:
+            block = self._blocks.get(b)
+        if block is None:
+            return (va, None)
+        bo = off - b * self.BLOCK
+        return (va, block[bo:bo + 16])
+
+    def ensure(self, r0: int, count: int) -> None:
+        """Blocking: fetch the blocks covering rows [r0, r0+count) if missing."""
+        if count <= 0:
+            return
+        b0 = (r0 * 16) // self.BLOCK
+        b1 = ((r0 + count) * 16) // self.BLOCK
+        for b in range(b0, b1 + 1):
+            with self._lock:
+                have = b in self._blocks
+            if not have:
+                self._fetch_block(b)
+
+    def is_cached(self, r0: int, count: int) -> bool:
+        if count <= 0:
+            return True
+        b0 = (r0 * 16) // self.BLOCK
+        b1 = ((r0 + count - 1) * 16) // self.BLOCK
+        with self._lock:
+            return all(b in self._blocks for b in range(b0, b1 + 1))
+
+    def ensure_async(self, r0: int, count: int) -> None:
+        b0 = (r0 * 16) // self.BLOCK
+        b1 = ((r0 + max(count, 1) - 1) * 16) // self.BLOCK
+        for b in range(b0 - 1, b1 + 2):
+            self._prefetch(b)
+
+
+# --------------------------------------------------------------------------- #
 # Program: top-level handle, model registry, prefetch pool
 # --------------------------------------------------------------------------- #
 class Program:
@@ -411,6 +492,7 @@ class Program:
         self._decomp: dict[int, tuple[Decompilation, int]] = {}
         self._name_gen = 0  # bumped on rename; invalidates stale name caches
         self._sections: list[tuple[int, int, str]] | None = None
+        self._hexmodel: "HexModel | None" = None
         self._lock = threading.Lock()
 
     # -- prefetch plumbing ------------------------------------------------- #
@@ -453,6 +535,43 @@ class Program:
         with self._lock:
             self._sections = secs
         return secs
+
+    def image_range(self) -> tuple[int, int] | None:
+        """[start, end) spanning all loaded segments (the hex view's document)."""
+        secs = self.sections()
+        if not secs:
+            return None
+        return (min(s[0] for s in secs), max(s[1] for s in secs))
+
+    def hex_model(self) -> "HexModel | None":
+        """Cached block-backed byte view over the whole loaded image."""
+        if self._hexmodel is not None:
+            return self._hexmodel
+        rng = self.image_range()  # calls sections() -> don't hold _lock (it re-locks)
+        with self._lock:
+            if self._hexmodel is None and rng is not None:
+                self._hexmodel = HexModel(self, rng[0], rng[1])
+            return self._hexmodel
+
+    def read_bytes(self, ea: int, n: int) -> bytes:
+        """Raw bytes [ea, ea+n) from IDA (gaps read as zero)."""
+        if n <= 0:
+            return b""
+        try:
+            r = self.client.call("get_bytes", regions=[{"addr": hex(ea), "size": int(n)}])
+        except IDAToolError:
+            return b"\x00" * n
+        res = r.get("result", []) if isinstance(r, dict) else []
+        data = res[0].get("data", "") if res and isinstance(res[0], dict) else ""
+        out = bytearray()
+        for tok in data.split():
+            try:
+                out.append(int(tok, 16) & 0xFF)
+            except ValueError:
+                out.append(0)
+        if len(out) < n:  # pad short reads (unmapped tail)
+            out.extend(b"\x00" * (n - len(out)))
+        return bytes(out[:n])
 
     def section_of(self, ea: int) -> str | None:
         """Name of the segment/section containing ``ea`` (e.g. '.got', '.text',

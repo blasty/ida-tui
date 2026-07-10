@@ -19,8 +19,8 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from idatui.app import (  # noqa: E402
-    ConfirmScreen, DecompView, DisasmView, FunctionsPanel, IdaTui, StructEditor,
-    SymbolPalette, XrefsScreen,
+    ConfirmScreen, DecompView, DisasmView, FunctionsPanel, HexView, IdaTui,
+    StructEditor, SymbolPalette, XrefsScreen,
 )
 from textual.widgets import DataTable, Input, OptionList, Static, TextArea  # noqa: E402
 from rich.text import Text  # noqa: E402
@@ -309,6 +309,32 @@ async def run(db):
         await pilot.pause(0.05)
         check("goto-bottom lands near end",
               view.cursor >= view.total - 1, f"cursor={view.cursor}/{view.total}")
+
+        # Hex view: backslash shows the raw image bytes synced to the code cursor.
+        view.focus()
+        code_ea = view._cursor_ea()
+        await pilot.press("backslash")
+        await wait_until(pilot, lambda: app._active == "hex", 10)
+        hx = app.query_one(HexView)
+        await wait_until(
+            pilot, lambda: hx.model is not None
+            and hx.model.row(hx.cursor // 16)[1] is not None, 20)
+        check("backslash opens the hex view synced to the code cursor",
+              app._active == "hex" and code_ea is not None and hx.cursor_va() == code_ea,
+              f"active={app._active} hexva={hx.cursor_va():#x} ea={code_ea}")
+        want = app.program.read_bytes(code_ea, 1)
+        _, rb = hx.model.row(hx.cursor // 16)
+        check("hex shows the actual byte at that address",
+              rb is not None and rb[hx.cursor % 16] == want[0],
+              f"got={rb[hx.cursor % 16] if rb else None} want={want[0]}")
+        await pilot.press("l")
+        await pilot.pause(0.1)
+        check("hex cursor steps one byte", hx.cursor_va() == code_ea + 1,
+              f"va={hx.cursor_va():#x}")
+        await pilot.press("backslash")  # back to the code view
+        await wait_until(pilot, lambda: app._active != "hex", 10)
+        check("backslash returns from hex to the code view",
+              app._active == "disasm", f"active={app._active}")
 
         # Filter round-trip. '/' is context-sensitive: it filters when the
         # function table is focused (and searches when a code view is focused),
