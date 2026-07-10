@@ -64,10 +64,14 @@ async def run(db):
         resp = await c.call("ping")
         check("ping returns proto", resp.get("result", {}).get("proto") == 1, str(resp))
 
-        resp = await c.call("functions", limit=5)
+        resp = await c.call("functions", limit=400)
         funcs = resp.get("result", [])
         check("functions lists entries", isinstance(funcs, list) and len(funcs) > 0,
               str(resp)[:120])
+        # a normally-named function (its name appears verbatim in its own decomp,
+        # unlike e.g. '.init_proc' which IDA renders as 'init_proc')
+        target = next((f for f in funcs if f["name"] == "main"),
+                      next((f for f in funcs if f["name"].startswith("sub_")), funcs[0]))
 
         resp = await c.call("state")
         st = resp.get("result", {})
@@ -75,7 +79,6 @@ async def run(db):
               str(st)[:120])
 
         # drive it like a user: goto a function by name via raw keys
-        target = next((f for f in funcs if f["name"] == "main"), funcs[0])
         keys = ["g"] + list(target["name"]) + ["enter"]
         resp = await c.call("keys", keys=keys)
         st = resp.get("result", {})
@@ -102,6 +105,44 @@ async def run(db):
         val = app.query_one("#goto", Input).value
         check("text primitive types into the focused input", val == "sub_", f"val={val!r}")
         await c.call("keys", keys=["escape"])
+
+        # --- semantic verbs ------------------------------------------------ #
+        resp = await c.call("goto", target=target["name"], delay_ms=0)
+        check("semantic goto lands on the function",
+              resp.get("result", {}).get("function", {}).get("name") == target["name"],
+              str(resp.get("result", {}).get("function")))
+
+        before = app._active
+        resp = await c.call("toggle_view")
+        check("toggle_view flips the active pane",
+              resp.get("result", {}).get("active") != before, f"still {before}")
+        await c.call("toggle_view")  # flip back to a known state
+
+        # fast movement: cursor should advance a few lines
+        line0 = (await c.call("state"))["result"]["cursor"].get("line")
+        resp = await c.call("move", dir="down", n=4)
+        line1 = resp["result"]["cursor"].get("line")
+        check("move(down,4) advances the cursor",
+              isinstance(line0, int) and isinstance(line1, int) and line1 > line0,
+              f"{line0} -> {line1}")
+
+        # rename round-trip through the prompt-fill path (place cursor on the
+        # function's own name via view(), rename, verify, revert via the API)
+        v = (await c.call("view", lines=1))["result"]
+        line0_text = v["lines"][0]["text"] if v.get("lines") else ""
+        col = line0_text.find(target["name"])
+        if col >= 0:
+            await c.call("cursor", line=0, col=col + 1)
+            newname = f"rpc_{os.getpid()}"
+            await c.call("rename", name=newname, delay_ms=0)
+            got = app._func_index.by_addr(target["ea"])
+            check("semantic rename updates the function name",
+                  got is not None and got.name == newname,
+                  got.name if got else None)
+            app.program.client.call(
+                "rename", batch={"func": {"addr": hex(target["ea"]), "name": target["name"]}})
+        else:
+            check("found the function name to rename", False, repr(line0_text[:60]))
 
         w.close()
     print(f"\n{PASS} passed, {FAIL} failed")

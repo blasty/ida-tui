@@ -27,10 +27,20 @@ from typing import Any
 
 from rich.console import Console
 
-from ._sync import settle
+from ._sync import drain, settle
 from .app import DecompView, DisasmView, HexView
 
 PROTO_VERSION = 1
+TYPE_DELAY_MS = 35  # default per-char delay for high-level typed ops (aesthetic)
+
+# Movement keys — driven fast (no typed delay) so the pane still visibly moves.
+_MOVE_KEYS = {
+    "down": "j", "up": "k", "left": "h", "right": "l",
+    "word": "w", "wordback": "b", "bol": "0", "eol": "dollar_sign",
+    "top": "home", "bottom": "G",
+    "halfdown": "ctrl+d", "halfup": "ctrl+u",
+    "pagedown": "pagedown", "pageup": "pageup",
+}
 
 
 # --------------------------------------------------------------------------- #
@@ -239,6 +249,40 @@ class RpcServer:
         except Exception as e:  # noqa: BLE001 — report, never kill the connection
             return {"id": rid, "error": {"message": f"{type(e).__name__}: {e}"}}
 
+    # -- composed helpers (semantic verbs) -------------------------------- #
+    async def _press(self, keys, pred=None, timeout=20.0):
+        await self.app._press_keys([str(k) for k in keys])
+        await settle(self.app, pred, timeout=timeout)
+        return snapshot(self.app)
+
+    async def _fill_prompt(self, open_key, input_id, value, delay_ms, clear):
+        """Open a prompt (a keystroke), optionally clear its prefill, type the
+        value with the typed-out delay, submit. Returns after the prompt closes."""
+        from textual.widgets import Input
+        app = self.app
+        await app._press_keys([open_key])
+        await settle(app, lambda: app.query_one(f"#{input_id}", Input).display, timeout=10)
+        inp = app.query_one(f"#{input_id}", Input)
+        if not inp.display:
+            raise RuntimeError(f"{input_id!r} prompt did not open (word under cursor?)")
+        if clear:
+            inp.value = ""
+        await app._press_keys(_text_to_keys(value, delay_ms))
+        await app._press_keys(["enter"])
+
+    def _goto_target_pred(self, target):
+        """A predicate that holds once a goto to ``target`` has landed."""
+        app = self.app
+        try:
+            ea = app.program.resolve(target)
+        except Exception:  # noqa: BLE001 — unknown name; caller falls back to generic
+            return None
+        if app._active == "hex":
+            return lambda: app.query_one(HexView).cursor_va() == ea
+        fn = app.program.function_of(ea)
+        want = fn.addr if fn else ea
+        return lambda: app._cur is not None and app._cur.ea == want
+
     async def _dispatch(self, method: str, params: dict[str, Any]) -> Any:
         app = self.app
         if method in (None, "ping"):
@@ -269,5 +313,82 @@ class RpcServer:
             return screen_text(app)
         if method == "functions":
             return functions(app, params.get("filter"), int(params.get("limit", 50)))
+
+        # -- semantic verbs (typed-with-delay high-level ops) ------------- #
+        delay = int(params.get("delay_ms", TYPE_DELAY_MS))
+        timeout = float(params.get("timeout", 20.0))
+
+        if method in ("goto", "open"):
+            target = str(params.get("target", ""))
+            pred = self._goto_target_pred(target)
+            await self._fill_prompt("g", "goto", target, delay, clear=False)
+            await settle(app, pred, timeout=timeout)
+            return snapshot(app)
+
+        if method == "rename":
+            await self._fill_prompt("n", "rename", str(params["name"]), delay, clear=True)
+            await settle(app, timeout=timeout)
+            return snapshot(app)
+        if method == "comment":
+            await self._fill_prompt("semicolon", "comment", str(params["text"]), delay,
+                                    clear=True)
+            await settle(app, timeout=timeout)
+            return snapshot(app)
+        if method == "retype":
+            await self._fill_prompt("y", "retype", str(params["proto"]), delay, clear=True)
+            await settle(app, timeout=timeout)
+            return snapshot(app)
+
+        if method == "follow":
+            depth = len(app._nav)
+            return await self._press(["enter"], lambda: len(app._nav) > depth, timeout)
+        if method == "back":
+            return await self._press(["escape"], timeout=timeout)
+        if method == "toggle_view":
+            before = app._active
+            return await self._press(["tab"], lambda: app._active != before, timeout)
+        if method == "hex":
+            return await self._press(["backslash"], lambda: app._active == "hex", timeout)
+        if method == "xrefs":
+            return await self._press(
+                ["x"], lambda: type(app.screen).__name__ == "XrefsScreen", timeout)
+        if method == "symbols":
+            await app._press_keys(["ctrl+n"])
+            await settle(app, lambda: type(app.screen).__name__ == "SymbolPalette", timeout=10)
+            q = params.get("query")
+            if q:
+                await app._press_keys(_text_to_keys(str(q), delay))
+            await settle(app, timeout=timeout)
+            return snapshot(app)
+        if method == "structs":
+            return await self._press(
+                ["ctrl+t"], lambda: type(app.screen).__name__ == "StructEditor", timeout)
+        if method == "close":
+            return await self._press(["escape"], timeout=timeout)
+
+        if method == "move":
+            key = _MOVE_KEYS.get(str(params.get("dir")))
+            if key is None:
+                raise ValueError(f"unknown move dir: {params.get('dir')!r} "
+                                 f"(one of {sorted(_MOVE_KEYS)})")
+            n = max(1, int(params.get("n", 1)))
+            await app._press_keys([key] * n)
+            if params.get("settle", True):
+                await drain(app)  # light: pump only, keep movement snappy
+            return snapshot(app)
+
+        if method == "cursor":
+            w = _active_widget(app)
+            if isinstance(w, HexView):
+                raise ValueError("cursor: not supported in the hex view (use goto)")
+            if "line" in params and params["line"] is not None:
+                w.cursor = max(0, min(getattr(w, "total", 1) - 1, int(params["line"])))
+            if "col" in params and params["col"] is not None:
+                w.cursor_x = max(0, int(params["col"]))
+            if hasattr(w, "_after_cursor_move"):
+                w._after_cursor_move()
+            w.refresh()
+            await drain(app)
+            return snapshot(app)
 
         raise ValueError(f"unknown method: {method!r}")
