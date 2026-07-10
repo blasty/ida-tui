@@ -295,13 +295,13 @@ async def run(db):
               view.model.cached_line(view.cursor) is not None)
         check("status shows an address", "@ 0x" in str(status.render()), str(status.render()))
 
-        # 'y' copies the current code line to the clipboard.
+        # Ctrl+Y copies the current code line to the clipboard.
         view.focus()
         cur_line = view._line_plain(view.cursor)
         app._clipboard = ""
-        await pilot.press("y")
+        await pilot.press("ctrl+y")
         await wait_until(pilot, lambda: app._clipboard == cur_line, 10)
-        check("'y' copies the current code line to the clipboard",
+        check("Ctrl+Y copies the current code line to the clipboard",
               bool(cur_line) and app._clipboard == cur_line, f"clip={app._clipboard!r}")
 
         # Jump to bottom of a (possibly huge) function; must not hang.
@@ -975,6 +975,40 @@ async def run(db):
                     "set_comments", items=[{"addr": hex(cea), "comment": ""}])
             else:
                 check("found a pseudocode line to comment", False, "no marker line")
+
+            # Retype ('y') a FUNCTION prototype: the prompt prefills the current
+            # prototype (from the structured func_types tool) and applying a new
+            # one updates it. (Local-var retyping uses the same seam via
+            # set_lvar_type; it's not asserted here because Hex-Rays restructures
+            # some vars on retype, making a deterministic check fragile.)
+            cf = app._cur  # whatever function is actually loaded now
+            await wait_until(pilot, lambda: dec.loaded_ea == cf.ea, 15)
+            fts = app.program.func_types(cf.ea)
+            if fts is not None and fts.prototype:
+                old_proto = fts.prototype
+                nm_col = dec._texts[0].find(cf.name)
+                dec.focus()
+                dec.cursor, dec.cursor_x = 0, (nm_col + 1 if nm_col >= 0 else 0)
+                dec.refresh()
+                await pilot.pause(0.05)
+                await pilot.press("y")
+                await wait_until(pilot, lambda: app.query_one("#retype", Input).display, 10)
+                ri = app.query_one("#retype", Input)
+                check("'y' on a function prefills its prototype",
+                      ri.display and ri.value == old_proto,
+                      f"val={ri.value!r} want={old_proto!r}")
+                ri.value = f"void __fastcall {cf.name}(int zz_retype_arg)"
+                await pilot.press("enter")
+                await wait_until(
+                    pilot, lambda: (lambda f: bool(f) and "zz_retype_arg" in f.prototype)(
+                        app.program.func_types(cf.ea)), 20)
+                after = app.program.func_types(cf.ea)
+                check("applying a retype changes the function prototype",
+                      after is not None and "zz_retype_arg" in after.prototype,
+                      f"proto={after.prototype if after else None!r}")
+                app.program.set_function_type(cf.ea, old_proto)  # restore
+            else:
+                check("got structured function types (func_types tool)", False)
 
             # Decompiler follow of a name NOT in refs (the function's own name).
             await pilot.press("g")

@@ -121,6 +121,15 @@ class CommentRequested(Message):
         self.view = view
 
 
+class RetypeRequested(Message):
+    """A code view asks to retype the function/variable under the cursor."""
+
+    def __init__(self, view, name: str | None) -> None:  # type: ignore[no-untyped-def]
+        super().__init__()
+        self.view = view
+        self.name = name
+
+
 class NavMixin:
     """Follow / xrefs actions shared by the code views (bindings live on each
     view since Textual only merges BINDINGS from DOMNode subclasses)."""
@@ -129,8 +138,9 @@ class NavMixin:
         Binding("enter", "follow", "Follow"),
         Binding("x", "xrefs", "Xrefs"),
         Binding("n", "rename", "Rename"),
+        Binding("y", "retype", "Retype"),
         Binding("semicolon", "comment", "Comment"),
-        Binding("y", "copy_line", "Copy line"),
+        Binding("ctrl+y", "copy_line", "Copy line"),
     ]
 
     def action_follow(self) -> None:
@@ -144,6 +154,9 @@ class NavMixin:
 
     def action_comment(self) -> None:
         self.post_message(CommentRequested(self))
+
+    def action_retype(self) -> None:
+        self.post_message(RetypeRequested(self, self.word_under_cursor()))
 
     def action_copy_line(self) -> None:
         plain = self._line_plain(self.cursor)
@@ -1459,6 +1472,10 @@ class IdaTui(App):
         height: 1; border: none; padding: 0 1;
         background: $success-darken-2; color: $text;
     }
+    #retype {
+        height: 1; border: none; padding: 0 1;
+        background: $accent-darken-2; color: $text;
+    }
     #status { height: 1; background: $panel; color: $text; padding: 0 1; }
     .decomp-loading {
         width: 100%; height: 100%; content-align: center middle;
@@ -1525,6 +1542,7 @@ class IdaTui(App):
         self._search_ctx: tuple[object | None, int] = (None, 1)
         self._rename_ctx: tuple[object | None, str] = (None, "")
         self._comment_ctx: tuple[object | None, int, str] = (None, 0, "")
+        self._retype_ctx: tuple[object | None, str, int, str] = (None, "", 0, "")
         self._xref_focus_name: str | None = None
         self._dirty = False
 
@@ -1551,6 +1569,10 @@ class IdaTui(App):
         ci.display = False
         ci.can_focus = False
         yield ci
+        ti = Input(id="retype")
+        ti.display = False
+        ti.can_focus = False
+        yield ti
         yield Static("connecting…", id="status")
         yield Footer()
 
@@ -2141,6 +2163,90 @@ class IdaTui(App):
         verb = "cleared comment" if not text else "commented"
         self._status(f"{verb} @ {ea:#x}   (Ctrl+S to save)")
 
+    # -- retype (set type, IDA 'y') --------------------------------------- #
+    def on_retype_requested(self, msg: RetypeRequested) -> None:
+        if self._cur is None or self.program is None:
+            return
+        self._prepare_retype(msg.view, msg.name)
+
+    @work(thread=True, exclusive=True, group="retype")
+    def _prepare_retype(self, view, word: str | None) -> None:  # type: ignore[no-untyped-def]
+        """Work out whether the cursor is on a local variable or a function, and
+        fetch the current type/prototype to prefill the prompt."""
+        assert self.program is not None and self._cur is not None
+        ft = self.program.func_types(self._cur.ea)
+        kind: str | None = None
+        subject: int = self._cur.ea
+        prefill = ""
+        # 1) a local variable (or arg) of the current function
+        if word and ft is not None:
+            lv = next((v for v in ft.lvars if v.name == word), None)
+            if lv is not None:
+                kind, prefill = "lvar", lv.type
+        # 2) a function under the cursor (self or a referenced one)
+        if kind is None and self._looks_like_symbol(word):
+            try:
+                tgt = self.program.resolve(word)
+            except Exception:  # noqa: BLE001
+                tgt = None
+            if tgt is not None:
+                tft = self.program.func_types(tgt)
+                if tft is not None:
+                    kind, subject, prefill = "func", tgt, tft.prototype
+        # 3) fall back to the current function itself
+        if kind is None and ft is not None:
+            kind, subject, prefill = "func", self._cur.ea, ft.prototype
+        if kind is None:
+            self.app.call_from_thread(self._status, "nothing to retype under the cursor")
+            return
+        self.app.call_from_thread(self._open_retype, view, kind, subject, word or "", prefill)
+
+    def _open_retype(self, view, kind: str, subject: int, word: str,  # type: ignore[no-untyped-def]
+                     prefill: str) -> None:
+        self._retype_ctx = (view, kind, subject, word)
+        self.query_one("#status", Static).display = False
+        inp = self.query_one("#retype", Input)
+        label = "prototype" if kind == "func" else f"type for '{word}'"
+        inp.placeholder = f"{label} —  Enter=apply  Esc=cancel"
+        inp.can_focus = True
+        inp.display = True
+        inp.value = prefill
+        inp.focus()
+
+    def _end_retype(self) -> None:
+        inp = self.query_one("#retype", Input)
+        inp.display = False
+        inp.can_focus = False
+        self.query_one("#status", Static).display = True
+        view = self._retype_ctx[0]
+        if view is not None:
+            view.focus()
+
+    @work(thread=True, exclusive=True, group="retype-apply")
+    def _do_retype(self, kind: str, subject: int, word: str, new: str) -> None:
+        assert self.program is not None
+        if kind == "func":
+            err = self.program.set_function_type(subject, new)
+        else:  # lvar of the current function
+            err = self.program.set_lvar_type(self._cur.ea, word, new)
+        if err:
+            self.app.call_from_thread(self._status, f"retype failed: {err}")
+            return
+        self.app.call_from_thread(self._after_retype, kind, word)
+
+    def _after_retype(self, kind: str, word: str) -> None:
+        # A type change alters the pseudocode (and disasm operand types), so
+        # recompile via the name-generation invalidation and reopen in place.
+        self.program.bump_names()
+        cur = self._cur
+        if cur is not None:
+            self._save_current_pos()
+            self.query_one(DecompView).loaded_ea = None
+            self._open_entry(cur, push=False)
+        self._dirty = True
+        what = "prototype" if kind == "func" else f"'{word}'"
+        self._status(f"retyped {what}   (Ctrl+S to save)")
+
     @work(thread=True, exclusive=True, group="rename")
     def _do_rename(self, view, old: str, new: str) -> None:  # type: ignore[no-untyped-def]
         assert self.program is not None
@@ -2353,6 +2459,11 @@ class IdaTui(App):
             event.prevent_default()
             self._end_comment()
             return
+        if self.query_one("#retype", Input).display:
+            event.stop()
+            event.prevent_default()
+            self._end_retype()
+            return
         fi = self.query_one("#func-filter", Input)
         if fi.display:
             event.stop()
@@ -2390,6 +2501,12 @@ class IdaTui(App):
             self._end_comment()
             if view is not None and value != existing:  # empty value clears it
                 self._do_comment(ea, value)
+            return
+        if inp.id == "retype":
+            view, kind, subject, word = self._retype_ctx
+            self._end_retype()
+            if view is not None and value:
+                self._do_retype(kind, subject, word, value)
             return
         if getattr(self, "_goto_mode", False):
             self._goto_mode = False

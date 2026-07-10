@@ -93,6 +93,21 @@ class Xref:
 
 
 @dataclass(frozen=True)
+class LVar:
+    name: str
+    type: str
+    is_arg: bool
+
+
+@dataclass
+class FuncTypes:
+    addr: int
+    name: str
+    prototype: str        # e.g. 'int __fastcall foo(int a, char *b)'
+    lvars: list[LVar]
+
+
+@dataclass(frozen=True)
 class Struct:
     name: str
     size: int
@@ -493,6 +508,42 @@ class Program:
         res = payload.get("result", []) if isinstance(payload, dict) else []
         if res and isinstance(res[0], dict):
             return res[0].get("error")
+        return None
+
+    # -- function / variable types ---------------------------------------- #
+    def func_types(self, ea: int) -> FuncTypes | None:
+        """Structured decompiler types for the function at ``ea`` (prototype +
+        local variables). None if ``ea`` isn't a decompilable function. Requires
+        the injected ``func_types`` server tool."""
+        try:
+            r = self.client.call("func_types", addr=hex(ea))
+        except IDAToolError:
+            return None
+        if not isinstance(r, dict) or r.get("error"):
+            return None
+        lvars = [LVar(name=lv.get("name", ""), type=lv.get("type", ""),
+                      is_arg=bool(lv.get("is_arg")))
+                 for lv in r.get("lvars", []) if isinstance(lv, dict)]
+        return FuncTypes(addr=_as_int(r.get("addr", hex(ea))), name=r.get("name", ""),
+                         prototype=r.get("prototype", ""), lvars=lvars)
+
+    def set_function_type(self, ea: int, signature: str) -> str | None:
+        """Set a function's prototype. None on success, else an error string."""
+        r = self.client.call("set_type", edits=[{"addr": hex(ea), "signature": signature}])
+        res = r.get("result", []) if isinstance(r, dict) else []
+        row = res[0] if res and isinstance(res[0], dict) else {}
+        if row.get("ok"):
+            return None
+        return row.get("error") or "failed to set the prototype"
+
+    def set_lvar_type(self, fn_ea: int, var: str, ty: str) -> str | None:
+        """Set a decompiler local variable's type (via the injected server tool).
+        None on success, else an error string."""
+        r = self.client.call("set_lvar_type", addr=hex(fn_ea), variable=var, type=ty)
+        if isinstance(r, dict) and r.get("error"):
+            return r["error"]
+        if isinstance(r, dict) and not r.get("ok"):
+            return "failed to set the variable type"
         return None
 
     def delete_type(self, name: str) -> str | None:
