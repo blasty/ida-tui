@@ -1223,12 +1223,33 @@ class StructEditor(ModalScreen):
     ]
 
     NEW_TEMPLATE = "struct NewStruct\n{\n    int field;\n};\n"
+    # Field names IDA's C parser predefines as macros and refuses to re-parse.
+    RESERVED_FIELDS = ("__unused",)
 
     def __init__(self, program: Program) -> None:
         super().__init__()
         self._program = program
         self._structs: list[Struct] = []
         self._loaded: str | None = None  # name currently in the editor
+        self._loaded_src: str | None = None  # its source, to detect unsaved edits
+
+    @classmethod
+    def _reserved_field(cls, text: str) -> str | None:
+        for nm in cls.RESERVED_FIELDS:
+            if re.search(rf"\b{re.escape(nm)}\b", text):
+                return nm
+        return None
+
+    def _is_dirty(self) -> bool:
+        cur = self.query_one("#se-edit", TextArea).text.strip()
+        return bool(cur) and cur != (self._loaded_src or "").strip()
+
+    def _confirm_discard(self, then, msg="Discard unsaved changes to the definition?"):
+        """Run ``then()`` directly, or after a discard confirmation if dirty."""
+        if self._is_dirty():
+            self.app.push_screen(ConfirmScreen(msg), lambda ok: then() if ok else None)
+        else:
+            then()
 
     def compose(self) -> ComposeResult:
         with Vertical(id="se-box"):
@@ -1276,7 +1297,7 @@ class StructEditor(ModalScreen):
     def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
         i = event.option_index
         if 0 <= i < len(self._structs):
-            self._load(self._structs[i].name)
+            self._confirm_discard(lambda n=self._structs[i].name: self._load(n))
 
     @work(thread=True, exclusive=True, group="se-load")
     def _load(self, name: str) -> None:
@@ -1289,6 +1310,7 @@ class StructEditor(ModalScreen):
 
     def _set_editor(self, name: str, src: str) -> None:
         self._loaded = name
+        self._loaded_src = src
         ta = self.query_one("#se-edit", TextArea)
         ta.text = src
         ta.focus()
@@ -1312,22 +1334,34 @@ class StructEditor(ModalScreen):
             return
         m = re.search(r"\b(?:struct|union)\s+([A-Za-z_]\w*)", text)
         name = m.group(1) if m else None
-        self.app.call_from_thread(self._after_save, name, err)
+        self.app.call_from_thread(self._after_save, name, err, text)
 
-    def _after_save(self, name: str | None, err: str | None) -> None:
+    def _after_save(self, name: str | None, err: str | None, text: str) -> None:
         if err:
-            self._set_status(f"declare failed: {(err.strip() or 'parse error')[:80]}")
+            # IDA's parse error is usually empty/cryptic; name the likely cause.
+            msg = err.strip()
+            if not msg or "parse" in msg.lower() or "fail" in msg.lower():
+                bad = self._reserved_field(text)
+                msg = (f"'{bad}' is a reserved name in IDA's C parser — rename "
+                       f"that field to save" if bad else
+                       "IDA couldn't parse it (unknown type or reserved field name?)")
+            self._set_status(f"save failed — {msg}", error=True)
             return
         self._loaded = name
+        self._loaded_src = text.strip()  # editor now matches the saved type
         if getattr(self.app, "_dirty", None) is not None:
-            self.app._dirty = True  # struct change is unsaved until Ctrl+S in the app
+            self.app._dirty = True  # unsaved-to-disk until Ctrl+S in the app
         self._refresh(select=name)
         self._set_status(f"saved {name}" if name else "saved")
 
     def action_new(self) -> None:
+        self._confirm_discard(self._do_new, "Discard unsaved changes and start new?")
+
+    def _do_new(self) -> None:
         ta = self.query_one("#se-edit", TextArea)
         ta.text = self.NEW_TEMPLATE
         self._loaded = None
+        self._loaded_src = self.NEW_TEMPLATE
         ta.focus()
         self._set_status("new struct — edit and Ctrl+S")
 
@@ -1378,10 +1412,12 @@ class StructEditor(ModalScreen):
         if self.focused is self.query_one("#se-edit", TextArea):
             self.query_one("#se-list", OptionList).focus()
             return
-        self.dismiss(None)
+        self._confirm_discard(lambda: self.dismiss(None),
+                              "Discard unsaved changes and close?")
 
-    def _set_status(self, text: str) -> None:
-        self.query_one("#se-status", Static).update(text)
+    def _set_status(self, text, error: bool = False) -> None:  # type: ignore[no-untyped-def]
+        st = self.query_one("#se-status", Static)
+        st.update(Text("⚠ " + text, style="bold #ff5f5f") if error else text)
 
 
 # --------------------------------------------------------------------------- #

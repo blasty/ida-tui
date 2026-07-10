@@ -193,6 +193,28 @@ async def run(db):
             check("Ctrl+S updates an existing struct in place",
                   next((s.members for s in se._structs if s.name == sname), 0) == 3,
                   "member count not 3")
+            # A save IDA's C parser rejects (the reserved field name '__unused')
+            # fails loudly and non-destructively, naming the offending field.
+            ta.text = f"struct {sname} {{ int a; char b[8]; long c; int __unused; }};"
+            await pilot.press("ctrl+s")
+            await wait_until(
+                pilot, lambda: "save failed" in str(se.query_one("#se-status").render()), 15)
+            st = str(se.query_one("#se-status").render())
+            check("a rejected save fails loudly, naming the reserved field",
+                  "save failed" in st and "__unused" in st, f"status={st!r}")
+            check("a rejected save leaves the struct unchanged",
+                  next((s.members for s in se._structs if s.name == sname), 0) == 3,
+                  "members changed")
+            check("a rejected save keeps your edited text", "__unused" in ta.text)
+            # Unsaved edits are guarded when switching structs.
+            other = next(i for i, s in enumerate(se._structs) if s.name != sname)
+            se.on_option_list_option_selected(type("E", (), {"option_index": other})())
+            guard = await wait_until(pilot, lambda: isinstance(app.screen, ConfirmScreen), 10)
+            check("unsaved edits prompt before switching structs", guard,
+                  f"screen={type(app.screen).__name__}")
+            await pilot.press("enter")  # confirm discard -> loads the other (clean)
+            await wait_until(
+                pilot, lambda: isinstance(app.screen, StructEditor) and not se._is_dirty(), 15)
             # delete: 'd' asks to confirm, Enter deletes (server del_type). If the
             # server lacks del_type, the status reports it instead.
             idx = next(i for i, s in enumerate(se._structs) if s.name == sname)
