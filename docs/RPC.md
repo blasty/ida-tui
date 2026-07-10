@@ -30,6 +30,10 @@ connection (the UI is single-user). A mutating call returns **after the UI has
 settled**, and its result is a fresh `state()` snapshot — so the driver never
 acts on stale state.
 
+**Single-driver:** only one client connection is served at a time; a second
+concurrent connection is refused with `error: busy` (no multi-driver support).
+Sequential connections (e.g. one `rpcclient` invocation per call) are fine.
+
 ```
 ->  {"id": 1, "method": "goto", "params": {"target": "main"}}
 <-  {"id": 1, "result": { ...state... }}
@@ -53,7 +57,7 @@ stalls. `target` is a name, `0xADDR`, or omitted (= current function).
 |--------|--------|---------|
 | `state` | — | active/pref view, current function `{ea,name}`, cursor `{line,col,word,ea}` (or `{va,byte}` in hex), status text, filter, nav depth, dirty, open `modal`. |
 | `view` | `lines?` | visible lines of the active code pane, cursor-marked (disasm/decomp; use `screen` for hex). |
-| `screen` | — | `{width,height,text}` — a full plain-text render of exactly what's on screen. |
+| `screen` | `format?=text\|html\|svg` | `{width,height,format,text}` — a full render of exactly what's on screen (`html`/`svg` are colored, for an out-of-band viewer). |
 | `functions` | `filter?`, `limit?=50` | `[{ea,name,size}]`. |
 | `pseudocode` | `target?` | `{ea,name,code,failed,error,truncated}` — the **whole** decompiled body. |
 | `disassembly` | `target?`, `max?=2000` | `{ea,name,total,lines:[{ea,text}]}`. |
@@ -69,10 +73,10 @@ predicate so the returned state is final.
 | method | params | effect |
 |--------|--------|--------|
 | `goto` / `open` | `target`, `delay_ms?`, `timeout?` | `g` prompt → name or `0xADDR` → Enter. |
-| `rename` | `name`, `delay_ms?` | `n` on the token under the cursor → replace → Enter. |
+| `rename` | `name`, `word?`, `delay_ms?` | `n` on the token under the cursor → replace → Enter. `word` first places the cursor on that token (see `cursor_on`). |
 | `comment` | `text`, `delay_ms?` | `;` on the current line. |
-| `retype` | `proto`, `delay_ms?` | `y` on the token/function under the cursor. |
-| `follow` | — | Enter: follow the reference under the cursor (waits for the jump). |
+| `retype` | `proto`, `word?`, `delay_ms?` | `y` on the token/function under the cursor (`word` places it first). |
+| `follow` | `word?` | Enter: follow the reference under the cursor (`word` places it first); waits for the jump. |
 | `back` | — | Escape: pop the nav stack. |
 | `toggle_view` | — | Tab: disasm ⇄ pseudocode. |
 | `hex` | — | `\`: hex view. |
@@ -89,6 +93,7 @@ predicate so the returned state is final.
 |--------|--------|--------|
 | `move` | `dir`, `n?=1`, `settle?` | `dir` ∈ down/up/left/right/word/wordback/bol/eol/top/bottom/halfdown/halfup/pagedown/pageup. |
 | `cursor` | `line?`, `col?` | set the cursor directly on the active code pane (disasm/decomp). |
+| `cursor_on` | `word`, `line?`, `occurrence?=1` | place the cursor on the *n*-th token equal to `word` (verified with the app's tokenizer). Decomp searches the whole body; disasm only cached/visible lines. Returns `{found, ...state}`. |
 
 ## Driving pattern for an agent
 

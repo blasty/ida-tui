@@ -134,17 +134,22 @@ async def run(db):
               isinstance(line0, int) and isinstance(line1, int) and line1 > line0,
               f"{line0} -> {line1}")
 
-        # rename round-trip through the prompt-fill path (place cursor on the
-        # function's own name via view(), rename, verify, revert via the API)
+        # cursor_on: place the cursor on the function's own name by token
+        resp = await c.call("cursor_on", word=target["name"])
+        cur = resp.get("result", {})
+        check("cursor_on lands on the named token",
+              cur.get("found") is True and cur.get("cursor", {}).get("word") == target["name"],
+              str(cur.get("cursor")))
+
+        # rename using the ergonomic word= (cursor_on + prompt-fill in one call)
         v = (await c.call("view", lines=1))["result"]
         line0_text = v["lines"][0]["text"] if v.get("lines") else ""
         col = line0_text.find(target["name"])
         if col >= 0:
-            await c.call("cursor", line=0, col=col + 1)
             newname = f"rpc_{os.getpid()}"
-            await c.call("rename", name=newname, delay_ms=0)
+            await c.call("rename", name=newname, word=target["name"], delay_ms=0)
             got = app._func_index.by_addr(target["ea"])
-            check("semantic rename updates the function name",
+            check("rename word= updates the function name",
                   got is not None and got.name == newname,
                   got.name if got else None)
             app.program.client.call(
@@ -207,6 +212,22 @@ async def run(db):
         check("search runs without error and returns state",
               st.get("active") in ("decomp", "disasm"), str(st.get("active")))
         await c.call("keys", keys=["escape"])
+
+        # colored screen export (for an out-of-band web viewer)
+        resp = await c.call("screen", format="html")
+        html = resp.get("result", {})
+        check("screen format=html returns an html document",
+              html.get("format") == "html" and "<" in (html.get("text") or ""),
+              str(html.get("format")))
+
+        # single-driver gate: a 2nd connection (while c is open) is refused
+        r2, w2 = await asyncio.open_unix_connection(sock)
+        c2 = Conn(r2, w2)
+        resp2 = await c2.call("ping")
+        check("second concurrent client is refused (single-driver)",
+              resp2.get("error") and "busy" in resp2["error"].get("message", ""),
+              str(resp2))
+        w2.close()
 
         try:
             w.close()

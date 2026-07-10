@@ -47,7 +47,7 @@ METHODS = {
     "quit": "gracefully exit the TUI",
     "state": "-> full state snapshot",
     "view": "{lines?} -> visible code-pane lines (disasm/decomp)",
-    "screen": "-> {width,height,text} full plain-text render",
+    "screen": "{format?=text|html|svg} -> {width,height,text} full render",
     "functions": "{filter?,limit?=50} -> [{ea,name,size}]",
     "pseudocode": "{target?} -> full decompiled body",
     "disassembly": "{target?,max?=2000} -> {total,lines:[{ea,text}]}",
@@ -57,10 +57,11 @@ METHODS = {
     "keys": "{keys:[str],settle?,timeout?} raw key injection (supports 'wait:<ms>')",
     "text": "{text,delay_ms?,settle?} type a literal string into the focused input",
     "goto/open": "{target,delay_ms?} g-prompt to a name or 0xADDR",
-    "rename": "{name,delay_ms?} rename the token under the cursor",
+    "rename": "{name,word?,delay_ms?} rename the token under (or 'word') the cursor",
     "comment": "{text,delay_ms?} comment the current line",
-    "retype": "{proto,delay_ms?} set the prototype/type under the cursor",
-    "follow": "follow the reference under the cursor",
+    "retype": "{proto,word?,delay_ms?} set the prototype/type under the cursor",
+    "follow": "{word?} follow the reference under (or 'word') the cursor",
+    "cursor_on": "{word,line?,occurrence?=1} place the cursor on a token",
     "back": "pop the nav stack",
     "toggle_view": "disasm <-> pseudocode",
     "hex": "hex view",
@@ -198,8 +199,9 @@ def view_lines(app, lines: int | None = None) -> dict[str, Any]:
             "cursor": _cursor_info(app, w), "lines": out}
 
 
-def screen_text(app) -> dict[str, Any]:
-    """Plain-text render of the whole screen — exactly what the viewer sees."""
+def screen_text(app, fmt: str = "text") -> dict[str, Any]:
+    """Render the whole screen exactly as shown. ``fmt``: 'text' (plain, default),
+    'html' or 'svg' (colored — handy for an out-of-band web viewer)."""
     width, height = app.size
     console = Console(width=width, height=height or 40, file=io.StringIO(),
                       force_terminal=True, color_system="truecolor", record=True,
@@ -207,7 +209,49 @@ def screen_text(app) -> dict[str, Any]:
     render = app.screen._compositor.render_update(
         full=True, screen_stack=app._background_screens, simplify=False)
     console.print(render)
-    return {"width": width, "height": height, "text": console.export_text(styles=False)}
+    out: dict[str, Any] = {"width": width, "height": height, "format": fmt}
+    if fmt == "html":
+        out["text"] = console.export_html(inline_styles=True)
+    elif fmt == "svg":
+        out["text"] = console.export_svg(title=app.title)
+    else:
+        out["text"] = console.export_text(styles=False)
+    return out
+
+
+def cursor_on(app, word: str, line: int | None = None, occurrence: int = 1) -> bool:
+    """Place the cursor on the ``occurrence``-th token equal to ``word`` in the
+    active code pane (optionally restricted to ``line``). Verified with the app's
+    own tokenizer so 'main' won't match inside 'domain'. Disasm scan is limited to
+    already-cached lines (what's on/near screen); decomp searches the whole body.
+    Returns whether it found and moved."""
+    w = _active_widget(app)
+    if isinstance(w, HexView):
+        raise ValueError("cursor_on: not supported in the hex view")
+    if isinstance(w, DecompView):
+        texts = list(w._texts)
+    else:
+        texts = [(w._line_plain(i) or "") for i in range(getattr(w, "total", 0))]
+    orig = (w.cursor, w.cursor_x)
+    rows = [line] if line is not None else range(len(texts))
+    hits = 0
+    for i in rows:
+        if not (0 <= i < len(texts)):
+            continue
+        t = texts[i]
+        col = t.find(word)
+        while col != -1:
+            w.cursor, w.cursor_x = i, col
+            if w.word_under_cursor() == word:
+                hits += 1
+                if hits >= max(1, occurrence):
+                    if hasattr(w, "_after_cursor_move"):
+                        w._after_cursor_move()
+                    w.refresh()
+                    return True
+            col = t.find(word, col + 1)
+    w.cursor, w.cursor_x = orig  # not found: leave the cursor untouched
+    return False
 
 
 def functions(app, flt: str | None = None, limit: int = 50) -> list[dict[str, Any]]:
@@ -308,6 +352,7 @@ class RpcServer:
         self.app = app
         self.path = path
         self._server: asyncio.AbstractServer | None = None
+        self._busy = False  # single-driver gate: one client connection at a time
 
     async def start(self) -> None:
         if os.path.exists(self.path):
@@ -336,6 +381,19 @@ class RpcServer:
 
     async def _on_client(self, reader: asyncio.StreamReader,
                          writer: asyncio.StreamWriter) -> None:
+        if self._busy:
+            # No multi-driver support yet: refuse a second concurrent client
+            # rather than let two drivers interleave mutations.
+            try:
+                writer.write(json.dumps(
+                    {"id": None, "error": {"message": "busy: another client is "
+                     "connected (single-driver only)"}}).encode() + b"\n")
+                await writer.drain()
+                writer.close()
+            except Exception:  # noqa: BLE001
+                pass
+            return
+        self._busy = True
         try:
             while not reader.at_eof():
                 line = await reader.readline()
@@ -347,6 +405,7 @@ class RpcServer:
         except (ConnectionResetError, BrokenPipeError):
             pass
         finally:
+            self._busy = False
             try:
                 writer.close()
             except Exception:  # noqa: BLE001
@@ -440,7 +499,7 @@ class RpcServer:
         if method == "view":
             return view_lines(app, params.get("lines"))
         if method == "screen":
-            return screen_text(app)
+            return screen_text(app, str(params.get("format", "text")))
         if method == "functions":
             return functions(app, params.get("filter"), int(params.get("limit", 50)))
 
@@ -466,6 +525,22 @@ class RpcServer:
         # -- semantic verbs (typed-with-delay high-level ops) ------------- #
         delay = int(params.get("delay_ms", TYPE_DELAY_MS))
         timeout = float(params.get("timeout", 20.0))
+
+        # optional ergonomic: place the cursor on a token before an edit/follow
+        if method in ("rename", "retype", "follow") and params.get("word"):
+            if not cursor_on(app, str(params["word"]), params.get("line"),
+                             int(params.get("occurrence", 1))):
+                raise ValueError(f"cursor_on: token {params['word']!r} not found "
+                                 "in the current view")
+            await drain(app)
+
+        if method == "cursor_on":
+            found = cursor_on(app, str(params["word"]), params.get("line"),
+                              int(params.get("occurrence", 1)))
+            await drain(app)
+            snap = snapshot(app)
+            snap["found"] = found
+            return snap
 
         if method in ("goto", "open"):
             target = str(params.get("target", ""))
