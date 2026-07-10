@@ -28,11 +28,14 @@ import argparse
 import json
 import os
 import secrets
+import socket
 import subprocess
 import sys
 import time
 from typing import Any
+from urllib.parse import urlparse
 
+from .client import DEFAULT_URL
 from .rpcclient import RpcClient, RpcError
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -75,6 +78,60 @@ def _tmux(*args: str) -> str:
 
 
 # --------------------------------------------------------------------------- #
+# supervisor (ida-pro-mcp server) — auto-start if down
+# --------------------------------------------------------------------------- #
+def _server_addr(url: str) -> tuple[str, int]:
+    u = urlparse(url)
+    return (u.hostname or "127.0.0.1", u.port or 8745)
+
+
+def _server_up(host: str, port: int, timeout: float = 0.75) -> bool:
+    """Is something listening on host:port? (Cheap TCP probe; the readiness poll
+    that follows catches a half-up server.)"""
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+
+def _ensure_server(host: str, port: int, timeout: float,
+                   detached: bool = True) -> dict[str, Any]:
+    """Make sure the supervisor is up; start ./spawn.sh in a tmux pane if not.
+
+    Only auto-starts a *local* server (can't launch a remote one). spawn.sh binds
+    the port, so starting a duplicate is impossible — the probe guards that.
+    ``IDATUI_SERVER_CMD`` overrides the launch command (used by the tests).
+    """
+    if _server_up(host, port):
+        return {"server_started": False, "server_up": True}
+    if host not in ("127.0.0.1", "localhost", "::1"):
+        return {"server_started": False, "server_up": False,
+                "error": f"server at {host}:{port} is down and not local; "
+                         "cannot auto-start"}
+    cmd_str = os.environ.get("IDATUI_SERVER_CMD", "./spawn.sh")
+    cmd = f"cd {_q(REPO)} && exec {cmd_str}"
+    split = ["split-window", "-v", "-P", "-F", "#{pane_id}"]
+    if detached:
+        split += ["-d"]
+    anchor = os.environ.get("TMUX_PANE")
+    if anchor:
+        split += ["-t", anchor]
+    split.append(cmd)
+    pane = _tmux(*split)
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if not _pane_alive(pane):
+            return {"server_started": True, "server_up": False, "server_pane": pane,
+                    "error": "supervisor pane exited during startup (check it)"}
+        if _server_up(host, port):
+            return {"server_started": True, "server_up": True, "server_pane": pane}
+        time.sleep(0.5)
+    return {"server_started": True, "server_up": False, "server_pane": pane,
+            "error": "supervisor did not come up in time"}
+
+
+# --------------------------------------------------------------------------- #
 # spawn
 # --------------------------------------------------------------------------- #
 def spawn(args) -> int:
@@ -90,6 +147,18 @@ def spawn(args) -> int:
     if args.open and not os.path.exists(target):
         print(f"error: no such binary: {target}", file=sys.stderr)
         return 2
+
+    # make sure the ida-pro-mcp supervisor is up (auto-start it if not)
+    srv: dict[str, Any] = {"server_started": False, "server_up": True}
+    if not args.no_ensure_server:
+        host, port = _server_addr(args.url or DEFAULT_URL)
+        srv = _ensure_server(host, port, args.server_timeout)
+        if srv.get("server_started"):
+            print(f"supervisor was down — started it ({srv.get('server_pane')})",
+                  file=sys.stderr)
+        if not srv.get("server_up"):
+            print(json.dumps({"ready": False, **srv}), file=sys.stderr)
+            return 3
 
     # the command the pane runs: become the TUI so kill-pane kills it cleanly
     inner = [args.python, "-m", "idatui.tui", "--rpc", sock]
@@ -114,7 +183,10 @@ def spawn(args) -> int:
     pane = _tmux(*split)
 
     row = {"sock": sock, "pane": pane, "target": target,
-           "kind": "open" if args.open else "db", "started": time.time()}
+           "kind": "open" if args.open else "db", "started": time.time(),
+           "server_started": srv.get("server_started", False)}
+    if srv.get("server_pane"):
+        row["server_pane"] = srv["server_pane"]
     reg = [r for r in _load_registry() if r.get("sock") != sock]
     reg.append(row)
     _save_registry(reg)
@@ -219,6 +291,10 @@ def main(argv: list[str]) -> int:
     sp.add_argument("--sock", help="RPC socket path (default: auto in $XDG_RUNTIME_DIR)")
     sp.add_argument("--python", default=DEFAULT_PY, help=f"python for the TUI ({DEFAULT_PY})")
     sp.add_argument("--url", help="MCP server URL (default: idatui's default)")
+    sp.add_argument("--no-ensure-server", action="store_true",
+                    help="don't auto-start ./spawn.sh if the supervisor is down")
+    sp.add_argument("--server-timeout", type=float, default=90.0,
+                    help="seconds to wait for an auto-started supervisor")
     sp.add_argument("--vertical", action="store_true", help="split vertically (stacked)")
     sp.add_argument("--size", help="new pane size (tmux -l value, e.g. 60%% or 120)")
     sp.add_argument("--detached", action="store_true", help="don't focus the new pane")
