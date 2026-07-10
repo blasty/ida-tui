@@ -171,6 +171,67 @@ def functions(app, flt: str | None = None, limit: int = 50) -> list[dict[str, An
     return out
 
 
+def _target_ea(app, target) -> int | None:
+    """Resolve a target (None=current function, a name, or 0xADDR/int) to an ea."""
+    if target is None:
+        return app._cur.ea if app._cur else None
+    if isinstance(target, int):
+        return target
+    return app.program.resolve(str(target))
+
+
+def _func_at(app, ea: int | None):
+    return app.program.function_of(ea) if ea is not None else None
+
+
+def pseudocode(app, target=None) -> dict[str, Any]:
+    """Full decompiled body of a function (the whole thing, not the viewport)."""
+    ea = _target_ea(app, target)
+    fn = _func_at(app, ea)
+    dea = fn.addr if fn else ea
+    if dea is None:
+        return {"ea": None, "error": "no target"}
+    d = app.program.decompile(dea)
+    return {"ea": dea, "name": (fn.name if fn else None), "failed": d.failed,
+            "error": d.error, "truncated": d.truncated, "code": d.code}
+
+
+def disassembly(app, target=None, max_lines: int = 2000) -> dict[str, Any]:
+    """Full (bounded) disassembly of a function as text."""
+    ea = _target_ea(app, target)
+    fn = _func_at(app, ea)
+    dea = fn.addr if fn else ea
+    if dea is None:
+        return {"ea": None, "error": "no target"}
+    m = app.program.disasm(dea, fn.name if fn else None)
+    total = m.total()
+    lines = m.lines(0, min(total, max(1, max_lines)), prefetch=False)
+    return {"ea": dea, "name": (fn.name if fn else None), "total": total,
+            "lines": [{"ea": ln.ea, "text": ln.text} for ln in lines]}
+
+
+def _xref_dicts(xs, limit: int) -> list[dict[str, Any]]:
+    return [{"frm": x.frm, "to": x.to, "type": x.type,
+             "fn_addr": x.fn_addr, "fn_name": x.fn_name} for x in xs[:limit]]
+
+
+def xrefs_to(app, target, limit: int = 200) -> list[dict[str, Any]]:
+    ea = _target_ea(app, target)
+    return _xref_dicts(app.program.xrefs_to(ea), limit) if ea is not None else []
+
+
+def xrefs_from(app, target, limit: int = 200) -> list[dict[str, Any]]:
+    ea = _target_ea(app, target)
+    return _xref_dicts(app.program.xrefs_from(ea), limit) if ea is not None else []
+
+
+def resolve(app, name) -> dict[str, Any]:
+    try:
+        return {"ea": app.program.resolve(str(name))}
+    except Exception:  # noqa: BLE001
+        return {"ea": None}
+
+
 # --------------------------------------------------------------------------- #
 # Keystroke injection
 # --------------------------------------------------------------------------- #
@@ -314,6 +375,25 @@ class RpcServer:
         if method == "functions":
             return functions(app, params.get("filter"), int(params.get("limit", 50)))
 
+        # -- structured introspection (heavy: run off the UI loop) -------- #
+        loop = asyncio.get_running_loop()
+        if method == "pseudocode":
+            return await loop.run_in_executor(None, pseudocode, app, params.get("target"))
+        if method == "disassembly":
+            mx = int(params.get("max", 2000))
+            return await loop.run_in_executor(
+                None, disassembly, app, params.get("target"), mx)
+        if method == "xrefs_to":
+            lim = int(params.get("limit", 200))
+            return await loop.run_in_executor(
+                None, xrefs_to, app, params.get("target"), lim)
+        if method == "xrefs_from":
+            lim = int(params.get("limit", 200))
+            return await loop.run_in_executor(
+                None, xrefs_from, app, params.get("target"), lim)
+        if method == "resolve":
+            return await loop.run_in_executor(None, resolve, app, params.get("name"))
+
         # -- semantic verbs (typed-with-delay high-level ops) ------------- #
         delay = int(params.get("delay_ms", TYPE_DELAY_MS))
         timeout = float(params.get("timeout", 20.0))
@@ -365,6 +445,32 @@ class RpcServer:
                 ["ctrl+t"], lambda: type(app.screen).__name__ == "StructEditor", timeout)
         if method == "close":
             return await self._press(["escape"], timeout=timeout)
+        if method == "save":
+            return await self._press(["ctrl+s"], timeout=timeout)
+
+        if method == "search":
+            term = str(params.get("term", ""))
+            open_key = "slash" if int(params.get("direction", 1)) >= 0 else "question_mark"
+            await self._fill_prompt(open_key, "search", term, delay, clear=True)
+            await settle(app, timeout=timeout)
+            return snapshot(app)
+
+        if method == "select":
+            from textual.widgets import OptionList
+            scr = app.screen
+            if type(scr).__name__ not in _MODALS:
+                raise ValueError("select: no modal list is open")
+            try:
+                ol = scr.query_one(OptionList)
+            except Exception:
+                raise ValueError("select: the open modal has no list to select from")
+            idx = params.get("index")
+            if idx is not None and ol.option_count:
+                ol.highlighted = max(0, min(ol.option_count - 1, int(idx)))
+                await drain(app)
+            await app._press_keys(["enter"])
+            await settle(app, timeout=timeout)
+            return snapshot(app)
 
         if method == "move":
             key = _MOVE_KEYS.get(str(params.get("dir")))

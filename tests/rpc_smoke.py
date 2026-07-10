@@ -144,6 +144,62 @@ async def run(db):
         else:
             check("found the function name to rename", False, repr(line0_text[:60]))
 
+        # --- structured introspection ------------------------------------- #
+        resp = await c.call("resolve", name=target["name"])
+        check("resolve maps a name to its ea",
+              resp.get("result", {}).get("ea") == target["ea"], str(resp.get("result")))
+
+        resp = await c.call("pseudocode", target=target["name"])
+        pc = resp.get("result", {})
+        check("pseudocode returns the full body",
+              isinstance(pc.get("code"), str) and len(pc["code"]) > 0 and not pc["failed"],
+              f"failed={pc.get('failed')} len={len(pc.get('code') or '')}")
+
+        resp = await c.call("disassembly", target=target["name"], max=50)
+        da = resp.get("result", {})
+        check("disassembly returns lines with addresses",
+              isinstance(da.get("lines"), list) and len(da["lines"]) > 0
+              and all("ea" in ln and "text" in ln for ln in da["lines"]),
+              f"total={da.get('total')} n={len(da.get('lines', []))}")
+
+        # a function that is actually referenced, so xrefs_to is non-empty
+        callee = None
+        for f in funcs:
+            xr = (await c.call("xrefs_to", target=f["name"], limit=5)).get("result", [])
+            if xr:
+                callee = (f, xr)
+                break
+        check("xrefs_to returns structured references",
+              callee is not None and all("frm" in x for x in callee[1]),
+              "no referenced function found" if callee is None else "")
+
+        # --- modal select: open xrefs on the callee, pick the first site --- #
+        if callee is not None:
+            f, xr = callee
+            await c.call("goto", target=f["name"], delay_ms=0)
+            # place the cursor on the function name so xrefs targets it
+            v = (await c.call("view", lines=1))["result"]
+            lt = v["lines"][0]["text"] if v.get("lines") else ""
+            col = lt.find(f["name"])
+            if col >= 0:
+                await c.call("cursor", line=0, col=col + 1)
+            resp = await c.call("xrefs")
+            m = resp.get("result", {}).get("modal") or {}
+            check("xrefs opens the picker with items",
+                  m.get("kind") == "XrefsScreen" and len(m.get("items", [])) > 0,
+                  str(m)[:80])
+            resp = await c.call("select", index=0)
+            check("select follows a picked xref (modal closes, we navigate)",
+                  (resp.get("result", {}).get("modal") is None), str(resp.get("result", {}).get("modal")))
+
+        # --- in-view search ----------------------------------------------- #
+        await c.call("goto", target=target["name"], delay_ms=0)
+        resp = await c.call("search", term="return", delay_ms=0)
+        st = resp.get("result", {})
+        check("search runs without error and returns state",
+              st.get("active") in ("decomp", "disasm"), str(st.get("active")))
+        await c.call("keys", keys=["escape"])
+
         w.close()
     print(f"\n{PASS} passed, {FAIL} failed")
     return 1 if FAIL else 0

@@ -45,12 +45,21 @@ acts on stale state.
 | `text` | `text: str`, `delay_ms?=0`, `settle?`, `timeout?` | type a literal string into the focused input; `delay_ms` interleaves per-char waits for a typed-out look. |
 
 ### Introspection (read-only)
+Structured reads for an agent to reason without scraping the screen. The heavy
+ones (`pseudocode`/`disassembly`/`xrefs_*`) run off the UI loop so the render never
+stalls. `target` is a name, `0xADDR`, or omitted (= current function).
+
 | method | params | returns |
 |--------|--------|---------|
 | `state` | — | active/pref view, current function `{ea,name}`, cursor `{line,col,word,ea}` (or `{va,byte}` in hex), status text, filter, nav depth, dirty, open `modal`. |
 | `view` | `lines?` | visible lines of the active code pane, cursor-marked (disasm/decomp; use `screen` for hex). |
 | `screen` | — | `{width,height,text}` — a full plain-text render of exactly what's on screen. |
 | `functions` | `filter?`, `limit?=50` | `[{ea,name,size}]`. |
+| `pseudocode` | `target?` | `{ea,name,code,failed,error,truncated}` — the **whole** decompiled body. |
+| `disassembly` | `target?`, `max?=2000` | `{ea,name,total,lines:[{ea,text}]}`. |
+| `xrefs_to` | `target`, `limit?=200` | `[{frm,to,type,fn_addr,fn_name}]` — who references it. |
+| `xrefs_from` | `target`, `limit?=200` | `[{frm,to,type,fn_addr,fn_name}]` — what it references. |
+| `resolve` | `name` | `{ea}` (or `{ea:null}`). |
 
 ### Semantic verbs
 High-level ops type through the **real prompts** with a per-char delay
@@ -70,6 +79,9 @@ predicate so the returned state is final.
 | `xrefs` | — | `x`: open the xref picker. |
 | `symbols` | `query?` | Ctrl+N palette, optionally pre-typed. |
 | `structs` | — | Ctrl+T struct editor. |
+| `search` | `term`, `direction?=1` | `/` (or `?`) incremental search in the active code view. |
+| `select` | `index?` | in an open modal list (xrefs/symbols) choose the highlighted (or nth) item and activate it. |
+| `save` | — | Ctrl+S: persist the `.i64`. |
 | `close` | — | Escape (dismiss a modal). |
 
 ### Movement (fast — bare keypresses, pump-only settle)
