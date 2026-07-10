@@ -1166,6 +1166,33 @@ class SymbolPalette(ModalScreen):
 
 
 # --------------------------------------------------------------------------- #
+# Confirmation dialog
+# --------------------------------------------------------------------------- #
+class ConfirmScreen(ModalScreen):
+    """A tiny yes/no confirmation; dismisses True (confirm) or False (cancel)."""
+
+    BINDINGS = [
+        Binding("enter,y", "confirm", "Confirm"),
+        Binding("escape,n", "cancel", "Cancel"),
+    ]
+
+    def __init__(self, message: str) -> None:
+        super().__init__()
+        self._message = message
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="confirm-box"):
+            yield Static(self._message, id="confirm-msg")
+            yield Static("[Enter/y] confirm      [Esc/n] cancel", id="confirm-help")
+
+    def action_confirm(self) -> None:
+        self.dismiss(True)
+
+    def action_cancel(self) -> None:
+        self.dismiss(False)
+
+
+# --------------------------------------------------------------------------- #
 # Struct editor (C-style local type editor)
 # --------------------------------------------------------------------------- #
 class StructEditor(ModalScreen):
@@ -1180,7 +1207,7 @@ class StructEditor(ModalScreen):
     BINDINGS = [
         Binding("ctrl+s", "save", "Save", priority=True),
         Binding("ctrl+n", "new", "New", priority=True),
-        Binding("delete", "delete", "Delete", show=False),
+        Binding("delete,d", "delete", "Delete", show=False),
         Binding("escape", "close", "Close"),
     ]
 
@@ -1202,7 +1229,7 @@ class StructEditor(ModalScreen):
                     yield Static(" C definition", id="se-hint")
                     yield TextArea("", id="se-edit")
             yield Static(
-                "Enter edit · Ctrl+S save · Ctrl+N new · Del delete · Esc back/close",
+                "Enter edit · Ctrl+S save · Ctrl+N new · d/Del delete · Esc back/close",
                 id="se-status")
 
     def on_mount(self) -> None:
@@ -1294,11 +1321,18 @@ class StructEditor(ModalScreen):
         self._set_status("new struct — edit and Ctrl+S")
 
     def action_delete(self) -> None:
+        # Delete is only meaningful from the list; a bare 'd' in the editor types.
+        if self.focused is self.query_one("#se-edit", TextArea):
+            return
         ol = self.query_one("#se-list", OptionList)
         i = ol.highlighted
         if i is None or not (0 <= i < len(self._structs)):
             return
-        self._delete(self._structs[i].name)
+        s = self._structs[i]
+        kind = "union" if s.is_union else "struct"
+        self.app.push_screen(
+            ConfirmScreen(f"Delete {kind} '{s.name}' ?"),
+            lambda ok, name=s.name: self._delete(name) if ok else None)
 
     @work(thread=True, exclusive=True, group="se-del")
     def _delete(self, name: str) -> None:
@@ -1376,6 +1410,11 @@ class IdaTui(App):
     #se-list { height: 1fr; }
     #se-edit { height: 1fr; border: none; }
     #se-status { height: 1; background: $panel-darken-2; color: $text-muted; padding: 0 1; }
+    ConfirmScreen { align: center middle; }
+    #confirm-box { width: 60; height: auto; border: thick $warning;
+                   background: $panel; padding: 1 2; }
+    #confirm-msg { height: auto; }
+    #confirm-help { height: 1; color: $text-muted; margin-top: 1; }
     """
 
     BINDINGS = [

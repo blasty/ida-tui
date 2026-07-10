@@ -19,8 +19,8 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from idatui.app import (  # noqa: E402
-    DecompView, DisasmView, FunctionsPanel, IdaTui, StructEditor, SymbolPalette,
-    XrefsScreen,
+    ConfirmScreen, DecompView, DisasmView, FunctionsPanel, IdaTui, StructEditor,
+    SymbolPalette, XrefsScreen,
 )
 from textual.widgets import DataTable, Input, OptionList, Static, TextArea  # noqa: E402
 from rich.text import Text  # noqa: E402
@@ -185,17 +185,25 @@ async def run(db):
             check("Ctrl+S updates an existing struct in place",
                   next((s.members for s in se._structs if s.name == sname), 0) == 3,
                   "member count not 3")
-            # delete: removes it if the server supports del_type, else reports it
+            # delete: 'd' asks to confirm, Enter deletes (server del_type). If the
+            # server lacks del_type, the status reports it instead.
             idx = next(i for i, s in enumerate(se._structs) if s.name == sname)
+            se.query_one(OptionList).focus()
             se.query_one(OptionList).highlighted = idx
-            se.action_delete()
+            await pilot.press("d")
+            confirmed = await wait_until(
+                pilot, lambda: isinstance(app.screen, ConfirmScreen), 10)
+            check("delete asks for confirmation", confirmed,
+                  f"screen={type(app.screen).__name__}")
+            await pilot.press("enter")
+            await wait_until(pilot, lambda: isinstance(app.screen, StructEditor), 10)
             await wait_until(
                 pilot,
                 lambda: not any(s.name == sname for s in se._structs)
                 or "del_type" in str(se.query_one("#se-status").render()), 15)
             st = str(se.query_one("#se-status").render())
             gone = not any(s.name == sname for s in se._structs)
-            check("delete removes the struct (or reports the missing server tool)",
+            check("confirming delete removes the struct (or reports missing tool)",
                   gone or "del_type" in st, f"gone={gone} status={st!r}")
             se.query_one(OptionList).focus()
             await pilot.press("escape")
