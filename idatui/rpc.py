@@ -33,6 +33,48 @@ from .app import DecompView, DisasmView, HexView
 PROTO_VERSION = 1
 TYPE_DELAY_MS = 35  # default per-char delay for high-level typed ops (aesthetic)
 
+# Verbs that dereference app.program — refused with a clear error before load.
+_PROGRAM_METHODS = {
+    "goto", "open", "rename", "comment", "retype", "follow", "xrefs", "symbols",
+    "structs", "search", "select", "save", "hex", "toggle_view",
+    "pseudocode", "disassembly", "xrefs_to", "xrefs_from", "resolve",
+}
+
+# Self-documenting method table (returned by the 'methods' verb).
+METHODS = {
+    "ping": "-> {ok,proto,module,ready,functions,complete}",
+    "methods": "-> this table",
+    "quit": "gracefully exit the TUI",
+    "state": "-> full state snapshot",
+    "view": "{lines?} -> visible code-pane lines (disasm/decomp)",
+    "screen": "-> {width,height,text} full plain-text render",
+    "functions": "{filter?,limit?=50} -> [{ea,name,size}]",
+    "pseudocode": "{target?} -> full decompiled body",
+    "disassembly": "{target?,max?=2000} -> {total,lines:[{ea,text}]}",
+    "xrefs_to": "{target,limit?=200} -> [{frm,to,type,fn_addr,fn_name}]",
+    "xrefs_from": "{target,limit?=200} -> same shape",
+    "resolve": "{name} -> {ea}",
+    "keys": "{keys:[str],settle?,timeout?} raw key injection (supports 'wait:<ms>')",
+    "text": "{text,delay_ms?,settle?} type a literal string into the focused input",
+    "goto/open": "{target,delay_ms?} g-prompt to a name or 0xADDR",
+    "rename": "{name,delay_ms?} rename the token under the cursor",
+    "comment": "{text,delay_ms?} comment the current line",
+    "retype": "{proto,delay_ms?} set the prototype/type under the cursor",
+    "follow": "follow the reference under the cursor",
+    "back": "pop the nav stack",
+    "toggle_view": "disasm <-> pseudocode",
+    "hex": "hex view",
+    "xrefs": "open the xref picker",
+    "symbols": "{query?} open the symbol palette",
+    "structs": "open the struct editor",
+    "search": "{term,direction?=1} incremental search in the code view",
+    "select": "{index?} choose the highlighted/nth item in the open modal",
+    "save": "persist the .i64 (Ctrl+S)",
+    "close": "dismiss a modal (Escape)",
+    "move": "{dir,n?=1} fast movement (down/up/.../pagedown)",
+    "cursor": "{line?,col?} set the code-pane cursor directly",
+}
+
 # Movement keys — driven fast (no typed delay) so the pane still visibly moves.
 _MOVE_KEYS = {
     "down": "j", "up": "k", "left": "h", "right": "l",
@@ -101,6 +143,18 @@ def _cursor_info(app, w) -> dict[str, Any]:
             "scroll_y": round(w.scroll_offset.y)}
 
 
+def _readiness(app) -> dict[str, Any]:
+    """Whether the app is drivable yet, and how far function-loading has got.
+    (Cheap: no network — never call client.health() here.)"""
+    idx = app._func_index
+    n = len(idx.all_loaded()) if idx is not None else 0
+    return {
+        "ready": app.program is not None and idx is not None and n > 0,
+        "functions": n,
+        "complete": bool(idx is not None and idx.complete),
+    }
+
+
 def snapshot(app) -> dict[str, Any]:
     """A structured view of everything an agent needs to decide the next move."""
     cur = app._cur
@@ -120,7 +174,7 @@ def snapshot(app) -> dict[str, Any]:
         "nav_depth": len(app._nav),
         "dirty": bool(app._dirty),
         "modal": _modal_snapshot(app),
-        "loaded": app.program is not None and app._func_index is not None,
+        **_readiness(app),
     }
 
 
@@ -347,7 +401,22 @@ class RpcServer:
     async def _dispatch(self, method: str, params: dict[str, Any]) -> Any:
         app = self.app
         if method in (None, "ping"):
-            return {"ok": True, "proto": PROTO_VERSION, "loaded": app.program is not None}
+            module = None
+            try:
+                module = app._module() if app.client else None
+            except Exception:  # noqa: BLE001
+                pass
+            return {"ok": True, "proto": PROTO_VERSION, "module": module,
+                    **_readiness(app)}
+        if method == "methods":
+            return METHODS
+        if method == "quit":
+            # answer first, then tear down (so this response still gets written)
+            asyncio.get_running_loop().call_later(0.2, app.exit)
+            return {"ok": True, "quitting": True}
+
+        if method in _PROGRAM_METHODS and app.program is None:
+            raise ValueError("not ready: still connecting / loading functions")
 
         if method == "keys":
             keys = params.get("keys") or []

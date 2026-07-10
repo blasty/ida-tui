@@ -62,7 +62,15 @@ async def run(db):
         c = Conn(r, w)
 
         resp = await c.call("ping")
-        check("ping returns proto", resp.get("result", {}).get("proto") == 1, str(resp))
+        pong = resp.get("result", {})
+        check("ping returns proto + readiness",
+              pong.get("proto") == 1 and pong.get("ready") is True and pong.get("functions", 0) > 0,
+              str(pong))
+
+        resp = await c.call("methods")
+        check("methods lists the verb table",
+              isinstance(resp.get("result"), dict) and "pseudocode" in resp["result"],
+              str(resp)[:80])
 
         resp = await c.call("functions", limit=400)
         funcs = resp.get("result", [])
@@ -200,7 +208,20 @@ async def run(db):
               st.get("active") in ("decomp", "disasm"), str(st.get("active")))
         await c.call("keys", keys=["escape"])
 
-        w.close()
+        try:
+            w.close()
+        except Exception:  # noqa: BLE001
+            pass
+
+        # --- graceful quit (last: it tears the app down) ------------------- #
+        r2, w2 = await asyncio.open_unix_connection(sock)
+        c2 = Conn(r2, w2)
+        resp = await c2.call("quit")
+        check("quit acknowledges before shutting down",
+              resp.get("result", {}).get("quitting") is True, str(resp))
+        w2.close()
+        await wait_for(lambda: not app.is_running, pilot.pause, 10)
+        check("quit actually exits the app", not app.is_running, "still running")
     print(f"\n{PASS} passed, {FAIL} failed")
     return 1 if FAIL else 0
 
