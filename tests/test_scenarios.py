@@ -31,6 +31,7 @@ from textual.widgets import (  # noqa: E402
     DataTable, Footer, Input, OptionList, Static, TextArea,
 )
 from rich.text import Text  # noqa: E402
+from idatui._sync import wait_for  # noqa: E402
 
 PASS = FAIL = 0
 STOP_AFTER = None
@@ -73,13 +74,7 @@ class Ctx:
             raise _StopSuite
 
     async def wait(self, pred, t=20.0, step=0.02):
-        waited = 0.0
-        while waited < t:
-            if pred():
-                return True
-            await self.pilot.pause(step)
-            waited += step
-        return False
+        return await wait_for(pred, self.pilot.pause, t, step)
 
     async def press(self, *keys):
         for k in keys:
