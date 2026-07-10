@@ -418,6 +418,9 @@ class HexModel:
     def total_rows(self) -> int:
         return (self.size + 15) // 16
 
+    def file_offset(self, va: int) -> int | None:
+        return self._prog.file_offset(va)
+
     def _fetch_block(self, b: int) -> bytes:
         addr = self.start + b * self.BLOCK
         n = min(self.BLOCK, self.end - addr)
@@ -492,6 +495,7 @@ class Program:
         self._decomp: dict[int, tuple[Decompilation, int]] = {}
         self._name_gen = 0  # bumped on rename; invalidates stale name caches
         self._sections: list[tuple[int, int, str]] | None = None
+        self._fileregions: list[tuple[int, int, int]] | None = None
         self._hexmodel: "HexModel | None" = None
         self._lock = threading.Lock()
 
@@ -552,6 +556,33 @@ class Program:
             if self._hexmodel is None and rng is not None:
                 self._hexmodel = HexModel(self, rng[0], rng[1])
             return self._hexmodel
+
+    def file_regions(self) -> list[tuple[int, int, int]]:
+        """Sorted [(start, end, file_off)] mapping loaded segments to raw file
+        offsets (file_off == -1 for non-file-backed, e.g. .bss). Cached; needs
+        the injected ``file_regions`` server tool."""
+        if self._fileregions is not None:
+            return self._fileregions
+        regions: list[tuple[int, int, int]] = []
+        try:
+            r = self.client.call("file_regions")
+            for d in (r.get("regions", []) if isinstance(r, dict) else []):
+                if isinstance(d, dict) and "start" in d:
+                    regions.append((_as_int(d["start"]), _as_int(d["end"]),
+                                    int(d.get("file_off", -1))))
+        except IDAToolError:
+            regions = []
+        regions.sort()
+        with self._lock:
+            self._fileregions = regions
+        return regions
+
+    def file_offset(self, va: int) -> int | None:
+        """Raw on-disk file offset for ``va``, or None if not file-backed."""
+        for start, end, fo in self.file_regions():
+            if start <= va < end:
+                return (fo + (va - start)) if fo >= 0 else None
+        return None
 
     def read_bytes(self, ea: int, n: int) -> bytes:
         """Raw bytes [ea, ea+n) from IDA (gaps read as zero)."""

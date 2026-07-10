@@ -1028,6 +1028,7 @@ class DecompView(SearchMixin, NavMixin, ColumnCursor, ScrollView, can_focus=True
 # --------------------------------------------------------------------------- #
 _S_HEX = Style(color="grey74")
 _S_ASCII = Style(color="#6a9955")
+_S_FOFF = Style(color="#c586c0")  # file-offset column (distinct from the VA)
 
 
 class HexView(ScrollView, can_focus=True):
@@ -1197,7 +1198,12 @@ class HexView(ScrollView, can_focus=True):
             return Strip([Segment("".ljust(width), _S_HEX)])
         va, data = model.row(r)
         cur_row, cur_col = self.cursor // 16, self.cursor % 16
-        segs: list[Segment] = [Segment(f"{va:08X}  ", _S_ADDR)]
+        fo = model.file_offset(va)
+        fo_str = f"{fo:08X}" if fo is not None else "--------"
+        segs: list[Segment] = [
+            Segment(f"{va:08X} ", _S_ADDR),
+            Segment(f"{fo_str}  ", _S_FOFF),
+        ]
         if data is None:
             segs.append(Segment("… fetching", _S_DIM))
         else:
@@ -1676,6 +1682,10 @@ class IdaTui(App):
         height: 1; border: none; padding: 0 1;
         background: $accent-darken-2; color: $text;
     }
+    #goto {
+        height: 1; border: none; padding: 0 1;
+        background: $primary-darken-3; color: $text;
+    }
     #status { height: 1; background: $panel; color: $text; padding: 0 1; }
     .decomp-loading {
         width: 100%; height: 100%; content-align: center middle;
@@ -1778,6 +1788,10 @@ class IdaTui(App):
         ti.display = False
         ti.can_focus = False
         yield ti
+        gi = Input(id="goto")
+        gi.display = False
+        gi.can_focus = False
+        yield gi
         yield Static("connecting…", id="status")
         yield Footer()
 
@@ -2041,13 +2055,20 @@ class IdaTui(App):
         inp.focus()
 
     def action_goto(self) -> None:
-        inp = self.query_one("#func-filter", Input)
-        inp.display = True
-        inp.placeholder = "goto: name or 0xADDR — Enter"
+        inp = self.query_one("#goto", Input)
+        inp.placeholder = ("hex goto: 0xADDR or name — Enter" if self._active == "hex"
+                           else "goto: name or 0xADDR — Enter")
         inp.can_focus = True
+        inp.display = True
         inp.value = ""
+        self.query_one("#status", Static).display = False
         inp.focus()
-        self._goto_mode = True
+
+    def _end_goto(self) -> None:
+        inp = self.query_one("#goto", Input)
+        inp.display = False
+        inp.can_focus = False
+        self.query_one("#status", Static).display = True
 
     def action_back(self) -> None:
         table = self.query_one("#func-table", DataTable)
@@ -2652,7 +2673,7 @@ class IdaTui(App):
             if view is not None:
                 view.search_update(event.value)
             return
-        if event.input.id == "func-filter" and not getattr(self, "_goto_mode", False):
+        if event.input.id == "func-filter":
             self._pending_filter = event.value
             if self._filter_timer is not None:
                 self._filter_timer.stop()
@@ -2692,16 +2713,20 @@ class IdaTui(App):
             event.prevent_default()
             self._end_retype()
             return
+        if self.query_one("#goto", Input).display:
+            event.stop()
+            event.prevent_default()
+            self._end_goto()
+            (self.query_one(HexView) if self._active == "hex"
+             else self._code_view()).focus()
+            return
         fi = self.query_one("#func-filter", Input)
         if fi.display:
             event.stop()
             event.prevent_default()
             fi.display = False
             fi.can_focus = False
-            if getattr(self, "_goto_mode", False):
-                self._goto_mode = False
-            else:
-                self.clear_filter()  # Esc in the filter box clears it
+            self.clear_filter()  # Esc in the filter box clears it
             self.query_one("#func-table", DataTable).focus()
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
@@ -2736,15 +2761,19 @@ class IdaTui(App):
             if view is not None and value:
                 self._do_retype(kind, subject, word, value)
             return
-        if getattr(self, "_goto_mode", False):
-            self._goto_mode = False
-            self.query_one("#func-table", DataTable).focus()
+        if inp.id == "goto":
+            self._end_goto()
+            (self.query_one(HexView) if self._active == "hex"
+             else self._code_view()).focus()
             if value:
                 self._goto(value)
             return
         # filter mode: already applied incrementally; Enter just confirms + closes.
         self._apply_filter(value)
         self.query_one("#func-table", DataTable).focus()
+
+    def _code_view(self):  # type: ignore[no-untyped-def]
+        return self.query_one(DecompView if self._pref == "decomp" else DisasmView)
 
     @work(thread=True, exclusive=True, group="goto")
     def _goto(self, target: str) -> None:
@@ -2754,9 +2783,24 @@ class IdaTui(App):
         except Exception as e:  # noqa: BLE001
             self.app.call_from_thread(self._status, f"goto: {e}")
             return
+        if self._active == "hex":
+            self.app.call_from_thread(self._hex_goto, ea)
+            return
         # Navigate to the containing function at the right line (handles both a
         # function name and a mid-function address).
         self._do_navigate(ea, push=True)
+
+    def _hex_goto(self, ea: int) -> None:
+        hx = self.query_one(HexView)
+        rng = self.program.image_range() if self.program else None
+        if rng is not None and not (rng[0] <= ea < rng[1]):
+            self._status(f"{ea:#x} is outside the image ({rng[0]:#x}..{rng[1]:#x})")
+            return
+        if hx.model is None:
+            self._hex_pending_ea = ea
+            self._load_hex_model(ea)
+        else:
+            hx.goto_va(ea)
 
     # -- opening functions ------------------------------------------------- #
     def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
@@ -2858,7 +2902,10 @@ class IdaTui(App):
 
     def _hex_status(self, va: int) -> None:
         sec = self.program.section_of(va) if self.program else None
-        self._status(f"hex  @ {va:#x}   [{sec or '?'}]   (Enter→code, Tab/Esc/\\→back)")
+        fo = self.program.file_offset(va) if self.program else None
+        foff = f"file+{fo:#x}" if fo is not None else "file:--"
+        self._status(f"hex  va={va:#x}  {foff}  [{sec or '?'}]   "
+                     "(g goto · Enter→code · Tab/Esc/\\→back)")
 
     def on_hex_view_moved(self, msg: HexView.Moved) -> None:
         self._hex_status(msg.va)

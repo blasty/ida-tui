@@ -154,6 +154,30 @@ def set_lvar_type(
     ok = bool(ida_hexrays.modify_user_lvar_info(
         f.start_ea, ida_hexrays.MLI_TYPE, lsi))
     return {"addr": hex(f.start_ea), "variable": variable, "type": type, "ok": ok}
+
+
+@tool
+@idasync
+def file_regions() -> dict:
+    """Loaded segments mapped to their raw file offsets (get_fileregion_offset),
+    so clients can convert a virtual address to an on-disk file offset without a
+    format-specific header parser. file_off is -1 for non-file-backed segments
+    (e.g. .bss)."""
+    import ida_segment
+    import idaapi
+
+    out = []
+    seg = ida_segment.get_first_seg()
+    while seg is not None:
+        try:
+            fo = int(idaapi.get_fileregion_offset(seg.start_ea))
+        except Exception:
+            fo = -1
+        if fo < 0 or fo >= (1 << 48):
+            fo = -1
+        out.append({"start": hex(seg.start_ea), "end": hex(seg.end_ea), "file_off": fo})
+        seg = ida_segment.get_next_seg(seg.start_ea)
+    return {"regions": out}
 '''
 
 SNIPPET = f"{BEGIN}\n{BODY.strip()}\n{END}\n"
