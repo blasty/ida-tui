@@ -1070,11 +1070,19 @@ async def s_comment_func(c: Ctx):
     c.check("';' on the signature line opens a function-comment prompt",
             ci.display and "function comment" in str(ci.placeholder).lower(),
             f"display={ci.display} ph={ci.placeholder!r}")
-    ci.value = note
+    # literal '\n' in the comment becomes a real newline -> multi-line render
+    a, b = f"{note}_A", f"{note}_B"
+    ci.value = f"{a}\\n{b}"
     await c.press("enter")
-    await c.wait(lambda: dec.loaded_ea == fn.addr and any(note in t for t in dec._texts), 25)
-    c.check("function comment appears in the pseudocode",
-            any(note in t for t in dec._texts), "not shown")
+    await c.wait(lambda: dec.loaded_ea == fn.addr
+                 and any(a in t for t in dec._texts)
+                 and any(b in t for t in dec._texts), 25)
+    la = next((i for i, t in enumerate(dec._texts) if a in t), None)
+    lb = next((i for i, t in enumerate(dec._texts) if b in t), None)
+    c.check("multi-line function comment renders on separate lines",
+            la is not None and lb is not None and lb > la
+            and a not in dec._texts[lb],
+            f"la={la} lb={lb}")
     app.program.client.call("set_comments", items=[{"addr": hex(fn.addr), "comment": ""}])
 
 

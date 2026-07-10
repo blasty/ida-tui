@@ -2413,6 +2413,10 @@ class IdaTui(App):
     @work(thread=True, exclusive=True, group="comment")
     def _do_comment(self, ea: int, text: str) -> None:
         assert self.program is not None
+        # The prompt is single-line, so a literal '\n' (backslash-n) means a real
+        # newline — Hex-Rays renders each as its own '//' line. Lets long notes
+        # wrap instead of running off the right edge and clipping.
+        text = text.replace("\\n", "\n")
         try:
             res = self.program.set_comment(ea, text)
         except IDAToolError as e:

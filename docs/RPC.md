@@ -81,7 +81,7 @@ predicate so the returned state is final.
 |--------|--------|--------|
 | `goto` / `open` | `target`, `delay_ms?`, `timeout?` | `g` prompt → name or `0xADDR` → Enter. |
 | `rename` | `name`, `word?`, `delay_ms?` | `n` on the token under the cursor → replace → Enter. `word` first places the cursor on that token (see `cursor_on`). |
-| `comment` | `text`, `delay_ms?` | `;` on the current line. |
+| `comment` | `text`, `delay_ms?` | `;` on the current line (a literal `\n` in `text` becomes a real newline → multi-line comment). |
 | `retype` | `proto`, `word?`, `delay_ms?` | `y` on the token/function under the cursor (`word` places it first). |
 | `follow` | `word?` | Enter: follow the reference under the cursor (`word` places it first); waits for the jump. |
 | `back` | — | Escape: pop the nav stack. |
