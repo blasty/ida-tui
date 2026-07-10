@@ -36,7 +36,7 @@ from textual.screen import ModalScreen
 from textual.scroll_view import ScrollView
 from textual.strip import Strip
 from textual.widgets import (
-    DataTable, Footer, Header, Input, OptionList, Static, TextArea,
+    DataTable, Footer, Input, OptionList, Static, TextArea,
 )
 from textual.widgets.option_list import Option
 
@@ -1763,7 +1763,6 @@ class IdaTui(App):
 
     # -- layout ------------------------------------------------------------ #
     def compose(self) -> ComposeResult:
-        yield Header(show_clock=True)
         with Horizontal(id="panes"):
             fp = FunctionsPanel(id="left")
             fp.display = False  # overlay-first: reveal the docked pane with Ctrl+B

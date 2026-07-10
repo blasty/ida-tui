@@ -62,7 +62,7 @@ stalls. `target` is a name, `0xADDR`, or omitted (= current function).
 | `pseudocode` | `target?` | `{ea,name,code,failed,error,truncated}` — the **whole** decompiled body. |
 | `disassembly` | `target?`, `max?=2000` | `{ea,name,total,lines:[{ea,text}]}`. |
 | `xrefs_to` | `target`, `limit?=200` | `[{frm,to,type,fn_addr,fn_name}]` — who references it. |
-| `xrefs_from` | `target`, `limit?=200` | `[{frm,to,type,fn_addr,fn_name}]` — what it references. |
+| `xrefs_from` | `target`, `limit?=200` | what it references. For a **function** (name/entry ea): whole-body callees + string/data refs from the decompiler, `[{to,name,string,is_func,type}]`. For an explicit **0xADDR**: address-scoped `[{frm,to,type,fn_addr,fn_name}]`. |
 | `resolve` | `name` | `{ea}` (or `{ea:null}`). |
 
 ### Semantic verbs

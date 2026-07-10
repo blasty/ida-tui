@@ -186,6 +186,20 @@ async def run(db):
               callee is not None and all("frm" in x for x in callee[1]),
               "no referenced function found" if callee is None else "")
 
+        # xrefs_from a function is whole-body (decomp refs), not just the entry:
+        # find a function that actually calls something.
+        caller = next((f["name"] for f in funcs if f["name"] == "main"), None)
+        xf = []
+        for name in ([caller] if caller else []) + [f["name"] for f in funcs]:
+            xf = (await c.call("xrefs_from", target=name)).get("result", [])
+            if any(x.get("is_func") for x in xf):
+                caller = name
+                break
+        check("xrefs_from a function lists whole-body callees",
+              isinstance(xf, list) and len(xf) > 1
+              and any(x.get("is_func") for x in xf) and all("to" in x for x in xf),
+              f"caller={caller} n={len(xf)}")
+
         # --- modal select: open xrefs on the callee, pick the first site --- #
         if callee is not None:
             f, xr = callee

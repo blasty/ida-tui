@@ -52,7 +52,8 @@ METHODS = {
     "pseudocode": "{target?} -> full decompiled body",
     "disassembly": "{target?,max?=2000} -> {total,lines:[{ea,text}]}",
     "xrefs_to": "{target,limit?=200} -> [{frm,to,type,fn_addr,fn_name}]",
-    "xrefs_from": "{target,limit?=200} -> same shape",
+    "xrefs_from": "{target,limit?=200} -> callees/refs; function-scoped for a "
+                  "function (decomp refs), address-scoped for a 0xADDR",
     "resolve": "{name} -> {ea}",
     "keys": "{keys:[str],settle?,timeout?} raw key injection (supports 'wait:<ms>')",
     "text": "{text,delay_ms?,settle?} type a literal string into the focused input",
@@ -319,8 +320,24 @@ def xrefs_to(app, target, limit: int = 200) -> list[dict[str, Any]]:
 
 
 def xrefs_from(app, target, limit: int = 200) -> list[dict[str, Any]]:
+    """References *out of* the target. For a function (a bare name / its entry ea)
+    this is whole-body — the callees, string and data refs from the decompiler
+    (the server's xrefs_from is address-scoped, so it only sees the entry
+    instruction). For an explicit mid-function 0xADDR it stays address-scoped."""
     ea = _target_ea(app, target)
-    return _xref_dicts(app.program.xrefs_from(ea), limit) if ea is not None else []
+    if ea is None:
+        return []
+    fn = app.program.function_of(ea)
+    if fn is not None and fn.addr == ea:  # function target -> decomp outgoing refs
+        out = []
+        for r in app.program.decompile(ea).refs[:limit]:
+            tf = app.program.function_of(r.addr)
+            is_func = bool(tf and tf.addr == r.addr)
+            out.append({"to": r.addr, "name": r.name or (tf.name if tf else None),
+                        "string": r.string, "is_func": is_func,
+                        "type": "code" if is_func else "data"})
+        return out
+    return _xref_dicts(app.program.xrefs_from(ea), limit)
 
 
 def resolve(app, name) -> dict[str, Any]:
