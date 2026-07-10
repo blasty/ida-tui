@@ -32,9 +32,12 @@ def main(argv: list[str] | None = None) -> int:
                    help="open (or reopen) a binary and drive it (dir must be writable)")
     p.add_argument("--no-keepalive", action="store_true",
                    help="Do not bump idle-TTL / run the keepalive heartbeat")
+    p.add_argument("--rpc", metavar="PATH",
+                   help="listen for RPC on this unix socket path (puppeteer the TUI)")
     args = p.parse_args(argv)
+    rpc_path = os.path.abspath(os.path.expanduser(args.rpc)) if args.rpc else None
     IdaTui(url=args.url, db=args.db, open_path=args.open,
-           keepalive=not args.no_keepalive).run()
+           keepalive=not args.no_keepalive, rpc_path=rpc_path).run()
     return 0
 
 

@@ -16,6 +16,7 @@ Design notes:
 
 from __future__ import annotations
 
+import asyncio
 import os
 import re
 import subprocess
@@ -1731,12 +1732,14 @@ class IdaTui(App):
     ]
 
     def __init__(self, url: str, db: str | None, keepalive: bool = True,
-                 open_path: str | None = None) -> None:
+                 open_path: str | None = None, rpc_path: str | None = None) -> None:
         super().__init__()
         self._url = url
         self._db = db
         self._open_path = open_path
         self._do_keepalive = keepalive
+        self._rpc_path = rpc_path
+        self._rpc = None
         self.client: IDAClient | None = None
         self.program: Program | None = None
         self._ka = None
@@ -1803,6 +1806,22 @@ class IdaTui(App):
         # (pseudocode) so app bindings work before anything is opened.
         self.query_one(DecompView).focus()
         self._connect()
+        if self._rpc_path:
+            self._start_rpc()
+
+    def _start_rpc(self) -> None:
+        from .rpc import RpcServer
+        self._rpc = RpcServer(self, self._rpc_path)
+
+        async def _serve() -> None:
+            await self._rpc.start()
+            self._status(f"rpc: listening on {self._rpc_path}")
+
+        asyncio.get_running_loop().create_task(_serve())
+
+    async def on_unmount(self) -> None:
+        if self._rpc is not None:
+            await self._rpc.stop()
 
     # -- status helper ----------------------------------------------------- #
     def _status(self, text: str) -> None:
