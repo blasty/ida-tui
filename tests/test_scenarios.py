@@ -1046,6 +1046,38 @@ async def s_rename(c: Ctx):
         c.check("found a pseudocode line to comment", False, "no marker line")
 
 
+@scenario("comment_func")
+async def s_comment_func(c: Ctx):
+    # Commenting the signature/declaration line (which carries no address) falls
+    # back to a function-level comment at the entry ea instead of being refused.
+    app, dec = c.app, c.dec
+    pick = c.pick_decomp_ref()
+    if pick is None:
+        c.check("found a function for the comment test", False)
+        return
+    fn = pick[0]
+    await c.open(fn.addr, "decomp")
+    dec.focus()
+    dec.cursor, dec.cursor_x = 0, 2  # the signature line
+    dec.refresh()
+    await c.pause(0.05)
+    c.check("signature line has no address of its own", dec._line_ea(0) is None,
+            f"ea={dec._line_ea(0)}")
+    await c.press("semicolon")
+    await c.pause(0.1)
+    ci = app.query_one("#comment", Input)
+    note = f"fn_note_{os.getpid()}"
+    c.check("';' on the signature line opens a function-comment prompt",
+            ci.display and "function comment" in str(ci.placeholder).lower(),
+            f"display={ci.display} ph={ci.placeholder!r}")
+    ci.value = note
+    await c.press("enter")
+    await c.wait(lambda: dec.loaded_ea == fn.addr and any(note in t for t in dec._texts), 25)
+    c.check("function comment appears in the pseudocode",
+            any(note in t for t in dec._texts), "not shown")
+    app.program.client.call("set_comments", items=[{"addr": hex(fn.addr), "comment": ""}])
+
+
 @scenario("retype")
 async def s_retype(c: Ctx):
     app, dec = c.app, c.dec

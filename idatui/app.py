@@ -2380,14 +2380,22 @@ class IdaTui(App):
 
     def on_comment_requested(self, msg: CommentRequested) -> None:
         ea = self._line_ea_for(msg.view)
+        # Signature / local-declaration lines carry no address; fall back to the
+        # function's entry ea so commenting the header annotates the function.
+        func_level = ea is None
+        if func_level:
+            ea = self._cur.ea if self._cur else None
         if ea is None:
             self._status("no address on this line to comment")
             return
-        existing = self._existing_comment(msg.view)
+        existing = "" if func_level else self._existing_comment(msg.view)
         self._comment_ctx = (msg.view, ea, existing)
         self.query_one("#status", Static).display = False
         inp = self.query_one("#comment", Input)
-        inp.placeholder = f"comment @ {ea:#x} —  Enter=apply (empty=clear)  Esc=cancel"
+        inp.placeholder = (
+            f"function comment @ {ea:#x} —  Enter=apply (empty=clear)  Esc=cancel"
+            if func_level else
+            f"comment @ {ea:#x} —  Enter=apply (empty=clear)  Esc=cancel")
         inp.can_focus = True
         inp.display = True
         inp.value = existing
