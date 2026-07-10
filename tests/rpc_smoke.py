@@ -248,6 +248,16 @@ async def run(db):
         except Exception:  # noqa: BLE001
             pass
 
+        # --- ergonomic driver (idatui.drive) over the same socket ---------- #
+        # (c is closed now, so the single-driver gate lets drive connect.)
+        from idatui import drive
+        loop = asyncio.get_running_loop()
+        for cmd in (["where"], ["pc", target["name"]], ["callees", target["name"]],
+                    ["names", "sub_", "3"]):
+            rc = await loop.run_in_executor(
+                None, lambda a=cmd: drive.main(["--sock", sock, *a]))
+            check(f"drive {cmd[0]} runs against the socket", rc == 0, f"rc={rc}")
+
         # --- graceful quit (last: it tears the app down) ------------------- #
         r2, w2 = await asyncio.open_unix_connection(sock)
         c2 = Conn(r2, w2)
