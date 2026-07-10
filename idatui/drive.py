@@ -167,6 +167,19 @@ def cmd_note(c, args):
     return f"  noted {args[0]}"
 
 
+def cmd_retype(c, args):
+    if len(args) < 2:
+        raise SystemExit("usage: retype <fn> <prototype...>")
+    c.call("goto", target=args[0], delay_ms=0)
+    st = c.call("retype", proto=" ".join(args[1:]), word=args[0], delay_ms=0)
+    return _fmt_where(st)
+
+
+def cmd_save(c, args):
+    c.call("save")
+    return "  saved"
+
+
 def cmd_screen(c, args):
     return c.call("screen").get("text", "")
 
@@ -184,8 +197,8 @@ def cmd_raw(c, args):
 COMMANDS = {
     "where": cmd_where, "go": cmd_go, "pc": cmd_pc, "dis": cmd_dis,
     "callees": cmd_callees, "callers": cmd_callers, "names": cmd_names,
-    "rename": cmd_rename, "mv": cmd_mv, "note": cmd_note,
-    "screen": cmd_screen, "raw": cmd_raw,
+    "rename": cmd_rename, "mv": cmd_mv, "note": cmd_note, "retype": cmd_retype,
+    "save": cmd_save, "screen": cmd_screen, "raw": cmd_raw,
 }
 
 

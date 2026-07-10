@@ -7,7 +7,10 @@ identical on-screen effect a real keyboard would.
 
 Layers: `idatui/rpc.py` (server, above `app.py`), `idatui/_sync.py` (the shared
 "wait until the UI settled" logic, also used by the tests), `idatui/rpcclient.py`
-(stdlib client + CLI).
+(stdlib raw JSON client + CLI), and `idatui/drive.py` (the **ergonomic** CLI on
+top — terse text, auto-resolves the socket). For agent-driven RE, prefer
+`idatui.pane` (spawn/stop panes) + `idatui.drive` (see the `idatui-rpc` skill);
+this doc is the underlying protocol reference.
 
 ## Running
 
@@ -15,7 +18,11 @@ Layers: `idatui/rpc.py` (server, above `app.py`), `idatui/_sync.py` (the shared
 # pane A — the TUI (real render) + a socket listener
 python -m idatui.tui --db <session> --rpc /tmp/ida.sock
 
-# pane B — drive it
+# pane B — drive it. Ergonomic (auto-finds the socket, terse text):
+python -m idatui.drive where
+python -m idatui.drive pc main strrchr
+python -m idatui.drive rename sub_5BE0 stdout_isatty
+# ...or the raw JSON transport underneath:
 python -m idatui.rpcclient --sock /tmp/ida.sock goto target=main
 python -m idatui.rpcclient --sock /tmp/ida.sock screen
 ```
