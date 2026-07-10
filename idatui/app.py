@@ -32,13 +32,15 @@ from textual.reactive import reactive
 from textual.screen import ModalScreen
 from textual.scroll_view import ScrollView
 from textual.strip import Strip
-from textual.widgets import DataTable, Footer, Header, Input, OptionList, Static
+from textual.widgets import (
+    DataTable, Footer, Header, Input, OptionList, Static, TextArea,
+)
 from textual.widgets.option_list import Option
 
 from .highlight import highlight_c
 
 from .client import IDAClient, IDAToolError
-from .domain import DisasmModel, Func, Program
+from .domain import DisasmModel, Func, Program, Struct
 
 # Styles for the disassembly listing.
 _S_ADDR = Style(color="grey58")
@@ -1164,6 +1166,169 @@ class SymbolPalette(ModalScreen):
 
 
 # --------------------------------------------------------------------------- #
+# Struct editor (C-style local type editor)
+# --------------------------------------------------------------------------- #
+class StructEditor(ModalScreen):
+    """CRUD editor for local structs/unions, written as plain C.
+
+    Left: the list of structs. Right: an editable C definition. Enter loads the
+    selected struct; Ctrl+S declares (creates or updates) it; Ctrl+N starts a
+    new one; Delete removes the highlighted struct; Esc returns to the list then
+    closes.
+    """
+
+    BINDINGS = [
+        Binding("ctrl+s", "save", "Save", priority=True),
+        Binding("ctrl+n", "new", "New", priority=True),
+        Binding("delete", "delete", "Delete", show=False),
+        Binding("escape", "close", "Close"),
+    ]
+
+    NEW_TEMPLATE = "struct NewStruct\n{\n    int field;\n};\n"
+
+    def __init__(self, program: Program) -> None:
+        super().__init__()
+        self._program = program
+        self._structs: list[Struct] = []
+        self._loaded: str | None = None  # name currently in the editor
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="se-box"):
+            with Horizontal(id="se-panes"):
+                with Vertical(id="se-left"):
+                    yield Static(" structs", id="se-title")
+                    yield OptionList(id="se-list")
+                with Vertical(id="se-right"):
+                    yield Static(" C definition", id="se-hint")
+                    yield TextArea("", id="se-edit")
+            yield Static(
+                "Enter edit · Ctrl+S save · Ctrl+N new · Del delete · Esc back/close",
+                id="se-status")
+
+    def on_mount(self) -> None:
+        self._refresh()
+        self.query_one("#se-list", OptionList).focus()
+
+    # -- data --------------------------------------------------------------- #
+    @work(thread=True, exclusive=True, group="se-refresh")
+    def _refresh(self, select: str | None = None) -> None:
+        try:
+            structs = self._program.list_structs()
+        except Exception as e:  # noqa: BLE001
+            self.app.call_from_thread(self._set_status, f"list failed: {e}")
+            return
+        self.app.call_from_thread(self._populate, structs, select)
+
+    def _populate(self, structs: list[Struct], select: str | None) -> None:
+        self._structs = structs
+        ol = self.query_one("#se-list", OptionList)
+        ol.clear_options()
+        for s in structs:
+            kw = "union" if s.is_union else "struct"
+            label = Text()
+            label.append(s.name, _S_LABEL)
+            label.append(f"   {s.size:#x}  {s.members}f  {kw}", _S_DIM)
+            ol.add_option(Option(label))
+        if structs:
+            idx = 0
+            if select is not None:
+                idx = next((i for i, s in enumerate(structs) if s.name == select), 0)
+            ol.highlighted = idx
+
+    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+        i = event.option_index
+        if 0 <= i < len(self._structs):
+            self._load(self._structs[i].name)
+
+    @work(thread=True, exclusive=True, group="se-load")
+    def _load(self, name: str) -> None:
+        try:
+            src = self._program.struct_source(name)
+        except Exception as e:  # noqa: BLE001
+            self.app.call_from_thread(self._set_status, f"load failed: {e}")
+            return
+        self.app.call_from_thread(self._set_editor, name, src)
+
+    def _set_editor(self, name: str, src: str) -> None:
+        self._loaded = name
+        ta = self.query_one("#se-edit", TextArea)
+        ta.text = src
+        ta.focus()
+        self._set_status(f"editing {name}  —  Ctrl+S to apply changes")
+
+    # -- actions ------------------------------------------------------------ #
+    def action_save(self) -> None:
+        text = self.query_one("#se-edit", TextArea).text.strip()
+        if not text:
+            self._set_status("nothing to declare")
+            return
+        self._set_status("declaring…")
+        self._save(text)
+
+    @work(thread=True, exclusive=True, group="se-save")
+    def _save(self, text: str) -> None:
+        try:
+            err = self._program.declare_type(text)
+        except Exception as e:  # noqa: BLE001
+            self.app.call_from_thread(self._set_status, f"declare failed: {e}")
+            return
+        m = re.search(r"\b(?:struct|union)\s+([A-Za-z_]\w*)", text)
+        name = m.group(1) if m else None
+        self.app.call_from_thread(self._after_save, name, err)
+
+    def _after_save(self, name: str | None, err: str | None) -> None:
+        if err:
+            self._set_status(f"declare failed: {(err.strip() or 'parse error')[:80]}")
+            return
+        self._loaded = name
+        if getattr(self.app, "_dirty", None) is not None:
+            self.app._dirty = True  # struct change is unsaved until Ctrl+S in the app
+        self._refresh(select=name)
+        self._set_status(f"saved {name}" if name else "saved")
+
+    def action_new(self) -> None:
+        ta = self.query_one("#se-edit", TextArea)
+        ta.text = self.NEW_TEMPLATE
+        self._loaded = None
+        ta.focus()
+        self._set_status("new struct — edit and Ctrl+S")
+
+    def action_delete(self) -> None:
+        ol = self.query_one("#se-list", OptionList)
+        i = ol.highlighted
+        if i is None or not (0 <= i < len(self._structs)):
+            return
+        self._delete(self._structs[i].name)
+
+    @work(thread=True, exclusive=True, group="se-del")
+    def _delete(self, name: str) -> None:
+        try:
+            err = self._program.delete_type(name)
+        except Exception as e:  # noqa: BLE001
+            err = str(e)
+        self.app.call_from_thread(self._after_delete, name, err)
+
+    def _after_delete(self, name: str, err: str | None) -> None:
+        if err:
+            self._set_status(err)
+            return
+        if getattr(self.app, "_dirty", None) is not None:
+            self.app._dirty = True
+        self._refresh()
+        self._set_status(f"deleted {name}")
+
+    def action_close(self) -> None:
+        # A stray Esc while editing returns to the list instead of discarding.
+        if self.focused is self.query_one("#se-edit", TextArea):
+            self.query_one("#se-list", OptionList).focus()
+            return
+        self.dismiss(None)
+
+    def _set_status(self, text: str) -> None:
+        self.query_one("#se-status", Static).update(text)
+
+
+# --------------------------------------------------------------------------- #
 # The app
 # --------------------------------------------------------------------------- #
 class IdaTui(App):
@@ -1202,11 +1367,21 @@ class IdaTui(App):
     #pal-title { dock: top; height: 1; background: $accent; color: $text; padding: 0 1; }
     #pal-input { border: none; height: 1; margin: 0 1; background: $panel; color: $text; }
     #pal-list { height: auto; max-height: 24; }
+    StructEditor { align: center middle; }
+    #se-box { width: 90%; height: 84%; border: thick $accent; background: $panel; }
+    #se-panes { height: 1fr; }
+    #se-left { width: 38; border-right: solid $accent; }
+    #se-right { width: 1fr; }
+    #se-title, #se-hint { height: 1; background: $accent; color: $text; padding: 0 1; }
+    #se-list { height: 1fr; }
+    #se-edit { height: 1fr; border: none; }
+    #se-status { height: 1; background: $panel-darken-2; color: $text-muted; padding: 0 1; }
     """
 
     BINDINGS = [
         Binding("q", "quit", "Quit"),
         Binding("ctrl+n", "symbols", "Symbols"),
+        Binding("ctrl+t", "structs", "Structs"),
         Binding("g", "goto", "Goto"),
         Binding("slash", "filter", "Filter", show=False),
         Binding("ctrl+b", "toggle_functions", "Names", show=False),
@@ -1443,6 +1618,13 @@ class IdaTui(App):
                            else DisasmView).focus()
         else:
             self.query_one("#func-table", DataTable).focus()
+
+    def action_structs(self) -> None:
+        """Ctrl+T: open the C-style struct editor overlay."""
+        if self.program is None:
+            self._status("not connected yet")
+            return
+        self.push_screen(StructEditor(self.program))
 
     def action_symbols(self) -> None:
         """Ctrl+N: fuzzy-find a symbol in a command-palette overlay."""

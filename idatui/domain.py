@@ -92,6 +92,25 @@ class Xref:
     fn_addr: int | None
 
 
+@dataclass(frozen=True)
+class Struct:
+    name: str
+    size: int
+    is_union: bool
+    members: int          # field count
+    ordinal: int
+
+    @classmethod
+    def from_raw(cls, d: dict) -> "Struct":
+        return cls(
+            name=d.get("name", ""),
+            size=int(d.get("size", 0) or 0),
+            is_union=bool(d.get("is_union", False)),
+            members=int(d.get("cardinality", 0) or 0),
+            ordinal=int(d.get("ordinal", 0) or 0),
+        )
+
+
 @dataclass
 class Decompilation:
     ea: int
@@ -430,6 +449,64 @@ class Program:
         if 0 <= i < len(secs) and secs[i][0] <= ea < secs[i][1]:
             return secs[i][2]
         return None
+
+    # -- structs / local types -------------------------------------------- #
+    def list_structs(self, filter: str = "") -> list[Struct]:
+        """All local structs/unions (optionally name-substring filtered), sorted
+        by name."""
+        payload = self.client.call("search_structs", filter=filter)
+        res = payload.get("result", []) if isinstance(payload, dict) else []
+        out = [Struct.from_raw(d) for d in res
+               if isinstance(d, dict) and d.get("name")
+               and not str(d["name"]).startswith("$")]  # skip anonymous UDTs
+        out.sort(key=lambda s: s.name.lower())
+        return out
+
+    def struct_source(self, name: str) -> str:
+        """A C definition for ``name`` reconstructed from its member layout
+        (the server exposes members, not printable source). Faithful to IDA's
+        field names/types; array dims are moved after the field name."""
+        payload = self.client.call(
+            "type_inspect", queries=[{"name": name, "include_members": True}])
+        res = payload.get("result", []) if isinstance(payload, dict) else []
+        info = res[0] if res and isinstance(res[0], dict) else {}
+        kw = "union" if info.get("is_union") else "struct"
+        lines = [f"{kw} {name}", "{"]
+        for m in info.get("members", []) or []:
+            if not isinstance(m, dict):
+                continue
+            t = str(m.get("type", "")).strip()
+            fn = m.get("name", "")
+            base, arr = t, ""
+            am = re.match(r"^(.*?)((?:\s*\[\d+\])+)\s*$", t)
+            if am:
+                base, arr = am.group(1).rstrip(), am.group(2).replace(" ", "")
+            sep = "" if base.endswith("*") else " "
+            lines.append(f"    {base}{sep}{fn}{arr};")
+        lines.append("};")
+        return "\n".join(lines)
+
+    def declare_type(self, decl: str) -> str | None:
+        """Create or update a C type. Returns None on success, else the parse
+        error. (Re-declaring a name updates it in place.)"""
+        payload = self.client.call("declare_type", decls=decl)
+        res = payload.get("result", []) if isinstance(payload, dict) else []
+        if res and isinstance(res[0], dict):
+            return res[0].get("error")
+        return None
+
+    def delete_type(self, name: str) -> str | None:
+        """Delete a named type. Returns None on success, else an error string.
+        Requires a server-side ``del_type`` tool; if absent, a clear message is
+        returned instead of raising."""
+        try:
+            self.client.call("del_type", name=name)
+            return None
+        except IDAToolError as e:
+            msg = e.message
+            if "not found" in msg.lower() and "del_type" in msg:
+                return "delete needs a 'del_type' tool on the ida-pro-mcp server"
+            return msg
 
     # -- disassembly ------------------------------------------------------- #
     def disasm(self, ea: int, name: str | None = None) -> DisasmModel:

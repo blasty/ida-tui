@@ -19,9 +19,10 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from idatui.app import (  # noqa: E402
-    DecompView, DisasmView, FunctionsPanel, IdaTui, SymbolPalette, XrefsScreen,
+    DecompView, DisasmView, FunctionsPanel, IdaTui, StructEditor, SymbolPalette,
+    XrefsScreen,
 )
-from textual.widgets import DataTable, Input, OptionList, Static  # noqa: E402
+from textual.widgets import DataTable, Input, OptionList, Static, TextArea  # noqa: E402
 from rich.text import Text  # noqa: E402
 
 PASS = FAIL = 0
@@ -142,6 +143,64 @@ async def run(db):
         else:
             check("found a decompile-failing function", failing is not None,
                   f"pref={app._pref}")
+
+        # Struct editor (Ctrl+T): list / view / create / update / delete.
+        await pilot.press("ctrl+t")
+        se_open = await wait_until(pilot, lambda: isinstance(app.screen, StructEditor), 10)
+        check("Ctrl+T opens the struct editor", se_open,
+              f"screen={type(app.screen).__name__}")
+        if se_open:
+            se = app.screen
+            await wait_until(pilot, lambda: bool(se._structs), 15)
+            check("struct editor lists existing structs", len(se._structs) > 0,
+                  f"n={len(se._structs)}")
+            ta = se.query_one(TextArea)
+            tname = next((s.name for s in se._structs if s.name == "timespec"),
+                         se._structs[0].name)
+            idx = next(i for i, s in enumerate(se._structs) if s.name == tname)
+            se.query_one(OptionList).highlighted = idx
+            se.on_option_list_option_selected(type("E", (), {"option_index": idx})())
+            await wait_until(pilot, lambda: tname in ta.text and "{" in ta.text, 15)
+            check("selecting a struct shows its C definition",
+                  tname in ta.text and "{" in ta.text, f"text={ta.text[:40]!r}")
+            # create (fixed name so re-runs update in place -> no churn)
+            sname = "TuiEdTest"
+            await pilot.press("ctrl+n")
+            await pilot.pause(0.05)
+            ta.text = f"struct {sname} {{ int a; char b[8]; }};"
+            await pilot.press("ctrl+s")
+            await wait_until(pilot, lambda: any(s.name == sname for s in se._structs), 15)
+            check("Ctrl+S declares a new struct",
+                  any(s.name == sname for s in se._structs), "not created")
+            # update it (add a field -> member count grows)
+            idx = next(i for i, s in enumerate(se._structs) if s.name == sname)
+            se.on_option_list_option_selected(type("E", (), {"option_index": idx})())
+            await wait_until(pilot, lambda: sname in ta.text, 10)
+            ta.text = f"struct {sname} {{ int a; char b[8]; long c; }};"
+            await pilot.press("ctrl+s")
+            await wait_until(
+                pilot,
+                lambda: next((s.members for s in se._structs if s.name == sname), 0) == 3,
+                15)
+            check("Ctrl+S updates an existing struct in place",
+                  next((s.members for s in se._structs if s.name == sname), 0) == 3,
+                  "member count not 3")
+            # delete: removes it if the server supports del_type, else reports it
+            idx = next(i for i, s in enumerate(se._structs) if s.name == sname)
+            se.query_one(OptionList).highlighted = idx
+            se.action_delete()
+            await wait_until(
+                pilot,
+                lambda: not any(s.name == sname for s in se._structs)
+                or "del_type" in str(se.query_one("#se-status").render()), 15)
+            st = str(se.query_one("#se-status").render())
+            gone = not any(s.name == sname for s in se._structs)
+            check("delete removes the struct (or reports the missing server tool)",
+                  gone or "del_type" in st, f"gone={gone} status={st!r}")
+            se.query_one(OptionList).focus()
+            await pilot.press("escape")
+            await wait_until(pilot, lambda: not isinstance(app.screen, StructEditor), 10)
+        check("Esc closes the struct editor", not isinstance(app.screen, StructEditor))
 
         # Open the biggest function we can find (scan a sample of rows for size).
         # Simpler: select the row whose Size column is largest among first N.
