@@ -16,7 +16,9 @@ Design notes:
 
 from __future__ import annotations
 
+import os
 import re
+import subprocess
 from dataclasses import dataclass
 
 from rich.segment import Segment
@@ -128,6 +130,7 @@ class NavMixin:
         Binding("x", "xrefs", "Xrefs"),
         Binding("n", "rename", "Rename"),
         Binding("semicolon", "comment", "Comment"),
+        Binding("y", "copy_line", "Copy line"),
     ]
 
     def action_follow(self) -> None:
@@ -141,6 +144,13 @@ class NavMixin:
 
     def action_comment(self) -> None:
         self.post_message(CommentRequested(self))
+
+    def action_copy_line(self) -> None:
+        plain = self._line_plain(self.cursor)
+        if not plain:
+            return
+        n = self.app._copy(plain)
+        self.app._status(f"copied line ({n} chars) to clipboard")
 
 
 def _overlay_ranges(strip: Strip, ranges: list[tuple[int, int]], style: Style) -> Strip:
@@ -1207,6 +1217,7 @@ class StructEditor(ModalScreen):
     BINDINGS = [
         Binding("ctrl+s", "save", "Save", priority=True),
         Binding("ctrl+n", "new", "New", priority=True),
+        Binding("ctrl+y", "copy", "Copy", priority=True),
         Binding("delete,d", "delete", "Delete", show=False),
         Binding("escape", "close", "Close"),
     ]
@@ -1229,7 +1240,7 @@ class StructEditor(ModalScreen):
                     yield Static(" C definition", id="se-hint")
                     yield TextArea("", id="se-edit")
             yield Static(
-                "Enter edit · Ctrl+S save · Ctrl+N new · d/Del delete · Esc back/close",
+                "Enter edit · Ctrl+S save · Ctrl+Y copy · Ctrl+N new · d/Del delete · Esc close",
                 id="se-status")
 
     def on_mount(self) -> None:
@@ -1350,6 +1361,17 @@ class StructEditor(ModalScreen):
             self.app._dirty = True
         self._refresh()
         self._set_status(f"deleted {name}")
+
+    def action_copy(self) -> None:
+        """Ctrl+Y: copy the selection, or the whole C definition, to the clipboard."""
+        ta = self.query_one("#se-edit", TextArea)
+        text = ta.selected_text or ta.text
+        if not text:
+            self._set_status("nothing to copy")
+            return
+        n = self.app._copy(text)
+        what = "selection" if ta.selected_text else "definition"
+        self._set_status(f"copied {what} ({n} chars) to clipboard")
 
     def action_close(self) -> None:
         # A stray Esc while editing returns to the list instead of discarding.
@@ -1493,6 +1515,27 @@ class IdaTui(App):
     # -- status helper ----------------------------------------------------- #
     def _status(self, text: str) -> None:
         self.query_one("#status", Static).update(text)
+
+    # -- clipboard --------------------------------------------------------- #
+    def _copy(self, text: str) -> int:
+        """Copy ``text`` to the clipboard and return its length. Uses the OSC 52
+        escape (Textual) and, inside tmux, also ``tmux load-buffer -w`` — the
+        combination is what actually reaches the system clipboard over
+        tmux/ssh when the app has the mouse captured (so drag-select can't).
+        """
+        try:
+            self.copy_to_clipboard(text)  # OSC 52
+        except Exception:  # noqa: BLE001
+            pass
+        if os.environ.get("TMUX"):
+            try:
+                subprocess.run(
+                    ["tmux", "load-buffer", "-w", "-"],
+                    input=text.encode("utf-8", "replace"),
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=2.0)
+            except Exception:  # noqa: BLE001
+                pass
+        return len(text)
 
     # -- connection + initial load ---------------------------------------- #
     @work(thread=True, exclusive=True, group="connect")

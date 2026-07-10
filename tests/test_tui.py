@@ -163,6 +163,14 @@ async def run(db):
             await wait_until(pilot, lambda: tname in ta.text and "{" in ta.text, 15)
             check("selecting a struct shows its C definition",
                   tname in ta.text and "{" in ta.text, f"text={ta.text[:40]!r}")
+            # Ctrl+Y copies the whole definition to the clipboard (OSC 52 + tmux).
+            app._clipboard = ""
+            se.query_one(TextArea).focus()
+            await pilot.press("ctrl+y")
+            await wait_until(pilot, lambda: app._clipboard == ta.text, 10)
+            check("Ctrl+Y copies the struct definition to the clipboard",
+                  bool(app._clipboard) and app._clipboard == ta.text,
+                  f"clip_len={len(app._clipboard)}")
             # create (fixed name so re-runs update in place -> no churn)
             sname = "TuiEdTest"
             await pilot.press("ctrl+n")
@@ -259,6 +267,15 @@ async def run(db):
         check("cursor line eventually cached (bg fetch)",
               view.model.cached_line(view.cursor) is not None)
         check("status shows an address", "@ 0x" in str(status.render()), str(status.render()))
+
+        # 'y' copies the current code line to the clipboard.
+        view.focus()
+        cur_line = view._line_plain(view.cursor)
+        app._clipboard = ""
+        await pilot.press("y")
+        await wait_until(pilot, lambda: app._clipboard == cur_line, 10)
+        check("'y' copies the current code line to the clipboard",
+              bool(cur_line) and app._clipboard == cur_line, f"clip={app._clipboard!r}")
 
         # Jump to bottom of a (possibly huge) function; must not hang.
         await pilot.press("end")
