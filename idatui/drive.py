@@ -84,16 +84,16 @@ def cmd_go(c, args):
     return _fmt_where(c.call("state"))
 
 
-def _show_decomp(c):
-    """Make the pseudocode pane the visibly-active view (best effort).
+def _show_view(c, want):
+    """Make the requested code pane the visibly-active view (best effort).
 
     Tab toggles disasm<->decomp, and leaves hex back to the preferred code
-    view; so at most two toggles reach decomp from any state. If the
-    decompiler fails for the current function the view falls back to disasm
-    and we simply stop — the caller still returns the pseudocode error text.
+    view; so at most two toggles reach either code view from any state. If
+    the decompiler fails for the current function the view falls back to
+    disasm and we simply stop — the caller still returns its text as before.
     """
     for _ in range(2):
-        if c.call("state").get("active") == "decomp":
+        if c.call("state").get("active") == want:
             return
         try:
             c.call("toggle_view")
@@ -107,7 +107,7 @@ def cmd_pc(c, args):
     # Drive the real UI so viewers see the pseudocode, not just the driver.
     if target is not None:
         c.call("goto", target=target, delay_ms=0)
-    _show_decomp(c)
+    _show_view(c, "decomp")
     if needle is not None:
         # Incremental-search in the now-visible pane so the cursor lands on
         # the first hit (best effort: the term may not be a single token).
@@ -129,6 +129,10 @@ def cmd_pc(c, args):
 def cmd_dis(c, args):
     target = _tgt(args[0]) if args else None
     n = int(args[1]) if len(args) > 1 else 60
+    # Drive the real UI so viewers see the disassembly, not just the driver.
+    if target is not None:
+        c.call("goto", target=target, delay_ms=0)
+    _show_view(c, "disasm")
     d = c.call("disassembly", target=target, max=n)
     return "\n".join(f"{ln['ea']:#010x}  {ln['text']}" for ln in d.get("lines", []))
 
