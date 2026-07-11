@@ -8,7 +8,7 @@ current:
     -> progressssss
 
 ez:
-[ ] opcodes (toggle) in disas view
+[x] opcodes (toggle) in disas view
 
 doable:
 [ ] stress test: big fucking binaries (canon rtos blob)
