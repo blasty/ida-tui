@@ -7,7 +7,7 @@ blobs, and bundles the common composite gestures (goto+rename, batch rename,
 function comment, filtered pseudocode). Use it for low-overhead tool-calls.
 
     python3 -m idatui.drive where                 # where am I
-    python3 -m idatui.drive pc main strrchr        # pseudocode of main, lines matching 'strrchr'
+    python3 -m idatui.drive pc main strrchr        # SHOW main's pseudocode on screen, lines matching 'strrchr'
     python3 -m idatui.drive callees main           # what main calls
     python3 -m idatui.drive rename sub_5BE0 stdout_isatty
     python3 -m idatui.drive mv sub_A=foo sub_B=bar # batch rename
@@ -84,15 +84,44 @@ def cmd_go(c, args):
     return _fmt_where(c.call("state"))
 
 
+def _show_decomp(c):
+    """Make the pseudocode pane the visibly-active view (best effort).
+
+    Tab toggles disasm<->decomp, and leaves hex back to the preferred code
+    view; so at most two toggles reach decomp from any state. If the
+    decompiler fails for the current function the view falls back to disasm
+    and we simply stop — the caller still returns the pseudocode error text.
+    """
+    for _ in range(2):
+        if c.call("state").get("active") == "decomp":
+            return
+        try:
+            c.call("toggle_view")
+        except RpcError:
+            return
+
+
 def cmd_pc(c, args):
     target = _tgt(args[0]) if args else None
-    needle = args[1].lower() if len(args) > 1 else None
+    needle = args[1] if len(args) > 1 else None
+    # Drive the real UI so viewers see the pseudocode, not just the driver.
+    if target is not None:
+        c.call("goto", target=target, delay_ms=0)
+    _show_decomp(c)
+    if needle is not None:
+        # Incremental-search in the now-visible pane so the cursor lands on
+        # the first hit (best effort: the term may not be a single token).
+        try:
+            c.call("search", term=needle, direction=1)
+        except RpcError:
+            pass
     d = c.call("pseudocode", target=target)
     if not d.get("code"):
         return f"(no pseudocode: {d.get('error')})"
     lines = d["code"].splitlines()
     if needle:
-        lines = [f"{i:4} {l}" for i, l in enumerate(lines) if needle in l.lower()]
+        nlow = needle.lower()
+        lines = [f"{i:4} {l}" for i, l in enumerate(lines) if nlow in l.lower()]
         return "\n".join(lines) or f"(no line matches {needle!r})"
     return d["code"]
 
