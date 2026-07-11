@@ -25,11 +25,20 @@ from typing import Any
 
 
 class RpcClient:
-    def __init__(self, sock_path: str):
+    #: Default read timeout (s). Bounds any single call so a slow/hung server
+    #: (e.g. Hex-Rays grinding on an undecompilable function) can't block the
+    #: CLI forever. Override via ctor or the IDATUI_RPC_TIMEOUT env var.
+    DEFAULT_TIMEOUT = 90.0
+
+    def __init__(self, sock_path: str, timeout: float | None = None):
         self.path = sock_path
         self._sock: socket.socket | None = None
         self._buf = b""
         self._id = 0
+        if timeout is None:
+            env = os.environ.get("IDATUI_RPC_TIMEOUT")
+            timeout = float(env) if env else self.DEFAULT_TIMEOUT
+        self.timeout = timeout
 
     def __enter__(self) -> "RpcClient":
         self.connect()
@@ -41,6 +50,8 @@ class RpcClient:
     def connect(self) -> None:
         s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         s.connect(self.path)
+        if self.timeout and self.timeout > 0:
+            s.settimeout(self.timeout)
         self._sock = s
 
     def close(self) -> None:
@@ -54,7 +65,13 @@ class RpcClient:
         req = {"id": self._id, "method": method, "params": params}
         self._sock.sendall(json.dumps(req).encode() + b"\n")
         while b"\n" not in self._buf:
-            chunk = self._sock.recv(65536)
+            try:
+                chunk = self._sock.recv(65536)
+            except socket.timeout as e:
+                raise RpcError(
+                    f"no response for {method!r} within {self.timeout}s "
+                    f"(server busy or the op is hung, e.g. a failed decompile)"
+                ) from e
             if not chunk:
                 raise ConnectionError("server closed the connection")
             self._buf += chunk

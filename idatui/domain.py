@@ -36,6 +36,7 @@ from .client import IDAClient, IDAToolError
 LIST_PAGE = 500
 DISASM_BLOCK = 256  # instructions per cached/fetched block (<= disasm cap)
 HEX_BLOCK = 4096    # bytes per cached/fetched hex block
+DECOMPILE_TIMEOUT = 15.0  # s; cap per decompile so a failing one can't hang the CLI
 
 _TRUNC_RE = re.compile(r"\[(\d+) chars total\]\s*$")
 
@@ -741,7 +742,21 @@ class Program:
                     self.client.call("force_recompile", items=[{"addr": hex(ea)}])
                 except Exception:  # noqa: BLE001
                     pass
-        envelope = self.client.call_envelope("decompile", addr=hex(ea))
+        # Bound the decompile: a function Hex-Rays can't handle tends to stall
+        # near the client's default 30s timeout, and the transport retries a
+        # dropped connection up to max_retries+1 times, re-running the failing
+        # decompile each time. Cap it so the worst case stays well under the
+        # rpcclient socket timeout, and cache the failure below so a re-request
+        # returns instantly instead of re-grinding.
+        try:
+            envelope = self.client.call_envelope(
+                "decompile", addr=hex(ea), timeout=DECOMPILE_TIMEOUT
+            )
+        except Exception as e:  # noqa: BLE001 -- surface as a failed decompile
+            dec = Decompilation(ea, None, True, f"decompile error: {e}", False, None)
+            with self._lock:
+                self._decomp[ea] = (dec, self._name_gen)
+            return dec
         result = envelope.get("result", {})
         payload = result.get("structuredContent")
         if payload is None:  # fall back to text content

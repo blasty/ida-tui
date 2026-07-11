@@ -587,7 +587,26 @@ class RpcServer:
             return await self._press(["escape"], timeout=timeout)
         if method == "toggle_view":
             before = app._active
-            return await self._press(["tab"], lambda: app._active != before, timeout)
+
+            def _toggled():
+                # Normal case: the shown view flipped.
+                if app._active != before:
+                    return True
+                # Fallback case: a tab toward pseudocode on a function Hex-Rays
+                # can't decompile snaps `_active` back to disasm (see
+                # App._apply_decomp), so `_active` never changes and the naive
+                # `_active != before` predicate would block for the full
+                # timeout. Treat "requested decomp but it's known-failed" as
+                # settled (the decompile is cached, so this is cheap).
+                cur = app._cur
+                if before == "disasm" and cur is not None:
+                    try:
+                        return app.program.decompile(cur.ea).failed
+                    except Exception:  # noqa: BLE001
+                        return False
+                return False
+
+            return await self._press(["tab"], _toggled, timeout)
         if method == "hex":
             return await self._press(["backslash"], lambda: app._active == "hex", timeout)
         if method == "xrefs":
