@@ -1,0 +1,34 @@
+[Unit]
+Description=idatui ida-pro-mcp supervisor (idalib-mcp on 127.0.0.1:8745)
+Documentation=https://github.com/mrexodia/ida-pro-mcp
+# Wait for network in case a worker ever needs to resolve/pull anything.
+After=network-online.target
+Wants=network-online.target
+# If it dies >5 times in 60s, stop flapping and surface a hard failure.
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+WorkingDirectory=%h/dev/ida-tui-maybe
+ExecStart=%h/dev/ida-tui-maybe/spawn.sh
+
+# Be explicit about PATH so the unit doesn't depend on an interactive login
+# shell. %h/.local/bin is where `idalib-mcp` lives (uv tool install); uv itself
+# and /usr/bin/python are on the system PATH.
+Environment=PATH=%h/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+# Tunables (override with a drop-in: systemctl --user edit idatui-mcp).
+Environment=IDA_MCP_MAX_WORKERS=8
+Environment=IDA_MCP_HOST=127.0.0.1
+Environment=IDA_MCP_PORT=8745
+
+# Always bring it back; observe restarts/exits in `journalctl --user -u idatui-mcp`.
+Restart=always
+RestartSec=2
+
+# Give the supervisor time to shut its workers down cleanly.
+TimeoutStopSec=30
+KillMode=mixed
+
+[Install]
+WantedBy=default.target

@@ -21,13 +21,15 @@ dev = [
     { name = "pytest" },
 ]
 tui = [
+    { name = "pygments" },
     { name = "textual" },
 ]
 
 [package.metadata]
 requires-dist = [
+    { name = "pygments", marker = "extra == 'tui'", specifier = ">=2" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8" },
-    { name = "textual", marker = "extra == 'tui'", specifier = ">=0.60" },
+    { name = "textual", marker = "extra == 'tui'", specifier = ">=8" },
 ]
 provides-extras = ["tui", "dev"]
 

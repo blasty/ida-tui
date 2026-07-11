@@ -50,6 +50,7 @@ _S_ADDR = Style(color="grey58")
 _S_LABEL = Style(color="yellow", bold=True)
 _S_INSN = Style(color="white")
 _S_MNEM = Style(color="cyan")
+_S_OPBYTES = Style(color="grey50")  # raw opcode bytes column
 _S_CURSOR = Style(bgcolor="grey30")
 _S_DIM = Style(color="grey42", italic=True)
 _S_MATCH = Style(bgcolor="#7a5c00")  # all search matches
@@ -579,6 +580,7 @@ class DisasmView(SearchMixin, NavMixin, ColumnCursor, ScrollView, can_focus=True
         Binding("pageup", "page(-1)", "PgUp", show=False),
         Binding("home", "goto_top", "Top", show=False),
         Binding("G,end", "goto_bottom", "Bottom", show=False),
+        Binding("o", "toggle_opcodes", "Opcodes", show=False),
         Binding("tab,shift+tab", "app.toggle_view", "Pseudocode", priority=True),
         *SearchMixin.SEARCH_BINDINGS,
         *NavMixin.NAV_BINDINGS,
@@ -606,6 +608,17 @@ class DisasmView(SearchMixin, NavMixin, ColumnCursor, ScrollView, can_focus=True
         self._matches: list[int] = []
         self._ranges: dict[int, list[tuple[int, int]]] = {}
         self._search_texts: list[str] | None = None
+        self._show_ops = True
+        self._op_w = 0  # char width of the hex-bytes field (excl. trailing gap)
+
+    def _op_field(self, line) -> str:  # type: ignore[no-untyped-def]
+        """The padded opcode-bytes column (empty when hidden). Kept identical
+        between the rendered strip and the plain text so cursor/search offsets
+        line up."""
+        if not self._show_ops or self._op_w <= 0:
+            return ""
+        raw = line.raw or b""
+        return " ".join(f"{b:02X}" for b in raw).ljust(self._op_w) + "  "
 
     def _line_plain(self, idx: int) -> str | None:
         if self.model is None:
@@ -613,7 +626,7 @@ class DisasmView(SearchMixin, NavMixin, ColumnCursor, ScrollView, can_focus=True
         line = self.model.cached_line(idx)
         if line is None:
             return None
-        s = f"{line.ea:08X}  "
+        s = f"{line.ea:08X}  " + self._op_field(line)
         if line.label:
             s += f"{line.label}: "
         return s + line.text
@@ -635,9 +648,8 @@ class DisasmView(SearchMixin, NavMixin, ColumnCursor, ScrollView, can_focus=True
         self._prime()
 
     # -- search hooks ------------------------------------------------------ #
-    @staticmethod
-    def _fmt(line) -> str:  # type: ignore[no-untyped-def]
-        s = f"{line.ea:08X}  "
+    def _fmt(self, line) -> str:  # type: ignore[no-untyped-def]
+        s = f"{line.ea:08X}  " + self._op_field(line)
         if line.label:
             s += f"{line.label}: "
         return s + line.text
@@ -688,6 +700,8 @@ class DisasmView(SearchMixin, NavMixin, ColumnCursor, ScrollView, can_focus=True
     def _on_primed(self, total: int) -> None:
         self.total = total
         self.virtual_size = Size(0, total)
+        self._update_op_w()  # provisional width from the primed window
+        self._scan_op_width()  # settle it against the whole function
         self._clamp_x()  # cursor line is now cached; keep the column in range
         if self._pending_scroll_y is not None and self._pending_scroll_y >= 0:
             self._apply_scroll(min(self._pending_scroll_y, max(total - 1, 0)))
@@ -714,6 +728,9 @@ class DisasmView(SearchMixin, NavMixin, ColumnCursor, ScrollView, can_focus=True
             strip = Strip([Segment(f"  {idx:>8}  …", _S_DIM)])
         else:
             segs: list[Segment] = [Segment(f"{line.ea:08X}  ", _S_ADDR)]
+            op = self._op_field(line)
+            if op:
+                segs.append(Segment(op, _S_OPBYTES))
             if line.label:
                 segs.append(Segment(f"{line.label}: ", _S_LABEL))
             mnem, _, rest = line.text.partition(" ")
@@ -726,6 +743,40 @@ class DisasmView(SearchMixin, NavMixin, ColumnCursor, ScrollView, can_focus=True
         if is_cursor:
             strip = _cursor_decorate(strip, self._line_plain(idx) or "", self.cursor_x)
         return strip.adjust_cell_length(width, _S_INSN)
+
+    def _update_op_w(self) -> bool:
+        """Recompute the opcode column width from the model's widest instruction.
+        Returns True if it changed."""
+        w = 0
+        if self.model is not None and self._show_ops:
+            mx = self.model.max_raw_len()
+            w = max(mx * 3 - 1, 0) if mx > 0 else 0
+        if w != self._op_w:
+            self._op_w = w
+            return True
+        return False
+
+    @work(thread=True, exclusive=True, group="disasm-opwidth")
+    def _scan_op_width(self) -> None:
+        model = self.model
+        if model is None:
+            return
+        model.scan_bytes()  # fetch all blocks -> stable widest instruction
+        self.app.call_from_thread(self._settle_op_w)
+
+    def _settle_op_w(self) -> None:
+        if self._update_op_w():
+            self._search_texts = None  # layout changed -> stale offsets
+            self.refresh()
+
+    def action_toggle_opcodes(self) -> None:
+        self._show_ops = not self._show_ops
+        self._update_op_w()
+        self._search_texts = None  # column layout changed -> reindex on next search
+        self._ranges = {}
+        self._clamp_x()
+        self.refresh()
+        self._app_status("opcodes " + ("on" if self._show_ops else "off"))
 
     def _ensure_window(self, top: int) -> None:
         if self.model is None:

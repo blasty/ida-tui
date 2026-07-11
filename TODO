@@ -1,5 +1,40 @@
-[ ] RPC endpoint for robot-spectator-ida
-[ ] rename -> history stack pop -> old name
+## INCOMPLETE LIST OF TODO's
+## ----------------------------------------------------------------------------
+
+bugs:
+
+current:
+[x] RPC endpoint for robot-spectator-ida
+    -> progressssss
+
+ez:
+[ ] opcodes (toggle) in disas view
+
+doable:
+[ ] stress test: big fucking binaries (canon rtos blob)
+
+hard:
+[ ] deal with PLT stubs and such (oh god here we go)
+[ ] how to deal with non-function-body regions?
+    -> we want to be able to do data/type definitions in .data etc. 
+
+crazy:
+[ ] multi/split view ala ghidra?
+    -> would be interesting to make arbitrary compositions of disas/decomp/hex 
+        views and keep them all in sync cursor wise etc.
+
+done-ish:
+[x] if `drive pc` hits a decompilation error it somehow causes a long timeout on client side
+[x] remove stupid textual chrome/scaffolding
+[~] hex editor? (viewer at least)
+[x] make unit tests not suck (why unittest? because we're reward hackers!)
+[x] (re-)typing
+[x] struct editor
+[ ] cant rename local label
+    -> api limitations, might fix (not super important)
+[x] rename -> history stack pop -> old name
 [x] page up/down cursor x/y preserve
 [x] hlsearch should jump cursor
 [x] makes names pane sortable (addr/name columns)
+
+

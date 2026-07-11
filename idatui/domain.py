@@ -27,7 +27,7 @@ import re
 import threading
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Callable
 
 from .client import IDAClient, IDAToolError
@@ -68,6 +68,7 @@ class Line:
     ea: int
     text: str
     label: str | None = None
+    raw: bytes | None = None  # opcode bytes; filled in by DisasmModel post-fetch
 
     @classmethod
     def from_raw(cls, d: dict) -> "Line":
@@ -270,6 +271,9 @@ class DisasmModel:
         self._blocks: dict[int, list[Line]] = {}
         self._total: int | None = None
         self._ea_list: list[int] | None = None
+        self._max_raw = 0            # widest opcode length seen (bytes)
+        self._func_end: int | None = None
+        self._func_end_done = False
         self._lock = threading.Lock()
         self._inflight: set[int] = set()
 
@@ -287,17 +291,84 @@ class DisasmModel:
             self._total = int(total)
         return self._total
 
+    def _function_end(self) -> int | None:
+        """End address (exclusive) of this function; used to size the final
+        instruction's opcode bytes. Cached (one lookup per model)."""
+        if self._func_end_done:
+            return self._func_end
+        end: int | None = None
+        try:
+            fn = self._prog.function_of(self.ea)
+            if fn is not None:
+                end = fn.addr + fn.size
+        except Exception:  # noqa: BLE001 -- best-effort; falls back to a width guess
+            end = None
+        with self._lock:
+            self._func_end = end
+            self._func_end_done = True
+        return end
+
+    def _attach_bytes(self, lines: list[Line], end_ea: int | None) -> list[Line]:
+        """Read the opcode bytes for ``lines`` in one request and slice them per
+        instruction using consecutive addresses (variable-length safe)."""
+        if not lines:
+            return lines
+        last_end = end_ea
+        if last_end is None or last_end <= lines[-1].ea:
+            last_end = lines[-1].ea + 15  # x86 max insn len; only the final line
+        start = lines[0].ea
+        data = self._prog.read_bytes(start, last_end - start)
+        out: list[Line] = []
+        biggest = 0
+        for i, ln in enumerate(lines):
+            nxt = lines[i + 1].ea if i + 1 < len(lines) else last_end
+            length = max(nxt - ln.ea, 0)
+            off = ln.ea - start
+            b = bytes(data[off:off + length])
+            biggest = max(biggest, len(b))
+            out.append(replace(ln, raw=b))
+        with self._lock:
+            if biggest > self._max_raw:
+                self._max_raw = biggest
+        return out
+
     def _fetch_block(self, b: int) -> list[Line]:
+        # Over-fetch one instruction so the block knows where its last
+        # instruction ends (variable-length archs give no size field).
         payload = self._prog.client.call(
             "disasm", addr=hex(self.ea), offset=b * self.BLOCK,
-            max_instructions=self.BLOCK,
+            max_instructions=self.BLOCK + 1,
         )
         raw = payload.get("asm", {}).get("lines", []) if isinstance(payload, dict) else []
-        lines = [Line.from_raw(r) for r in raw]
+        fetched = [Line.from_raw(r) for r in raw]
+        lines = fetched[:self.BLOCK]
+        if len(fetched) > self.BLOCK:
+            end_ea: int | None = fetched[self.BLOCK].ea
+        else:  # this block ends the function
+            end_ea = self._function_end()
+        lines = self._attach_bytes(lines, end_ea)
         with self._lock:
             self._blocks[b] = lines
             self._inflight.discard(b)
         return lines
+
+    def max_raw_len(self) -> int:
+        """Widest opcode length (bytes) across the blocks fetched so far."""
+        with self._lock:
+            return self._max_raw
+
+    def scan_bytes(self) -> int:
+        """Fetch every block (populating opcode bytes) and return the widest
+        instruction length across the whole function. Used to size the opcode
+        column so its padding doesn't jump as the listing streams in."""
+        total = self.total()
+        off = 0
+        while off < total:
+            got = self.lines(off, self.BLOCK, prefetch=False)
+            if not got:
+                break
+            off += len(got)
+        return self.max_raw_len()
 
     def _get_block(self, b: int) -> list[Line]:
         with self._lock:
@@ -395,6 +466,7 @@ class DisasmModel:
             self._blocks.clear()
             self._total = None
             self._ea_list = None
+            self._max_raw = 0
 
 
 # --------------------------------------------------------------------------- #
