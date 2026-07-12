@@ -904,8 +904,32 @@ class Program:
         res = payload.get("result", []) if isinstance(payload, dict) else []
         fn = res[0].get("fn") if res and isinstance(res[0], dict) else None
         if not fn:
-            raise KeyError(f"cannot resolve {target!r}")
+            raise KeyError(f"cannot resolve {target!r}{self._name_suggestion(s)}")
         return _as_int(fn["addr"])
+
+    def _name_suggestion(self, s: str) -> str:
+        """Best-effort ' — did you mean …?' hint for a failed name resolve.
+
+        ``lookup_funcs`` matches exact function names only, so a demangled or
+        partial name (``QuaziLies`` for ``_Z9QuaziLiesPcS_ii``) or a data symbol
+        (``checkKey``) resolves to nothing. Surface the substring matches from
+        the function index so the caller can retype the exact name instead of
+        getting a bare ``cannot resolve``. Never raises — suggestions are a
+        nicety, not a contract.
+        """
+        try:
+            idx = self.functions(filter=s)
+            idx.ensure(6)
+            cands = idx.window(0, 6)
+        except Exception:  # noqa: BLE001 -- suggestions are strictly optional
+            return ""
+        if not cands:
+            return (" (no function name contains it; it may be a data symbol or "
+                    "not a function — pass an address like 0x1234)")
+        shown = cands[:5]
+        names = ", ".join(f"{c.name} @ {c.addr:#x}" for c in shown)
+        more = " …" if len(cands) > len(shown) else ""
+        return f" — did you mean: {names}{more}?"
 
     # -- comments ---------------------------------------------------------- #
     def set_comment(self, ea: int, text: str):

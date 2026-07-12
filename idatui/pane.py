@@ -28,6 +28,7 @@ import argparse
 import json
 import os
 import secrets
+import signal
 import socket
 import subprocess
 import sys
@@ -75,6 +76,65 @@ def _pane_alive(pane: str) -> bool:
 def _tmux(*args: str) -> str:
     return subprocess.run(["tmux", *args], capture_output=True, text=True,
                           check=True).stdout.strip()
+
+
+# --------------------------------------------------------------------------- #
+# idalib worker reaping
+#
+# ``pane stop`` kills the TUI pane, but the ida-pro-mcp supervisor does not
+# reliably reap the ``ida_pro_mcp.idalib_server`` worker it forked for that
+# session. Leaked workers accumulate against IDA_MCP_MAX_WORKERS until the next
+# ``spawn`` blocks forever waiting for a free slot (the TUI comes up but never
+# becomes ready). A worker is only *safe* to reap when no idatui pane is live
+# (then every worker is orphaned) — that mirrors the hand workaround
+# `pkill -f ida_pro_mcp.idalib_server` and avoids killing an in-use analyser.
+# --------------------------------------------------------------------------- #
+_WORKER_PATTERN = r"ida_pro_mcp\.idalib_server"
+
+
+def _worker_pids() -> list[int]:
+    """PIDs of the supervisor's per-binary idalib worker processes.
+
+    Matches the worker module invocation only (not the ``idalib-mcp``
+    supervisor, whose command line does not contain the module path), and
+    never our own PID.
+    """
+    try:
+        out = subprocess.run(["pgrep", "-f", _WORKER_PATTERN],
+                             capture_output=True, text=True)
+    except OSError:
+        return []
+    me = os.getpid()
+    pids: list[int] = []
+    for tok in out.stdout.split():
+        try:
+            pid = int(tok)
+        except ValueError:
+            continue
+        if pid != me:
+            pids.append(pid)
+    return pids
+
+
+def _count_live_panes() -> int:
+    return sum(1 for r in _load_registry() if _pane_alive(r.get("pane", "")))
+
+
+def _reap_orphan_workers(force: bool = False) -> int:
+    """Kill leaked idalib workers when it is safe (no live pane) or ``force``.
+
+    Returns the number of workers signalled. Best-effort; never raises.
+    """
+    if not force and _count_live_panes() > 0:
+        return 0
+    reaped = 0
+    for pid in _worker_pids():
+        try:
+            os.kill(pid, signal.SIGKILL)
+            reaped += 1
+        except OSError:
+            pass
+    return reaped
 
 
 # --------------------------------------------------------------------------- #
@@ -148,6 +208,14 @@ def spawn(args) -> int:
         print(f"error: no such binary: {target}", file=sys.stderr)
         return 2
 
+    # Reap workers leaked by previously-stopped/crashed panes so we don't spawn
+    # into a full IDA_MCP_MAX_WORKERS (which makes the new TUI hang forever,
+    # never reaching ready). No-op while any pane is live.
+    reaped = _reap_orphan_workers()
+    if reaped:
+        print(f"reaped {reaped} orphaned idalib worker(s) before spawn",
+              file=sys.stderr)
+
     # make sure the ida-pro-mcp supervisor is up (auto-start it if not)
     srv: dict[str, Any] = {"server_started": False, "server_up": True}
     if not args.no_ensure_server:
@@ -202,9 +270,17 @@ def _q(s: str) -> str:
     return shlex.quote(s)
 
 
-def _wait_ready(sock: str, timeout: float, pane: str) -> dict[str, Any]:
-    """Poll the socket + ping until the TUI reports ready (or timeout)."""
-    deadline = time.time() + timeout
+def _wait_ready(sock: str, timeout: float, pane: str,
+                stuck_after: float = 45.0) -> dict[str, Any]:
+    """Poll the socket + ping until the TUI reports ready (or timeout).
+
+    Emits a one-time hint to stderr if it's still not ready after ``stuck_after``
+    seconds, so a wedged idalib worker / full worker pool surfaces a diagnostic
+    instead of an unexplained silent hang.
+    """
+    start = time.time()
+    deadline = start + timeout
+    warned = False
     last: dict[str, Any] = {"ready": False}
     while time.time() < deadline:
         if not _pane_alive(pane):
@@ -217,6 +293,13 @@ def _wait_ready(sock: str, timeout: float, pane: str) -> dict[str, Any]:
                     return last
             except (OSError, RpcError, ConnectionError):
                 pass
+        if not warned and (time.time() - start) > stuck_after:
+            warned = True
+            why = ("RPC socket not created yet" if not os.path.exists(sock)
+                   else "TUI up but analysis not ready")
+            print(f"still waiting ({int(time.time() - start)}s): {why}. If this "
+                  f"hangs, the idalib worker may be stuck or IDA_MCP_MAX_WORKERS "
+                  f"is full — try `python -m idatui.pane reap`.", file=sys.stderr)
         time.sleep(0.4)
     last = dict(last)
     last["ready"] = False
@@ -255,7 +338,12 @@ def stop(args) -> int:
             except OSError:
                 pass
     _save_registry([r for r in reg if r not in rows])
-    print(json.dumps({"stopped": [r.get("sock") or r.get("pane") for r in rows]}))
+    # Reap the workers those panes leaked (safe: only fires once no pane is live).
+    reaped = _reap_orphan_workers()
+    out = {"stopped": [r.get("sock") or r.get("pane") for r in rows]}
+    if reaped:
+        out["reaped_workers"] = reaped
+    print(json.dumps(out))
     return 0
 
 
@@ -276,7 +364,21 @@ def list_panes(args) -> int:
         alive.append(r)
     if args.prune:
         _save_registry(alive)
+        reaped = _reap_orphan_workers()
+        if reaped:
+            print(f"reaped {reaped} orphaned idalib worker(s)", file=sys.stderr)
     print(json.dumps(alive, indent=2))
+    return 0
+
+
+def reap(args) -> int:
+    """Kill leaked idalib workers (safe when no pane is live; --force overrides)."""
+    live = _count_live_panes()
+    n = _reap_orphan_workers(force=args.force)
+    print(json.dumps({"reaped_workers": n, "live_panes": live, "forced": args.force}))
+    if n == 0 and not args.force and live > 0:
+        print(f"note: {live} live pane(s) — not reaping in-use workers; pass "
+              f"--force to reap anyway", file=sys.stderr)
     return 0
 
 
@@ -310,6 +412,11 @@ def main(argv: list[str]) -> int:
     ls = sub.add_parser("list", help="list tracked panes")
     ls.add_argument("--prune", action="store_true", help="drop dead panes (and their sockets)")
     ls.set_defaults(fn=list_panes)
+
+    rp = sub.add_parser("reap", help="kill leaked idalib workers (frees worker slots)")
+    rp.add_argument("--force", action="store_true",
+                    help="reap even while panes are live (may kill an in-use analyser)")
+    rp.set_defaults(fn=reap)
 
     args = p.parse_args(argv)
     return args.fn(args)

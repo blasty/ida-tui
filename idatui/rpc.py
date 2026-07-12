@@ -438,7 +438,13 @@ class RpcServer:
             result = await self._dispatch(method, params)
             return {"id": rid, "result": result}
         except Exception as e:  # noqa: BLE001 — report, never kill the connection
-            return {"id": rid, "error": {"message": f"{type(e).__name__}: {e}"}}
+            # ``str(KeyError("msg"))`` returns ``repr("msg")`` (adds quotes), which
+            # mangles our friendly resolve messages; unwrap the single arg instead.
+            if isinstance(e, KeyError) and len(e.args) == 1 and isinstance(e.args[0], str):
+                msg = e.args[0]
+            else:
+                msg = str(e)
+            return {"id": rid, "error": {"message": f"{type(e).__name__}: {msg}"}}
 
     # -- composed helpers (semantic verbs) -------------------------------- #
     async def _press(self, keys, pred=None, timeout=20.0):
