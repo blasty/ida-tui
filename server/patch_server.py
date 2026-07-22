@@ -187,6 +187,41 @@ def file_regions() -> dict:
 
 @tool
 @idasync
+def make_string(
+    addr: Annotated[str, "Address of the string start"],
+    length: Annotated[int, "Length in bytes (0 = auto-detect to the terminator)"] = 0,
+    kind: Annotated[str, "String kind: c | c16 | c32 | pascal"] = "c",
+) -> dict:
+    """Create a string literal at ``addr`` (IDA's 'A'). ``length`` 0 auto-detects
+    to the terminator. Undefines any items in the way first, like the UI does.
+    Returns the created byte size and the decoded contents."""
+    import ida_bytes
+    import ida_nalt
+
+    ea = parse_address(addr)
+    strtype = {
+        "c": ida_nalt.STRTYPE_C,
+        "c16": ida_nalt.STRTYPE_C_16,
+        "c32": ida_nalt.STRTYPE_C_32,
+        "pascal": ida_nalt.STRTYPE_PASCAL,
+    }.get(str(kind).lower(), ida_nalt.STRTYPE_C)
+    n = max(int(length), 0)
+    # Free any existing item(s) so create_strlit can carve the literal.
+    ida_bytes.del_items(ea, ida_bytes.DELIT_SIMPLE, n if n > 0 else 1)
+    ok = bool(ida_bytes.create_strlit(ea, n, strtype))
+    if not ok:
+        return {"addr": addr, "ok": False, "error": "create_strlit failed"}
+    size = int(ida_bytes.get_item_size(ea))
+    try:
+        raw = ida_bytes.get_strlit_contents(ea, -1, strtype)
+        text = raw.decode("utf-8", "replace") if raw else ""
+    except Exception:
+        text = ""
+    return {"addr": addr, "ok": True, "size": size, "text": text}
+
+
+@tool
+@idasync
 def read_raw(
     addr: Annotated[str, "Start address (hex or name)"],
     size: Annotated[int, "Number of bytes to read"],

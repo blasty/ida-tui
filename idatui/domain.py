@@ -1127,6 +1127,16 @@ class Program:
             raise IDAToolError(
                 f"make data @ {ea:#x}: {res.get('error') or 'rejected'}")
 
+    def make_string(self, ea: int, length: int = 0, kind: str = "c") -> str:
+        """Create a string literal at ``ea`` (IDA's 'A'); auto-length when 0.
+        Returns the decoded contents."""
+        r = self.client.call("make_string", addr=hex(ea), length=int(length), kind=kind)
+        res = r if isinstance(r, dict) else {}
+        if not res.get("ok"):
+            raise IDAToolError(
+                f"make string @ {ea:#x}: {res.get('error') or 'rejected'}")
+        return res.get("text", "")
+
     def region_label(self, ea: int) -> str:
         """Display name for a non-function address (segment-qualified)."""
         try:

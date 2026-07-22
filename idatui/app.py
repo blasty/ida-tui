@@ -900,6 +900,7 @@ class ListingView(SearchMixin, NavMixin, ColumnCursor, ScrollView, can_focus=Tru
         Binding("G,end", "goto_bottom", "Bottom", show=False),
         Binding("c", "define_code", "Code", show=False),
         Binding("d", "make_data", "Data", show=False),
+        Binding("a", "make_string", "Str", show=False),
         Binding("p", "define_func", "Func", show=False),
         Binding("u", "undefine", "Undef", show=False),
         *SearchMixin.SEARCH_BINDINGS,
@@ -1070,6 +1071,9 @@ class ListingView(SearchMixin, NavMixin, ColumnCursor, ScrollView, can_focus=Tru
 
     def action_make_data(self) -> None:
         self.post_message(MakeDataRequested(self))
+
+    def action_make_string(self) -> None:
+        self.post_message(EditItemRequested(self, "string"))
 
     def cur_head(self) -> Head | None:
         return self._head(self.cursor)
@@ -3079,12 +3083,15 @@ class IdaTui(App):
     def _do_edit_item(self, kind: str, ea: int) -> None:  # worker context
         assert self.program is not None
         verb = {"code": "defined code", "func": "created function",
-                "undef": "undefined"}[kind]
+                "undef": "undefined", "string": "made string"}[kind]
         try:
             if kind == "code":
                 self.program.define_code(ea)
             elif kind == "func":
                 self.program.define_func(ea)
+            elif kind == "string":
+                s = self.program.make_string(ea)
+                verb = f"made string ({s[:24]!r})" if s else verb
             else:
                 self.program.undefine(ea)
         except Exception as e:  # noqa: BLE001 -- surface soft/hard tool errors

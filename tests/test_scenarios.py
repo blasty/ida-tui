@@ -1507,6 +1507,55 @@ async def s_listing_name_addr(c: Ctx):
         c.prog.bump_items()
 
 
+@scenario("listing_make_string")
+async def s_listing_make_string(c: Ctx):
+    """'a' in the listing makes a string literal at the cursor (IDA's 'A')."""
+    app = c.app
+    target = None
+    for start, end, name in c.prog.sections():
+        if start >= end:
+            continue
+        lm = c.prog.listing(start)
+        if lm is None:
+            continue
+        lm.ensure(80)
+        h = next((h for h in lm.window(0, 80)
+                  if h.kind == "data" and "'" in h.text), None)
+        if h is not None:
+            target = h.ea
+            break
+    if target is None:
+        c.check("found a string data item to remake", False)
+        return
+    A = target
+    try:
+        c.prog.undefine(A, size=8)
+        c.prog.bump_items()
+        await c.goto_ui(hex(A))
+        await c.wait(lambda: app._active == "listing" and app._cur is not None
+                     and app._cur.ea == A, 25)
+        c.check("target is undefined before 'a'",
+                c.lst.cur_head() is not None and c.lst.cur_head().kind == "unknown",
+                f"head={c.lst.cur_head()}")
+        c.lst.focus()
+        await c.press("a")
+        await c.wait(lambda: c.lst.model.index_of_ea(A) >= 0
+                     and c.lst.model.get(c.lst.model.index_of_ea(A)) is not None
+                     and c.lst.model.get(c.lst.model.index_of_ea(A)).kind == "data"
+                     and "'" in c.lst.model.get(c.lst.model.index_of_ea(A)).text, 25)
+        hi = c.lst.model.index_of_ea(A)
+        c.check("'a' creates a string literal at the cursor",
+                hi >= 0 and c.lst.model.get(hi).kind == "data"
+                and "'" in c.lst.model.get(hi).text,
+                f"head={c.lst.model.get(hi) if hi >= 0 else None}")
+    finally:
+        try:
+            c.prog.make_string(A)  # restore the original string
+        except Exception:  # noqa: BLE001
+            pass
+        c.prog.bump_items()
+
+
 # --------------------------------------------------------------------------- #
 # Runner
 # --------------------------------------------------------------------------- #
