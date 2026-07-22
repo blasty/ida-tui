@@ -175,7 +175,12 @@ def file_regions() -> dict:
             fo = -1
         if fo < 0 or fo >= (1 << 48):
             fo = -1
-        out.append({"start": hex(seg.start_ea), "end": hex(seg.end_ea), "file_off": fo})
+        try:
+            nm = ida_segment.get_segm_name(seg) or ""
+        except Exception:
+            nm = ""
+        out.append({"start": hex(seg.start_ea), "end": hex(seg.end_ea),
+                    "file_off": fo, "name": nm})
         seg = ida_segment.get_next_seg(seg.start_ea)
     return {"regions": out}
 

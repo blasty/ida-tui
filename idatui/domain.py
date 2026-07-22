@@ -718,6 +718,7 @@ class Program:
         self._listings: dict[int, ListingModel] = {}  # keyed by segment start
         self._decomp: dict[int, tuple[Decompilation, int]] = {}
         self._name_gen = 0  # bumped on rename; invalidates stale name caches
+        self._segments_cache: list[tuple[int, int, int, str]] | None = None
         self._sections: list[tuple[int, int, str]] | None = None
         self._fileregions: list[tuple[int, int, int]] | None = None
         self._hexmodel: "HexModel | None" = None
@@ -744,23 +745,48 @@ class Program:
             return idx
 
     # -- sections / segments ---------------------------------------------- #
+    def _segments(self) -> list[tuple[int, int, int, str]]:
+        """Sorted raw segment map [(start, end, file_off, name)] — the single
+        source for sections()/file_regions()/image_range. Cached.
+
+        Uses the injected ``file_regions`` tool (a plain segment walk, ~ms).
+        This deliberately AVOIDS ``survey_binary``, which also computes function
+        counts / strings / stats and takes *seconds* on a large IDB (it was the
+        cause of the multi-second hex-pane open). Falls back to survey_binary
+        only if the injected tool is missing.
+        """
+        if self._segments_cache is not None:
+            return self._segments_cache
+        segs: list[tuple[int, int, int, str]] = []
+        try:
+            r = self.client.call("file_regions")
+            for d in (r.get("regions", []) if isinstance(r, dict) else []):
+                if isinstance(d, dict) and "start" in d:
+                    segs.append((_as_int(d["start"]), _as_int(d["end"]),
+                                 int(d.get("file_off", -1)), d.get("name", "") or ""))
+        except IDAToolError:
+            segs = []
+        if not segs:  # older server without file_regions -> survey_binary (slow)
+            try:
+                sb = self.client.call("survey_binary")
+                for s in (sb.get("segments", []) if isinstance(sb, dict) else []):
+                    try:
+                        segs.append((_as_int(s["start"]), _as_int(s["end"]), -1,
+                                     s.get("name", "") or ""))
+                    except (KeyError, ValueError, TypeError):
+                        continue
+            except Exception:  # noqa: BLE001 -- best-effort; callers handle empty
+                segs = []
+        segs.sort()
+        with self._lock:
+            self._segments_cache = segs
+        return segs
+
     def sections(self) -> list[tuple[int, int, str]]:
-        """Sorted, non-overlapping [(start, end, name)] segment map (cached).
-        Fetched once from ``survey_binary`` (~0.7s) on first use."""
+        """Sorted, non-overlapping [(start, end, name)] segment map (cached)."""
         if self._sections is not None:
             return self._sections
-        secs: list[tuple[int, int, str]] = []
-        try:
-            sb = self.client.call("survey_binary")
-            for s in (sb.get("segments", []) if isinstance(sb, dict) else []):
-                try:
-                    secs.append((_as_int(s["start"]), _as_int(s["end"]),
-                                 s.get("name", "")))
-                except (KeyError, ValueError, TypeError):
-                    continue
-        except Exception:  # noqa: BLE001 -- best-effort; callers handle None
-            secs = []
-        secs.sort()
+        secs = [(s, e, nm) for s, e, _fo, nm in self._segments()]
         with self._lock:
             self._sections = secs
         return secs
@@ -788,16 +814,7 @@ class Program:
         the injected ``file_regions`` server tool."""
         if self._fileregions is not None:
             return self._fileregions
-        regions: list[tuple[int, int, int]] = []
-        try:
-            r = self.client.call("file_regions")
-            for d in (r.get("regions", []) if isinstance(r, dict) else []):
-                if isinstance(d, dict) and "start" in d:
-                    regions.append((_as_int(d["start"]), _as_int(d["end"]),
-                                    int(d.get("file_off", -1))))
-        except IDAToolError:
-            regions = []
-        regions.sort()
+        regions = [(s, e, fo) for s, e, fo, _nm in self._segments()]
         with self._lock:
             self._fileregions = regions
         return regions
