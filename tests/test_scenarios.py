@@ -1369,6 +1369,47 @@ async def s_listing_view(c: Ctx):
     c.check("returning from hex lands back on the listing (not a func view)",
             app._active == "listing" and c.lst.display, f"active={app._active}")
 
+    # 'd' defines typed data over an undefined run. Synthesize the run
+    # deterministically: undefine a data head, then re-type it via the prompt.
+    dhead = next((c.lst.model.get(i) for i in range(min(c.lst.total, 200))
+                  if c.lst.model.get(i) and c.lst.model.get(i).kind == "data"
+                  and (c.lst.model.get(i).size or 0) >= 4), None)
+    if dhead is None:
+        c.check("found a data head to re-type", False)
+        return
+    dea = dhead.ea
+    try:
+        c.prog.undefine(dea, size=4)
+        c.prog.bump_items()
+        # reopen the listing so the model reflects the new undefined run
+        await c.goto_ui(hex(dea))
+        await c.wait(lambda: app._active == "listing" and c.lst.total > 0
+                     and c.lst.model.index_of_ea(dea) >= 0, 25)
+        ui = c.lst.model.index_of_ea(dea)
+        c.check("undefining a data head yields an unknown run in the listing",
+                ui >= 0 and c.lst.model.get(ui).kind == "unknown",
+                f"kind={c.lst.model.get(ui).kind if ui>=0 else None}")
+        c.lst.focus()
+        c.lst.cursor = ui
+        await c.pause(0.05)
+        await c.press("d")
+        await c.pause(0.1)
+        mdi = app.query_one("#makedata", Input)
+        c.check("'d' opens the make-data prompt prefilled with a type",
+                mdi.display and bool(mdi.value), f"display={mdi.display} val={mdi.value!r}")
+        mdi.value = "char[4]"
+        await c.press("enter")
+        await c.wait(lambda: app._active == "listing"
+                     and c.lst.model.index_of_ea(dea) >= 0
+                     and c.lst.model.get(c.lst.model.index_of_ea(dea)) is not None
+                     and c.lst.model.get(c.lst.model.index_of_ea(dea)).kind == "data", 25)
+        di = c.lst.model.index_of_ea(dea)
+        c.check("'d' turns the undefined run into a typed data item",
+                di >= 0 and c.lst.model.get(di).kind == "data",
+                f"kind={c.lst.model.get(di).kind if di>=0 else None}")
+    finally:
+        c.prog.bump_items()
+
 
 # --------------------------------------------------------------------------- #
 # Runner

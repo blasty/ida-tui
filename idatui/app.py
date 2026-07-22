@@ -145,6 +145,14 @@ class EditItemRequested(Message):
         self.kind = kind
 
 
+class MakeDataRequested(Message):
+    """The listing view asks to define typed data (IDA 'd') at the current head."""
+
+    def __init__(self, view) -> None:  # type: ignore[no-untyped-def]
+        super().__init__()
+        self.view = view
+
+
 class NavMixin:
     """Follow / xrefs actions shared by the code views (bindings live on each
     view since Textual only merges BINDINGS from DOMNode subclasses)."""
@@ -891,6 +899,7 @@ class ListingView(SearchMixin, NavMixin, ColumnCursor, ScrollView, can_focus=Tru
         Binding("home", "goto_top", "Top", show=False),
         Binding("G,end", "goto_bottom", "Bottom", show=False),
         Binding("c", "define_code", "Code", show=False),
+        Binding("d", "make_data", "Data", show=False),
         Binding("p", "define_func", "Func", show=False),
         Binding("u", "undefine", "Undef", show=False),
         *SearchMixin.SEARCH_BINDINGS,
@@ -1058,6 +1067,12 @@ class ListingView(SearchMixin, NavMixin, ColumnCursor, ScrollView, can_focus=Tru
 
     def action_undefine(self) -> None:
         self.post_message(EditItemRequested(self, "undef"))
+
+    def action_make_data(self) -> None:
+        self.post_message(MakeDataRequested(self))
+
+    def cur_head(self) -> Head | None:
+        return self._head(self.cursor)
 
     def action_cursor_down(self) -> None:
         self._move(1)
@@ -1962,6 +1977,10 @@ class IdaTui(App):
         height: 1; border: none; padding: 0 1;
         background: $accent-darken-2; color: $text;
     }
+    #makedata {
+        height: 1; border: none; padding: 0 1;
+        background: $secondary-darken-2; color: $text;
+    }
     #goto {
         height: 1; border: none; padding: 0 1;
         background: $primary-darken-3; color: $text;
@@ -2037,6 +2056,7 @@ class IdaTui(App):
         self._rename_ctx: tuple[object | None, str] = (None, "")
         self._comment_ctx: tuple[object | None, int, str] = (None, 0, "")
         self._retype_ctx: tuple[object | None, str, int, str] = (None, "", 0, "")
+        self._makedata_ctx: tuple[object | None, int] = (None, 0)
         self._xref_focus_name: str | None = None
         self._dirty = False
 
@@ -2072,6 +2092,10 @@ class IdaTui(App):
         ti.display = False
         ti.can_focus = False
         yield ti
+        mdi = Input(id="makedata")
+        mdi.display = False
+        mdi.can_focus = False
+        yield mdi
         gi = Input(id="goto")
         gi.display = False
         gi.can_focus = False
@@ -2823,6 +2847,57 @@ class IdaTui(App):
         what = "prototype" if kind == "func" else f"'{word}'"
         self._status(f"retyped {what}   (Ctrl+S to save)")
 
+    # -- typed data definition (make_data, IDA 'd') ----------------------- #
+    @staticmethod
+    def _default_data_type(head) -> str:  # type: ignore[no-untyped-def]
+        """A sensible prefill C type for defining data over ``head``."""
+        sz = getattr(head, "size", 0) or 0
+        return {1: "unsigned __int8", 2: "unsigned __int16",
+                4: "unsigned __int32", 8: "unsigned __int64"}.get(
+                    sz, f"char[{sz}]" if sz > 0 else "unsigned __int8")
+
+    def on_make_data_requested(self, msg: MakeDataRequested) -> None:
+        view = msg.view
+        ea = view._cursor_ea() if isinstance(view, ListingView) else None
+        if ea is None:
+            self._status("no address on this line to define data")
+            return
+        self._makedata_ctx = (view, ea)
+        self.query_one("#status", Static).display = False
+        inp = self.query_one("#makedata", Input)
+        inp.placeholder = (f"data type @ {ea:#x} (e.g. int, char[16], my_struct)"
+                           "  —  Enter=apply  Esc=cancel")
+        inp.can_focus = True
+        inp.display = True
+        head = view.cur_head() if isinstance(view, ListingView) else None
+        inp.value = self._default_data_type(head) if head is not None else "int"
+        inp.focus()
+
+    def _end_makedata(self) -> None:
+        inp = self.query_one("#makedata", Input)
+        inp.display = False
+        inp.can_focus = False
+        self.query_one("#status", Static).display = True
+        view = self._makedata_ctx[0]
+        if view is not None:
+            view.focus()
+
+    @work(thread=True, exclusive=True, group="makedata")
+    def _do_make_data(self, ea: int, type_decl: str) -> None:  # worker context
+        assert self.program is not None
+        try:
+            self.program.make_data(ea, type_decl)
+        except Exception as e:  # noqa: BLE001
+            self.app.call_from_thread(self._status, f"make data: {e}")
+            return
+        self.program.bump_items()
+        name = self.program.region_label(ea)
+        lm = self.program.listing(ea)
+        idx = max(lm.ensure_ea(ea), 0) if lm is not None else 0
+        self.app.call_from_thread(self._open_at, ea, name, idx, False, -1, 0, True)
+        self.app.call_from_thread(
+            self._edit_item_done, f"data ({type_decl})", ea)
+
     @work(thread=True, exclusive=True, group="rename")
     def _do_rename(self, view, old: str, new: str) -> None:  # type: ignore[no-untyped-def]
         assert self.program is not None
@@ -3094,6 +3169,11 @@ class IdaTui(App):
             event.prevent_default()
             self._end_retype()
             return
+        if self.query_one("#makedata", Input).display:
+            event.stop()
+            event.prevent_default()
+            self._end_makedata()
+            return
         if self.query_one("#goto", Input).display:
             event.stop()
             event.prevent_default()
@@ -3141,6 +3221,12 @@ class IdaTui(App):
             self._end_retype()
             if view is not None and value:
                 self._do_retype(kind, subject, word, value)
+            return
+        if inp.id == "makedata":
+            view, ea = self._makedata_ctx
+            self._end_makedata()
+            if view is not None and value:
+                self._do_make_data(ea, value)
             return
         if inp.id == "goto":
             self._end_goto()

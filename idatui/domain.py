@@ -1071,6 +1071,17 @@ class Program:
         if res.get("error"):
             raise IDAToolError(f"undefine @ {ea:#x}: {res['error']}")
 
+    def make_data(self, ea: int, type_decl: str, name: str | None = None) -> None:
+        """Create a typed data item at ``ea`` (IDA's 'd', but typed). ``type_decl``
+        is a C type, e.g. 'int', 'unsigned __int32', 'char[5]', 'my_struct'."""
+        item: dict = {"addr": hex(ea), "type": type_decl}
+        if name:
+            item["name"] = name
+        res = self._first_result(self.client.call("make_data", items=[item]))
+        if res.get("ok") is False or res.get("error"):
+            raise IDAToolError(
+                f"make data @ {ea:#x}: {res.get('error') or 'rejected'}")
+
     def region_label(self, ea: int) -> str:
         """Display name for a non-function address (segment-qualified)."""
         try:

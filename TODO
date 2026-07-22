@@ -25,9 +25,12 @@ hard:
     -> M2 done: ListingView — virtualized flat listing (code+data+undefined,
        kind-styled), wired into nav/follow/xrefs/hex/edit-verbs. region views
        now use it (not the DisasmModel stopgap).
-    -> next: M3 data typing in .data (`d`/make_data with a type prompt, struct-
-       typed data, string/dup coalescing for big undefined runs); M4 optionally
-       unify the function disasm view as a filtered listing.
+    -> M3 done: `d` = typed make_data prompt in the listing (define data in
+       .data with any C type: int, char[16], my_struct, ...); undefined byte
+       runs coalesce into `db N dup(?)` rows so big .bss doesn't explode.
+    -> next (optional): M4 unify the function disasm view as a filtered listing;
+       struct-typed data expansion / string auto-detection; back-paging in the
+       ListingModel (currently loads a segment forward via load_all).
 
 crazy:
 [ ] multi/split view ala ghidra?
