@@ -1581,6 +1581,8 @@ def _fuzzy(name: str, q: str):
     matched character indices (for highlighting)."""
     if not q:
         return (0.0, ())
+    if not name:  # defensive: never assume a symbol has a name
+        return None
     nl = name.lower()
     pos: list[int] = []
     i = 0

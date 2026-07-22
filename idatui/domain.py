@@ -58,7 +58,14 @@ class Func:
 
     @classmethod
     def from_raw(cls, d: dict) -> "Func":
-        return cls(addr=_as_int(d["addr"]), name=d["name"], size=_as_int(d["size"]))
+        addr = _as_int(d["addr"])
+        name = d.get("name")
+        # An unnamed function (server returns null/empty) must still have a
+        # usable string name — synthesize IDA's sub_ADDR so every consumer
+        # (palette, sort, rename prefill) can treat name as a str.
+        if not name:
+            name = f"sub_{addr:X}"
+        return cls(addr=addr, name=name, size=_as_int(d.get("size", 0)))
 
 
 @dataclass(frozen=True)
