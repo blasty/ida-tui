@@ -188,8 +188,10 @@ class Ctx:
     async def boot(self):
         app = self.app
         await self.wait(lambda: self.table.row_count > 0, 60)
+        # Load is done when the index is complete (robust vs the status line,
+        # which startup auto-land immediately overwrites with the landed fn).
         await self.wait(
-            lambda: "functions" in self.status() and "…" not in self.status(), 60)
+            lambda: app._func_index is not None and app._func_index.complete, 60)
         if app._func_index is not None and not app._func_index.complete:
             app._func_index.load_all()
 
@@ -231,9 +233,40 @@ async def s_startup(c: Ctx):
     await c.reveal_pane()
     c.check("function pane width is capped (doesn't eat the screen)",
             left.size.width <= 44, f"width={left.size.width}")
-    c.check("function load completed (status settled)",
-            "functions" in c.status() and "…" not in c.status(), c.status())
+    c.check("function load completed (index complete)",
+            c.app._func_index is not None and c.app._func_index.complete, c.status())
     print(f"    {c.table.row_count} functions loaded")
+
+
+@scenario("auto_land")
+async def s_auto_land(c: Ctx):
+    """Startup lands on main()/an entry function when present, else pops the
+    symbol picker — never a blank pane."""
+    app = c.app
+    # simulate a fresh startup landing
+    for _ in range(3):
+        if len(app.screen_stack) > 1:
+            app.pop_screen()
+            await c.pause(0.05)
+    app._cur = None
+    app._did_auto_land = False
+    fn = app._entry_func()
+    app._auto_land()
+    await c.pause(0.2)
+    if fn is not None:
+        await c.wait(lambda: app._cur is not None and app._cur.ea == fn.addr, 20)
+        c.check("auto-land jumps to the entry function (main) when present",
+                app._cur is not None and app._cur.ea == fn.addr,
+                f"entry={fn.name}@{fn.addr:#x} cur={app._cur}")
+    else:
+        await c.wait(lambda: isinstance(app.screen, SymbolPalette), 10)
+        c.check("auto-land pops the symbol picker when there's no entry fn",
+                isinstance(app.screen, SymbolPalette), f"screen={app.screen}")
+        app.pop_screen()
+    # guard fires once: a second call is a no-op
+    prev = app._cur
+    app._auto_land()
+    c.check("auto-land is idempotent (guarded)", app._cur is prev)
 
 
 @scenario("palette")

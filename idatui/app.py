@@ -2045,6 +2045,7 @@ class IdaTui(App):
         self._ka = None
         self._nav: list[NavEntry] = []
         self._func_index = None  # the unfiltered FunctionIndex (source of truth)
+        self._did_auto_land = False  # startup jump-to-main/picker fires once
         self._filter_term = ""
         self._pending_filter = ""
         self._filter_timer = None
@@ -2215,6 +2216,39 @@ class IdaTui(App):
         else:
             self.app.call_from_thread(
                 self._status, f"{module} — {len(idx)} functions   (Ctrl+N: find symbol)")
+        # Land somewhere useful instead of an empty pane: main() if present,
+        # otherwise pop the fuzzy symbol picker.
+        self.app.call_from_thread(self._auto_land)
+
+    # -- initial landing --------------------------------------------------- #
+    #: function names tried (in order) as the startup landing spot
+    ENTRY_NAMES = ("main", "_main", "wmain", "WinMain", "wWinMain")
+
+    def _auto_land(self) -> None:
+        """On startup, once functions are loaded and nothing is open yet, jump to
+        main() if it exists; else open the symbol picker so you're never staring
+        at a blank pane. Runs once (guarded by ``_cur``) and never steals focus
+        from a user who already navigated."""
+        if self._cur is not None or self._did_auto_land or self._func_index is None:
+            return
+        self._did_auto_land = True
+        fn = self._entry_func()
+        if fn is not None:
+            self._open_function(fn.addr, fn.name)
+        else:
+            self.action_symbols()
+
+    def _entry_func(self) -> Func | None:
+        """The best startup landing function (exact-name match against
+        ENTRY_NAMES, in priority order), or None."""
+        idx = self._func_index
+        if idx is None:
+            return None
+        by_name = {f.name: f for f in idx.all_loaded()}
+        for nm in self.ENTRY_NAMES:
+            if nm in by_name:
+                return by_name[nm]
+        return None
 
     def _module(self) -> str:
         try:
