@@ -262,18 +262,26 @@ def heads(
         cursor = {"done": True} if pea == idaapi.BADADDR or pea < lo else {"prev": hex(pea)}
         return {"addr": str(addr), "heads": rows, "cursor": cursor}
 
+    # Walk by item END (not next_head): next_head SKIPS undefined bytes, but a
+    # flat listing must show them (IDA renders undefined as `db ?` lines, and
+    # navigating to an unmarked address must land ON it). get_item_end steps by
+    # the item's size for code/data and by 1 through undefined bytes.
+    def _step(e):
+        nxt = ida_bytes.get_item_end(e)
+        return nxt if nxt > e else e + 1
+
     ea = ida_bytes.get_item_head(start)
     for _ in range(offset):
         if ea >= hi or ea == idaapi.BADADDR:
             break
-        ea = ida_bytes.next_head(ea, hi)
+        ea = _step(ea)
     more = False
     while ea != idaapi.BADADDR and ea < hi:
         if len(rows) >= count:
             more = True
             break
         rows.append(_idatui_head_row(ea))
-        ea = ida_bytes.next_head(ea, hi)
+        ea = _step(ea)
     cursor = {"next": hex(ea)} if more else {"done": True}
     return {"addr": str(addr), "heads": rows, "cursor": cursor}
 '''

@@ -28,7 +28,7 @@ from typing import Any
 from rich.console import Console
 
 from ._sync import drain, settle
-from .app import DecompView, DisasmView, HexView
+from .app import DecompView, DisasmView, HexView, ListingView
 
 PROTO_VERSION = 1
 TYPE_DELAY_MS = 35  # default per-char delay for high-level typed ops (aesthetic)
@@ -96,6 +96,8 @@ def _active_widget(app):
         return app.query_one(HexView)
     if app._active == "disasm":
         return app.query_one(DisasmView)
+    if app._active == "listing":
+        return app.query_one(ListingView)
     return app.query_one(DecompView)
 
 

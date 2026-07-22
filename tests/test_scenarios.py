@@ -25,7 +25,7 @@ import traceback
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from idatui.app import (  # noqa: E402
     ConfirmScreen, DecompView, DisasmView, FunctionsPanel, HexView, IdaTui,
-    StructEditor, SymbolPalette, XrefsScreen,
+    ListingView, StructEditor, SymbolPalette, XrefsScreen,
 )
 from textual.widgets import (  # noqa: E402
     DataTable, Footer, Input, OptionList, Static, TextArea,
@@ -98,6 +98,10 @@ class Ctx:
     @property
     def dec(self):
         return self.app.query_one(DecompView)
+
+    @property
+    def lst(self):
+        return self.app.query_one(ListingView)
 
     @property
     def hex(self):
@@ -1271,29 +1275,34 @@ async def s_region_define(c: Ctx):
         c.check("function removed by undefine",
                 c.prog.function_of(addr) is None, "still a function")
 
-        # navigate there via the real 'g' prompt -> opens a REGION, not refused
+        # navigate there via the real 'g' prompt -> opens the flat LISTING view
+        # (a non-function region), not refused
         await c.goto_ui(hex(addr))
         await c.wait(lambda: app._cur is not None and app._cur.ea == addr, 25)
-        c.check("goto to a non-function address opens a region (not refused)",
+        c.check("goto to a non-function address opens the listing view (not refused)",
                 app._cur is not None and app._cur.is_region
-                and app._active == "disasm",
+                and app._active == "listing" and c.lst.display,
                 f"cur={app._cur} active={app._active} status={c.status()!r}")
-        await c.wait(lambda: c.dis.total > 0 and c.dis._cursor_ea() is not None, 25)
-        c.check("region listing renders lines with a resolvable cursor address",
-                c.dis.total > 0 and c.dis._cursor_ea() == addr,
-                f"total={c.dis.total} cur_ea={c.dis._cursor_ea()}")
+        await c.wait(lambda: c.lst.total > 0 and c.lst._cursor_ea() is not None, 25)
+        c.check("listing renders heads and the cursor sits on the target address",
+                c.lst.total > 0 and c.lst._cursor_ea() == addr,
+                f"total={c.lst.total} cur_ea={c.lst._cursor_ea()}")
+        # the flat listing spans the whole segment, not just this function
+        seg = c.prog.segment_bounds(addr)
+        c.check("listing spans the whole segment (more heads than one function)",
+                seg is not None and c.lst.total > 1, f"total={c.lst.total} seg={seg}")
 
-        # cursor on the entry line; 'p' (re)creates the function
-        c.dis.focus()
-        c.dis.cursor, c.dis.cursor_x = 0, 0
+        # 'p' on the entry head (re)creates the function and UPGRADES to DisasmView
+        c.lst.focus()
+        c.lst.cursor, c.lst.cursor_x = c.lst.model.index_of_ea(addr), 0
         await c.pause(0.05)
         await c.press("p")
         await c.wait(lambda: c.prog.function_of(addr) is not None
                      and app._cur is not None and not app._cur.is_region, 25)
-        c.check("'p' creates a function and upgrades the region to a function view",
-                c.prog.function_of(addr) is not None
-                and not app._cur.is_region and app._cur.ea == addr,
-                f"fn={c.prog.function_of(addr)} cur={app._cur}")
+        c.check("'p' creates a function and upgrades the listing to a function view",
+                c.prog.function_of(addr) is not None and not app._cur.is_region
+                and app._cur.ea == addr and app._active in ("disasm", "decomp"),
+                f"fn={c.prog.function_of(addr)} cur={app._cur} active={app._active}")
     finally:
         # idempotency: guarantee the function is back even if a check failed
         if c.prog.function_of(addr) is None:
@@ -1302,6 +1311,63 @@ async def s_region_define(c: Ctx):
             except Exception:  # noqa: BLE001
                 pass
         c.prog.bump_items()
+
+
+@scenario("listing_view")
+async def s_listing_view(c: Ctx):
+    """The flat listing view over a data segment: renders code AND data heads,
+    navigates, and reaches hex — without any function in play."""
+    app = c.app
+    # find a data segment (has a non-code head somewhere) via the listing itself
+    data_ea = None
+    for start, end, name in c.prog.sections():
+        if start >= end:
+            continue
+        lm = c.prog.listing(start)
+        if lm is None:
+            continue
+        lm.ensure(40)
+        if any(h.kind == "data" for h in lm.window(0, 40)):
+            data_ea = start
+            break
+    if data_ea is None:
+        c.check("found a segment with data items", False)
+        return
+
+    await c.goto_ui(hex(data_ea))
+    await c.wait(lambda: app._cur is not None and app._active == "listing"
+                 and c.lst.total > 0, 25)
+    c.check("navigating to a data segment opens the listing view",
+            app._active == "listing" and c.lst.display and c.lst.total > 0,
+            f"active={app._active} total={c.lst.total}")
+    kinds = {h.kind for h in c.lst.model.window(0, 40)}
+    c.check("listing shows data heads (not just code)", "data" in kinds, str(kinds))
+
+    # a rendered data line carries the item text (e.g. db/dd/string)
+    c.lst.focus()
+    first_data = next((i for i in range(min(c.lst.total, 60))
+                       if c.lst.model.get(i) and c.lst.model.get(i).kind == "data"), None)
+    c.check("a data head exists in the first screenful", first_data is not None,
+            f"total={c.lst.total}")
+    if first_data is not None:
+        c.lst.cursor = first_data
+        await c.pause(0.05)
+        plain = c.lst._line_plain(first_data)
+        c.check("data line renders its item text", bool(plain and plain.strip()),
+                f"plain={plain!r}")
+        c.check("listing cursor reports the head address",
+                c.lst._cursor_ea() == c.lst.model.get(first_data).ea, str(c.lst._cursor_ea()))
+
+    # backslash from the listing opens hex at the cursor address; and back
+    cur_ea = c.lst._cursor_ea()
+    await c.press("backslash")
+    await c.wait(lambda: app._active == "hex" and c.hex.display, 15)
+    c.check("backslash from the listing opens the hex view", app._active == "hex",
+            f"active={app._active}")
+    await c.press("backslash")
+    await c.wait(lambda: app._active == "listing", 15)
+    c.check("returning from hex lands back on the listing (not a func view)",
+            app._active == "listing" and c.lst.display, f"active={app._active}")
 
 
 # --------------------------------------------------------------------------- #

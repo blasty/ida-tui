@@ -43,7 +43,7 @@ from textual.widgets.option_list import Option
 from .highlight import highlight_c
 
 from .client import IDAClient, IDAToolError
-from .domain import DisasmModel, Func, Program, Struct
+from .domain import DisasmModel, Func, Head, ListingModel, Program, Struct
 
 # Styles for the disassembly listing.
 _S_ADDR = Style(color="grey58")
@@ -51,6 +51,8 @@ _S_LABEL = Style(color="yellow", bold=True)
 _S_INSN = Style(color="white")
 _S_MNEM = Style(color="cyan")
 _S_OPBYTES = Style(color="grey50")  # raw opcode bytes column
+_S_DATA = Style(color="#c8a15a")   # data items in the flat listing (db/dw/strings)
+_S_UNK = Style(color="grey54", italic=True)  # undefined bytes in the flat listing
 _S_CURSOR = Style(bgcolor="grey30")
 _S_DIM = Style(color="grey42", italic=True)
 _S_MATCH = Style(bgcolor="#7a5c00")  # all search matches
@@ -845,6 +847,207 @@ class DisasmView(SearchMixin, NavMixin, ColumnCursor, ScrollView, can_focus=True
             return None
         line = self.model.cached_line(self.cursor)
         return line.ea if line else None
+
+    # -- item structure edits (IDA c/p/u) --------------------------------- #
+    def action_define_code(self) -> None:
+        self.post_message(EditItemRequested(self, "code"))
+
+    def action_define_func(self) -> None:
+        self.post_message(EditItemRequested(self, "func"))
+
+    def action_undefine(self) -> None:
+        self.post_message(EditItemRequested(self, "undef"))
+
+    def action_cursor_down(self) -> None:
+        self._move(1)
+
+    def action_cursor_up(self) -> None:
+        self._move(-1)
+
+    def action_goto_top(self) -> None:
+        self._move(-self.total)
+
+    def action_goto_bottom(self) -> None:
+        self._move(self.total)
+
+
+# --------------------------------------------------------------------------- #
+# Virtualized flat listing view (code + data + undefined, per segment)
+# --------------------------------------------------------------------------- #
+class ListingView(SearchMixin, NavMixin, ColumnCursor, ScrollView, can_focus=True):
+    """A line-virtualized *flat* listing over one segment: code, data and
+    undefined heads interleaved (IDA's disassembly view), unlike ``DisasmView``
+    which is bounded to one function. Backed by ``ListingModel`` (the ``heads``
+    server tool). Used for non-function regions and raw segment browsing.
+    """
+
+    BINDINGS = [
+        Binding("j,down", "cursor_down", "Down", show=False),
+        Binding("k,up", "cursor_up", "Up", show=False),
+        Binding("ctrl+d", "half_page(1)", "½↓", show=False),
+        Binding("ctrl+u", "half_page(-1)", "½↑", show=False),
+        Binding("pagedown", "page(1)", "PgDn", show=False),
+        Binding("pageup", "page(-1)", "PgUp", show=False),
+        Binding("home", "goto_top", "Top", show=False),
+        Binding("G,end", "goto_bottom", "Bottom", show=False),
+        Binding("c", "define_code", "Code", show=False),
+        Binding("p", "define_func", "Func", show=False),
+        Binding("u", "undefine", "Undef", show=False),
+        *SearchMixin.SEARCH_BINDINGS,
+        *NavMixin.NAV_BINDINGS,
+        *ColumnCursor.COL_BINDINGS,
+    ]
+
+    cursor = reactive(0, repaint=False)
+    cursor_x = reactive(0, repaint=False)
+
+    class CursorMoved(Message):
+        """Posted when the listing cursor moves; carries the head ea."""
+
+        def __init__(self, index: int, ea: int | None) -> None:
+            super().__init__()
+            self.index = index
+            self.ea = ea
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.model: ListingModel | None = None
+        self.total = 0
+        self._name = ""
+        self._pending_scroll_y: int | None = None
+        self._term = ""
+        self._matches: list[int] = []
+        self._ranges: dict[int, list[tuple[int, int]]] = {}
+
+    # -- text helpers ------------------------------------------------------ #
+    def _head(self, idx: int) -> Head | None:
+        return self.model.get(idx) if self.model is not None else None
+
+    @staticmethod
+    def _name_prefix(h: Head) -> str:
+        return f"{h.name}  " if h.name else ""
+
+    def _line_plain(self, idx: int) -> str | None:
+        h = self._head(idx)
+        if h is None:
+            return None
+        return f"{h.ea:08X}  " + self._name_prefix(h) + h.text
+
+    # -- public API -------------------------------------------------------- #
+    def load(self, model: ListingModel, name: str, cursor: int = 0,
+             cursor_x: int = 0, scroll_y: int | None = None) -> None:
+        self.model = model
+        self._name = name
+        self.total = 0
+        self.cursor = cursor
+        self.cursor_x = cursor_x
+        self._pending_scroll_y = scroll_y
+        self._matches = []
+        self._ranges = {}
+        self._prime()
+
+    @work(thread=True, exclusive=True, group="listing-prime")
+    def _prime(self) -> None:
+        model = self.model
+        if model is None:
+            return
+        model.load_all()  # walk the whole segment's heads off the UI loop
+        self.app.call_from_thread(self._on_primed, len(model))
+
+    def _on_primed(self, total: int) -> None:
+        if self.model is None:
+            return
+        self.total = total
+        self.virtual_size = Size(0, total)
+        self.cursor = max(0, min(self.cursor, max(total - 1, 0)))
+        self._clamp_x()
+        if self._pending_scroll_y is not None and self._pending_scroll_y >= 0:
+            self._apply_scroll(min(self._pending_scroll_y, max(total - 1, 0)))
+        else:
+            self._scroll_cursor_into_view()
+        self._pending_scroll_y = None
+        self.refresh()
+        self.post_message(ListingView.CursorMoved(self.cursor, self._cursor_ea()))
+
+    # -- search hooks (all heads are in memory after prime) --------------- #
+    def _search_line_count(self) -> int:
+        return self.total
+
+    def _search_line_text(self, i: int) -> str | None:
+        return self._line_plain(i)
+
+    def _search_ensure(self, done) -> None:
+        done()
+
+    # -- rendering --------------------------------------------------------- #
+    def render_line(self, y: int) -> Strip:
+        model = self.model
+        width = self.size.width
+        if model is None or self.total == 0:
+            return Strip([Segment("".ljust(width), _S_DIM)])
+        top = round(self.scroll_offset.y)
+        idx = top + y
+        if idx >= self.total:
+            return Strip([Segment("".ljust(width), _S_INSN)])
+        h = model.get(idx)
+        if h is None:
+            strip = Strip([Segment(f"  {idx:>8}  …", _S_DIM)])
+        else:
+            segs: list[Segment] = [Segment(f"{h.ea:08X}  ", _S_ADDR)]
+            if h.name:
+                segs.append(Segment(f"{h.name}  ", _S_LABEL))
+            if h.kind == "code":
+                mnem, _, rest = h.text.partition(" ")
+                segs.append(Segment(mnem, _S_MNEM))
+                if rest:
+                    segs.append(Segment(" " + rest, _S_INSN))
+            elif h.kind == "data":
+                segs.append(Segment(h.text, _S_DATA))
+            else:
+                segs.append(Segment(h.text, _S_UNK))
+            strip = Strip(segs)
+        if idx in self._ranges:
+            strip = _overlay_ranges(strip, self._ranges[idx], self._match_style(idx))
+        if idx == self.cursor:
+            strip = _cursor_decorate(strip, self._line_plain(idx) or "", self.cursor_x)
+        return strip.adjust_cell_length(width, _S_INSN)
+
+    # -- navigation -------------------------------------------------------- #
+    def _visible_height(self) -> int:
+        return max(self.size.height, 1)
+
+    def _scroll_cursor_into_view(self) -> None:
+        height = self._visible_height()
+        top = round(self.scroll_offset.y)
+        if self.cursor < top:
+            self.scroll_to(y=self.cursor, animate=False)
+        elif self.cursor >= top + height:
+            self.scroll_to(y=max(self.cursor - height + 1, 0), animate=False)
+
+    def _move(self, delta: int) -> None:
+        if self.total == 0:
+            return
+        old = self.cursor
+        before = round(self.scroll_offset.y)
+        self.cursor = max(0, min(self.total - 1, self.cursor + delta))
+        self._clamp_x()
+        self._scroll_cursor_into_view()
+        if round(self.scroll_offset.y) != before:
+            self.refresh()
+        else:
+            _refresh_lines(self, old, self.cursor)
+        self.post_message(ListingView.CursorMoved(self.cursor, self._cursor_ea()))
+
+    def _after_cursor_move(self) -> None:
+        self.post_message(ListingView.CursorMoved(self.cursor, self._cursor_ea()))
+
+    def _cursor_ea(self) -> int | None:
+        h = self._head(self.cursor)
+        return h.ea if h else None
+
+    def _next_ea(self) -> int | None:
+        h = self._head(self.cursor + 1)
+        return h.ea if h else None
 
     # -- item structure edits (IDA c/p/u) --------------------------------- #
     def action_define_code(self) -> None:
@@ -1741,6 +1944,7 @@ class IdaTui(App):
     #func-filter { dock: top; }
     DisasmView { width: 1fr; padding: 0 1; }
     DecompView { width: 1fr; }
+    ListingView { width: 1fr; padding: 0 1; }
     HexView { width: 1fr; padding: 0 1; }
     #search {
         height: 1; border: none; padding: 0 1;
@@ -1846,6 +2050,9 @@ class IdaTui(App):
             dis.display = False
             yield dis
             yield DecompView()  # pseudocode is the default view
+            lst = ListingView()
+            lst.display = False
+            yield lst
             hx = HexView()
             hx.display = False
             yield hx
@@ -2114,8 +2321,13 @@ class IdaTui(App):
         if self._cur is None:
             return
         if self._active == "hex":
-            self._active = self._pref
+            self._active = self._code_mode()
             self._show_active()
+            return
+        if self._active == "listing":
+            # A non-function region has no pseudocode to toggle to.
+            self._status(f"{self._cur.name} — flat listing (no function here); "
+                         "'p' to define one")
             return
         self._active = "decomp" if self._active == "disasm" else "disasm"
         self._pref = self._active  # an explicit toggle sets the preference
@@ -2127,11 +2339,13 @@ class IdaTui(App):
         if self._cur is None or self.program is None:
             return
         if self._active == "hex":
-            self._active = self._pref
+            self._active = self._code_mode()
             self._show_active()
             return
         if self._active == "disasm":
             ea = self.query_one(DisasmView)._cursor_ea()
+        elif self._active == "listing":
+            ea = self.query_one(ListingView)._cursor_ea()
         else:
             dec = self.query_one(DecompView)
             ea = dec._line_ea(dec.cursor)
@@ -2201,6 +2415,10 @@ class IdaTui(App):
             nxt = view.model.cached_line(view.cursor + 1) if view.model else None
             if ea is not None:
                 self._follow_disasm(ea, word, nxt.ea if nxt else None)
+        elif isinstance(view, ListingView):
+            ea = view._cursor_ea()
+            if ea is not None:
+                self._follow_disasm(ea, word, view._next_ea())
         elif isinstance(view, DecompView) and view._texts:
             self._follow_decomp(view._texts[view.cursor], word,
                                 view._line_ea(view.cursor))
@@ -2215,6 +2433,10 @@ class IdaTui(App):
                 # entry for the site we invoked xrefs from.
                 nxt = view.model.cached_line(view.cursor + 1) if view.model else None
                 self._xrefs_disasm(ea, word, ea, nxt.ea if nxt else None)
+        elif isinstance(view, ListingView):
+            ea = view._cursor_ea()
+            if ea is not None:
+                self._xrefs_disasm(ea, word, ea, view._next_ea())
         elif isinstance(view, DecompView) and view._texts:
             here = view._line_ea(view.cursor)
             end = None
@@ -2436,7 +2658,7 @@ class IdaTui(App):
     # -- comments ---------------------------------------------------------- #
     def _line_ea_for(self, view) -> int | None:  # type: ignore[no-untyped-def]
         """Address of the line under the cursor in either code view."""
-        if isinstance(view, DisasmView):
+        if isinstance(view, (DisasmView, ListingView)):
             return view._cursor_ea()
         if isinstance(view, DecompView):
             return view._line_ea(view.cursor)
@@ -2680,7 +2902,8 @@ class IdaTui(App):
 
     # -- item structure edits (IDA c/p/u) --------------------------------- #
     def on_edit_item_requested(self, msg: EditItemRequested) -> None:
-        ea = msg.view._cursor_ea() if isinstance(msg.view, DisasmView) else None
+        ea = (msg.view._cursor_ea()
+              if isinstance(msg.view, (DisasmView, ListingView)) else None)
         if ea is None:
             self._status("no address on this line to (re)define")
             return
@@ -2713,8 +2936,8 @@ class IdaTui(App):
                 self._open_at, fn.addr, fn.name, idx, False, -1, 0, False)
         else:
             name = self.program.region_label(ea)
-            model = self.program.disasm(ea, name)
-            idx = max(model.index_of_ea(ea), 0)
+            lm = self.program.listing(ea)
+            idx = max(lm.ensure_ea(ea), 0) if lm is not None else 0
             self.app.call_from_thread(
                 self._open_at, ea, name, idx, False, -1, 0, True)
         self.app.call_from_thread(self._edit_item_done, verb, ea)
@@ -2755,9 +2978,10 @@ class IdaTui(App):
             # rather than refusing. This is where you land on code IDA didn't
             # mark, or on data — use c/p to define it (see _do_edit_item).
             name = self.program.region_label(ea)
-            self.program.disasm(ea, name)  # warm the block cache off the UI loop
+            lm = self.program.listing(ea)
+            idx = max(lm.ensure_ea(ea), 0) if lm is not None else 0
             self.app.call_from_thread(
-                self._open_at, ea, name, 0, push, -1, 0, True)
+                self._open_at, ea, name, idx, push, -1, 0, True)
             return
         model = self.program.disasm(fn.addr, fn.name)
         idx = 0 if ea == fn.addr else model.index_of_ea(ea)
@@ -2989,14 +3213,32 @@ class IdaTui(App):
             self._nav.append(entry)
         self._open_entry(entry, push=False)
 
+    def _code_mode(self) -> str:
+        """The code view to return to from hex: the flat listing for a region,
+        else the preferred function view (disasm/decomp)."""
+        if self._cur is not None and self._cur.is_region:
+            return "listing"
+        return self._pref
+
     def _open_entry(self, entry: NavEntry, push: bool) -> None:
         if self.program is None:
             return
         self._cur = entry
+        # A region (not inside a function) has no pseudocode: show the flat
+        # segment listing (code + data + undefined) instead of the func views.
+        if entry.is_region:
+            self._active = "listing"
+            lm = self.program.listing(entry.ea)
+            sy = entry.scroll_y if entry.scroll_y >= 0 else None
+            if lm is not None:
+                self.query_one(ListingView).load(
+                    lm, entry.name, cursor=entry.cursor,
+                    cursor_x=entry.cursor_x, scroll_y=sy)
+            self._show_active()
+            return
         # Each open honours the preferred view; a decomp failure last time fell
         # back to disasm without changing the preference, so retry decomp here.
-        # A region (not inside a function) has no pseudocode -> force disasm.
-        self._active = "disasm" if entry.is_region else self._pref
+        self._active = self._pref
         model = self.program.disasm(entry.ea, entry.name)
         sy = entry.scroll_y if entry.scroll_y >= 0 else None
         self.query_one(DisasmView).load(
@@ -3014,9 +3256,14 @@ class IdaTui(App):
     def _show_active(self) -> None:
         dis = self.query_one(DisasmView)
         dec = self.query_one(DecompView)
+        lst = self.query_one(ListingView)
         hx = self.query_one(HexView)
-        dis.display = dec.display = hx.display = False
-        if self._active == "disasm":
+        dis.display = dec.display = lst.display = hx.display = False
+        if self._active == "listing":
+            lst.display = True
+            lst.focus()
+            self._status_for_cur("listing")
+        elif self._active == "disasm":
             dis.display = True
             dis.focus()
             self._status_for_cur("disasm")
@@ -3069,7 +3316,7 @@ class IdaTui(App):
         self._hex_status(msg.va)
 
     def on_hex_view_leave(self, msg: HexView.Leave) -> None:
-        self._active = self._pref
+        self._active = self._code_mode()
         self._show_active()
 
     def on_hex_view_to_code(self, msg: HexView.ToCode) -> None:
@@ -3131,6 +3378,18 @@ class IdaTui(App):
         if ea is not None:
             name = self._nav[-1].name if self._nav else ""
             self._status(f"{name}  @ {ea:#x}   (line {msg.index})")
+
+    def on_listing_view_cursor_moved(self, msg: ListingView.CursorMoved) -> None:
+        if self._nav:
+            self._nav[-1].cursor = msg.index
+            self._nav[-1].cursor_x = self.query_one(ListingView).cursor_x
+            if msg.index >= 0:
+                self._nav[-1].scroll_y = round(self.query_one(ListingView).scroll_offset.y)
+        ea = msg.ea
+        if ea is not None:
+            sec = self.program.section_of(ea) if self.program else None
+            self._status(f"{sec or '?'}  @ {ea:#x}   [listing]   "
+                         "(c code · p func · u undefine · Enter follow)")
 
     # -- teardown ---------------------------------------------------------- #
     def on_unmount(self) -> None:
