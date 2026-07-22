@@ -1,0 +1,23 @@
+#!/bin/sh
+# Caveman launcher for the IDA TUI:
+#
+#     ./ida-tui foo.elf        # open a binary and drive it — that's it
+#     ./ida-tui                # attach to the sole open session
+#     ./ida-tui --db <id>      # attach to a specific session
+#
+# It starts the ida-pro-mcp supervisor if it's down, recovers a binary left
+# wedged by a crashed worker, opens/adopts the session, and drops you into the
+# TUI. Uses the venv python that has textual (override with $IDATUI_PYTHON).
+set -eu
+
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+
+PY="${IDATUI_PYTHON:-$HOME/ida-venv/bin/python}"
+if [ ! -x "$PY" ]; then
+    PY=$(command -v python3 || true)
+    [ -n "$PY" ] || { echo "ida-tui: no python found (set \$IDATUI_PYTHON)" >&2; exit 1; }
+fi
+
+# Make `idatui` importable no matter where you invoke this from; binary path
+# arguments are resolved against your real cwd by the launcher, not $SCRIPT_DIR.
+exec env PYTHONPATH="$SCRIPT_DIR${PYTHONPATH:+:$PYTHONPATH}" "$PY" -m idatui.launch "$@"

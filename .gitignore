@@ -13,3 +13,4 @@ build/
 
 # large analysis targets (copied in, not source)
 targets/
+bin/

@@ -51,6 +51,22 @@ pulls in Textual + Pygments.
 
 ## Running
 
+The caveman way — one command does all the plumbing (starts the supervisor if
+it's down, recovers a binary wedged by a crashed worker, opens/adopts the
+session, launches the TUI):
+
+```sh
+./ida-tui /path/to/binary        # open a binary and drive it — that's it
+./ida-tui                        # attach to the sole open session
+./ida-tui --db <session>         # attach to a specific session
+```
+
+It uses `~/ida-venv/bin/python` for the TUI (override with `$IDATUI_PYTHON`) and
+resolves binary paths against your real cwd. The binary's directory must be
+writable (idalib writes a `.i64` there).
+
+The manual way (if you want the pieces separate):
+
 ```sh
 # 1. Start the ida-pro-mcp supervisor (opens bin/ls by default).
 ./spawn.sh                       # supervisor on 127.0.0.1:8745
@@ -60,6 +76,11 @@ python -m idatui.tui                       # auto-resolve the sole session
 python -m idatui.tui --db <session>
 python -m idatui.tui --open /abs/path/bin  # dir must be WRITABLE (.i64)
 ```
+
+> Recovering a wedged database by hand: if a worker was hard-killed it leaves
+> unpacked `foo.id0/.id1/.id2/.nam/.til` next to `foo.i64`, and the `.i64` then
+> refuses to reopen. Delete those stale files (never the `.i64`) and retry —
+> `ida-tui` does this automatically.
 
 The `spawn.sh` host/port/target are overridable via `IDA_MCP_HOST`,
 `IDA_MCP_PORT`, `IDA_MCP_TARGET`, `IDA_MCP_MAX_WORKERS`. A systemd unit is in
