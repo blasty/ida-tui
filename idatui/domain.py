@@ -526,8 +526,19 @@ class ListingModel:
         self._next: int | None = seg_start  # next address to fetch from
         self._done = False
         self._lock = threading.Lock()
+        # Serializes page loads so a background grower and an in-view search can
+        # both drive loading without double-fetching the same page.
+        self._load_lock = threading.Lock()
+
+    def load_next_page(self) -> int:
+        """Load one more page of heads; returns how many were added."""
+        return self._load_next_page()
 
     def _load_next_page(self) -> int:
+        with self._load_lock:
+            return self._load_next_page_locked()
+
+    def _load_next_page_locked(self) -> int:
         with self._lock:
             if self._done or self._next is None:
                 return 0

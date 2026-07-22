@@ -961,10 +961,16 @@ class ListingView(SearchMixin, NavMixin, ColumnCursor, ScrollView, can_focus=Tru
         model = self.model
         if model is None:
             return
-        model.load_all()  # walk the whole segment's heads off the UI loop
-        self.app.call_from_thread(self._on_primed, len(model))
+        # Load just enough to render the viewport around the cursor, so the
+        # listing appears immediately even on a huge segment; the rest streams
+        # in via _grow. (load_all here would blank the pane for seconds.)
+        height = max(self.size.height, 1)
+        model.ensure(self.cursor + height + 2 * ListingModel.PAGE)
+        self.app.call_from_thread(self._on_primed, len(model), model.complete)
+        if not model.complete:
+            self._grow()
 
-    def _on_primed(self, total: int) -> None:
+    def _on_primed(self, total: int, complete: bool) -> None:
         if self.model is None:
             return
         self.total = total
@@ -979,7 +985,33 @@ class ListingView(SearchMixin, NavMixin, ColumnCursor, ScrollView, can_focus=Tru
         self.refresh()
         self.post_message(ListingView.CursorMoved(self.cursor, self._cursor_ea()))
 
-    # -- search hooks (all heads are in memory after prime) --------------- #
+    @work(thread=True, exclusive=True, group="listing-grow")
+    def _grow(self) -> None:
+        """Stream the rest of the segment's heads in the background, growing the
+        virtual size as they land so the scrollbar/paging catch up."""
+        model = self.model
+        if model is None:
+            return
+        since = 0
+        while not model.complete:
+            if model.load_next_page() == 0:
+                break
+            if self.model is not model:  # a new load() replaced us
+                return
+            since += 1
+            if since >= 4:  # throttle repaints on huge segments
+                since = 0
+                self.app.call_from_thread(self._grew, len(model))
+        self.app.call_from_thread(self._grew, len(model))
+
+    def _grew(self, total: int) -> None:
+        if self.model is None or total <= self.total:
+            return
+        self.total = total
+        self.virtual_size = Size(0, total)
+        self.refresh()
+
+    # -- search hooks ----------------------------------------------------- #
     def _search_line_count(self) -> int:
         return self.total
 
@@ -987,7 +1019,19 @@ class ListingView(SearchMixin, NavMixin, ColumnCursor, ScrollView, can_focus=Tru
         return self._line_plain(i)
 
     def _search_ensure(self, done) -> None:
-        done()
+        # Search needs the whole segment; finish loading it first if streaming.
+        if self.model is not None and not self.model.complete:
+            self._search_load_all(done)
+        else:
+            done()
+
+    @work(thread=True, exclusive=True, group="listing-search-load")
+    def _search_load_all(self, done) -> None:  # type: ignore[no-untyped-def]
+        model = self.model
+        if model is not None:
+            model.load_all()
+            self.app.call_from_thread(self._grew, len(model))
+        self.app.call_from_thread(done)
 
     # -- rendering --------------------------------------------------------- #
     def render_line(self, y: int) -> Strip:
