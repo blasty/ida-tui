@@ -1444,6 +1444,69 @@ async def s_listing_view(c: Ctx):
         c.prog.bump_items()
 
 
+@scenario("listing_name_addr")
+async def s_listing_name_addr(c: Ctx):
+    """In the listing, 'n' names the ADDRESS under the cursor — so you can name a
+    bare/undefined byte (e.g. the free byte at addr+1 after shrinking a u16 to a
+    u8), which the symbol-by-name rename path can't do."""
+    app = c.app
+    # pick a data segment and a >=2-byte data head to shrink
+    data_ea = None
+    for start, end, name in c.prog.sections():
+        if start >= end:
+            continue
+        lm = c.prog.listing(start)
+        if lm is None:
+            continue
+        lm.ensure(60)
+        if any(h.kind == "data" and (h.size or 0) >= 2 for h in lm.window(0, 60)):
+            data_ea = start
+            break
+    if data_ea is None:
+        c.check("found a data segment with a >=2-byte item", False)
+        return
+    dh = next(h for h in c.prog.listing(data_ea).window(0, 60)
+              if h.kind == "data" and (h.size or 0) >= 2)
+    A = dh.ea
+    newname = f"after_{os.getpid()}"
+    try:
+        # shrink the >=2-byte item to a single byte -> A+1 becomes undefined
+        c.prog.make_data(A, "unsigned __int8")
+        c.prog.bump_items()
+        await c.goto_ui(hex(A + 1))
+        await c.wait(lambda: app._active == "listing" and app._cur is not None
+                     and app._cur.ea == A + 1, 25)
+        head = c.lst.cur_head()
+        c.check("cursor lands on the now-undefined byte at addr+1",
+                head is not None and head.ea == A + 1 and head.kind == "unknown",
+                f"head={head}")
+        # 'n' opens the address-name prompt (even though there's no symbol)
+        c.lst.focus()
+        await c.press("n")
+        await c.pause(0.1)
+        ri = app.query_one("#rename", Input)
+        c.check("'n' opens the name prompt on an unnamed byte",
+                ri.display, f"display={ri.display}")
+        ri.value = newname
+        await c.press("enter")
+        await c.wait(lambda: app._active == "listing"
+                     and c.lst.model.index_of_ea(A + 1) >= 0
+                     and c.lst.model.get(c.lst.model.index_of_ea(A + 1)) is not None
+                     and c.lst.model.get(c.lst.model.index_of_ea(A + 1)).name == newname, 25)
+        hi = c.lst.model.index_of_ea(A + 1)
+        c.check("naming a bare byte at addr+1 sticks",
+                hi >= 0 and c.lst.model.get(hi).name == newname,
+                f"name={c.lst.model.get(hi).name if hi>=0 else None}")
+    finally:
+        # revert: drop the label and restore raw bytes at A
+        try:
+            c.prog.client.call("rename", batch={"data": {"addr": hex(A + 1), "new": ""}})
+        except Exception:  # noqa: BLE001
+            pass
+        c.prog.undefine(A, size=8)
+        c.prog.bump_items()
+
+
 # --------------------------------------------------------------------------- #
 # Runner
 # --------------------------------------------------------------------------- #

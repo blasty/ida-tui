@@ -2057,6 +2057,7 @@ class IdaTui(App):
         self._cur: NavEntry | None = None
         self._search_ctx: tuple[object | None, int] = (None, 1)
         self._rename_ctx: tuple[object | None, str] = (None, "")
+        self._rename_addr: int | None = None  # set for address-based (listing) naming
         self._comment_ctx: tuple[object | None, int, str] = (None, 0, "")
         self._retype_ctx: tuple[object | None, str, int, str] = (None, "", 0, "")
         self._makedata_ctx: tuple[object | None, int] = (None, 0)
@@ -2689,6 +2690,27 @@ class IdaTui(App):
         return re.search(rf"\bgoto\s+{re.escape(name)}\b", body) is not None
 
     def on_rename_requested(self, msg: RenameRequested) -> None:
+        # In the flat listing, 'n' names the ADDRESS under the cursor (create a
+        # label), not a symbol-by-name. This is what lets you name a bare/
+        # undefined byte — e.g. the free byte at addr+1 after shrinking a u16 to
+        # a u8 — which the word-under-cursor path can't do (no symbol to rename).
+        if isinstance(msg.view, ListingView):
+            ea = msg.view._cursor_ea()
+            if ea is None:
+                self._status("no address on this line to name")
+                return
+            head = msg.view.cur_head()
+            cur = head.name if (head is not None and head.name) else ""
+            self._rename_ctx = (msg.view, cur)
+            self._rename_addr = ea
+            self.query_one("#status", Static).display = False
+            inp = self.query_one("#rename", Input)
+            inp.placeholder = f"name @ {ea:#x} —  Enter=apply  Esc=cancel"
+            inp.can_focus = True
+            inp.display = True
+            inp.value = cur
+            inp.focus()
+            return
         if not msg.name:
             self._status("nothing to rename under the cursor")
             return
@@ -2698,6 +2720,7 @@ class IdaTui(App):
                 "(Hex-Rays goto labels aren't renamable via the API)")
             return
         self._rename_ctx = (msg.view, msg.name)
+        self._rename_addr = None
         self.query_one("#status", Static).display = False
         inp = self.query_one("#rename", Input)
         inp.placeholder = f"rename '{msg.name}' —  Enter=apply  Esc=cancel"
@@ -2710,6 +2733,7 @@ class IdaTui(App):
         inp = self.query_one("#rename", Input)
         inp.display = False
         inp.can_focus = False
+        self._rename_addr = None
         self.query_one("#status", Static).display = True
         view, _ = self._rename_ctx
         if view is not None:
@@ -3011,6 +3035,37 @@ class IdaTui(App):
         self._dirty = True
         self._status(f"renamed  {old} → {new}   (Ctrl+S to save)")
 
+    @work(thread=True, exclusive=True, group="rename")
+    def _do_name_addr(self, addr: int, name: str) -> None:  # worker context
+        """Set a label at ``addr`` (listing 'n'). Works on a bare/undefined byte
+        — unlike the symbol-by-name path, this names the address directly."""
+        assert self.program is not None
+        try:
+            res = self.program.client.call(
+                "rename", batch={"data": {"addr": hex(addr), "new": name}})
+        except IDAToolError as e:
+            self.app.call_from_thread(self._status, f"name failed: {e.message}")
+            return
+        summary = res.get("summary", {}) if isinstance(res, dict) else {}
+        if not (summary.get("ok", 0) > 0 and summary.get("failed", 0) == 0):
+            err = "name failed"
+            items = res.get("data") if isinstance(res, dict) else None
+            if isinstance(items, list) and items and items[0].get("error"):
+                err = f"name failed: {items[0]['error']}"
+            self.app.call_from_thread(self._status, err)
+            return
+        # The label shows in the listing's head rows -> invalidate + reopen.
+        self.program.bump_items()
+        lm = self.program.listing(addr)
+        label = self.program.region_label(addr)
+        idx = max(lm.ensure_ea(addr), 0) if lm is not None else 0
+        self.app.call_from_thread(self._open_at_named, label, addr, idx, name)
+
+    def _open_at_named(self, label: str, addr: int, idx: int, name: str) -> None:
+        self._open_at(addr, label, idx, False, -1, 0, True)
+        self._dirty = True
+        self._status(f"named {addr:#x} → {name}   (Ctrl+S to save)")
+
     # -- item structure edits (IDA c/p/u) --------------------------------- #
     def on_edit_item_requested(self, msg: EditItemRequested) -> None:
         ea = (msg.view._cursor_ea()
@@ -3242,7 +3297,12 @@ class IdaTui(App):
             return
         if inp.id == "rename":
             view, old = self._rename_ctx
+            addr = self._rename_addr  # capture before _end_rename clears it
             self._end_rename()
+            if addr is not None:  # listing: name this address (create a label)
+                if value and value != old:
+                    self._do_name_addr(addr, value)
+                return
             if view is not None and value and value != old:
                 self._do_rename(view, old, value)
             return
