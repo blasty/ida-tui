@@ -15,8 +15,13 @@ doable:
 
 hard:
 [ ] deal with PLT stubs and such (oh god here we go)
-[ ] how to deal with non-function-body regions?
-    -> we want to be able to do data/type definitions in .data etc. 
+[~] how to deal with non-function-body regions?
+    -> we want to be able to do data/type definitions in .data etc.
+    -> M0 done: navigating to a non-function EA opens a flat listing (region)
+       instead of refusing; c/p/u edit verbs on the disasm view (define code /
+       function / undefine) with bump_items() cache invalidation + region->func
+       upgrade. next: M1 server `heads` walker + ListingModel (address paging),
+       M2 ListingView (code+data render), M3 data typing in .data.
 
 crazy:
 [ ] multi/split view ala ghidra?

@@ -79,6 +79,7 @@ class NavEntry:
     dec_cursor_x: int = 0  # pseudocode column
     dec_scroll_y: int = -1 # pseudocode viewport top (-1 = derive)
     dec_scroll_x: int = 0  # pseudocode horizontal scroll
+    is_region: bool = False  # not inside a function (flat listing view)
 
 
 class SearchRequested(Message):
@@ -130,6 +131,16 @@ class RetypeRequested(Message):
         super().__init__()
         self.view = view
         self.name = name
+
+
+class EditItemRequested(Message):
+    """The disasm view asks to change item structure (IDA c/d/u/p) at the line
+    under the cursor. ``kind`` is 'code' | 'func' | 'undef'."""
+
+    def __init__(self, view, kind: str) -> None:  # type: ignore[no-untyped-def]
+        super().__init__()
+        self.view = view
+        self.kind = kind
 
 
 class NavMixin:
@@ -581,6 +592,9 @@ class DisasmView(SearchMixin, NavMixin, ColumnCursor, ScrollView, can_focus=True
         Binding("home", "goto_top", "Top", show=False),
         Binding("G,end", "goto_bottom", "Bottom", show=False),
         Binding("o", "toggle_opcodes", "Opcodes", show=False),
+        Binding("c", "define_code", "Code", show=False),
+        Binding("p", "define_func", "Func", show=False),
+        Binding("u", "undefine", "Undef", show=False),
         Binding("tab,shift+tab", "app.toggle_view", "Pseudocode", priority=True),
         *SearchMixin.SEARCH_BINDINGS,
         *NavMixin.NAV_BINDINGS,
@@ -831,6 +845,16 @@ class DisasmView(SearchMixin, NavMixin, ColumnCursor, ScrollView, can_focus=True
             return None
         line = self.model.cached_line(self.cursor)
         return line.ea if line else None
+
+    # -- item structure edits (IDA c/p/u) --------------------------------- #
+    def action_define_code(self) -> None:
+        self.post_message(EditItemRequested(self, "code"))
+
+    def action_define_func(self) -> None:
+        self.post_message(EditItemRequested(self, "func"))
+
+    def action_undefine(self) -> None:
+        self.post_message(EditItemRequested(self, "undef"))
 
     def action_cursor_down(self) -> None:
         self._move(1)
@@ -2654,6 +2678,51 @@ class IdaTui(App):
         self._dirty = True
         self._status(f"renamed  {old} → {new}   (Ctrl+S to save)")
 
+    # -- item structure edits (IDA c/p/u) --------------------------------- #
+    def on_edit_item_requested(self, msg: EditItemRequested) -> None:
+        ea = msg.view._cursor_ea() if isinstance(msg.view, DisasmView) else None
+        if ea is None:
+            self._status("no address on this line to (re)define")
+            return
+        self._do_edit_item(msg.kind, ea)
+
+    @work(thread=True, exclusive=True, group="edititem")
+    def _do_edit_item(self, kind: str, ea: int) -> None:  # worker context
+        assert self.program is not None
+        verb = {"code": "defined code", "func": "created function",
+                "undef": "undefined"}[kind]
+        try:
+            if kind == "code":
+                self.program.define_code(ea)
+            elif kind == "func":
+                self.program.define_func(ea)
+            else:
+                self.program.undefine(ea)
+        except Exception as e:  # noqa: BLE001 -- surface soft/hard tool errors
+            self.app.call_from_thread(self._status, f"{kind}: {e}")
+            return
+        # Structure changed everywhere: drop all item/function/decomp caches.
+        self.program.bump_items()
+        # Re-resolve: a define_func upgrades the region to a real function view;
+        # anything else re-reads the (still function-less) listing in place.
+        fn = self.program.function_of(ea)
+        if fn is not None:
+            model = self.program.disasm(fn.addr, fn.name)
+            idx = 0 if ea == fn.addr else model.index_of_ea(ea)
+            self.app.call_from_thread(
+                self._open_at, fn.addr, fn.name, idx, False, -1, 0, False)
+        else:
+            name = self.program.region_label(ea)
+            model = self.program.disasm(ea, name)
+            idx = max(model.index_of_ea(ea), 0)
+            self.app.call_from_thread(
+                self._open_at, ea, name, idx, False, -1, 0, True)
+        self.app.call_from_thread(self._edit_item_done, verb, ea)
+
+    def _edit_item_done(self, verb: str, ea: int) -> None:
+        self._dirty = True
+        self._status(f"{verb} @ {ea:#x}   (Ctrl+S to save)")
+
     @work(thread=True, exclusive=True, group="save")
     def _save(self) -> None:
         assert self.program is not None
@@ -2682,7 +2751,13 @@ class IdaTui(App):
         assert self.program is not None
         fn = self.program.function_of(ea)
         if fn is None:
-            self.app.call_from_thread(self._status, f"no function contains {ea:#x}")
+            # Not inside a function: open a flat listing (region) anchored here
+            # rather than refusing. This is where you land on code IDA didn't
+            # mark, or on data — use c/p to define it (see _do_edit_item).
+            name = self.program.region_label(ea)
+            self.program.disasm(ea, name)  # warm the block cache off the UI loop
+            self.app.call_from_thread(
+                self._open_at, ea, name, 0, push, -1, 0, True)
             return
         model = self.program.disasm(fn.addr, fn.name)
         idx = 0 if ea == fn.addr else model.index_of_ea(ea)
@@ -2737,10 +2812,11 @@ class IdaTui(App):
         return best_idx
 
     def _open_at(self, ea: int, name: str, cursor: int, push: bool,
-                 dec_cursor: int = -1, dec_cursor_x: int = 0) -> None:
+                 dec_cursor: int = -1, dec_cursor_x: int = 0,
+                 is_region: bool = False) -> None:
         if push:
             self._save_current_pos()
-        entry = NavEntry(ea=ea, name=name, cursor=cursor)
+        entry = NavEntry(ea=ea, name=name, cursor=cursor, is_region=is_region)
         if dec_cursor >= 0:
             entry.dec_cursor = dec_cursor
             entry.dec_cursor_x = dec_cursor_x
@@ -2919,7 +2995,8 @@ class IdaTui(App):
         self._cur = entry
         # Each open honours the preferred view; a decomp failure last time fell
         # back to disasm without changing the preference, so retry decomp here.
-        self._active = self._pref
+        # A region (not inside a function) has no pseudocode -> force disasm.
+        self._active = "disasm" if entry.is_region else self._pref
         model = self.program.disasm(entry.ea, entry.name)
         sy = entry.scroll_y if entry.scroll_y >= 0 else None
         self.query_one(DisasmView).load(

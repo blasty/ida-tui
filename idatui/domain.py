@@ -853,6 +853,68 @@ class Program:
         for m in models:
             m.invalidate()
 
+    def bump_items(self) -> None:
+        """Signal that item/function STRUCTURE changed (define code/data/func,
+        undefine). Unlike a rename this can move instruction boundaries and
+        change function membership anywhere, so drop the disasm block caches,
+        the decompilation cache and the cached function indices outright, and
+        bump the name generation too (labels/names may appear or vanish)."""
+        with self._lock:
+            self._name_gen += 1
+            self._indices.clear()
+            self._decomp.clear()
+            models = list(self._disasm.values())
+            self._disasm.clear()
+        for m in models:
+            m.invalidate()
+
+    # -- item / function structure edits (IDA c/d/u/p) --------------------- #
+    @staticmethod
+    def _first_result(payload) -> dict:
+        """Unwrap the first row of a batch tool response ({result:[...]} or a
+        bare list); soft per-item ``error`` fields ride along in the dict."""
+        data = payload.get("result", payload) if isinstance(payload, dict) else payload
+        if isinstance(data, list):
+            return data[0] if data and isinstance(data[0], dict) else {}
+        return data if isinstance(data, dict) else {}
+
+    def define_code(self, ea: int) -> None:
+        """Convert the bytes at ``ea`` into a code instruction (IDA's 'c').
+        Undefine first so it works even when the bytes are currently part of a
+        data/align item — ``create_insn`` refuses to carve into a live item."""
+        try:
+            self.client.call("undefine", items=[{"addr": hex(ea)}])
+        except IDAToolError:
+            pass  # nothing defined here yet -> just try to create the insn
+        res = self._first_result(
+            self.client.call("define_code", items=[{"addr": hex(ea)}]))
+        if res.get("error"):
+            raise IDAToolError(f"define code @ {ea:#x}: {res['error']}")
+
+    def define_func(self, ea: int) -> None:
+        """Create a function starting at ``ea`` (IDA's 'p')."""
+        res = self._first_result(
+            self.client.call("define_func", items=[{"addr": hex(ea)}]))
+        if res.get("error"):
+            raise IDAToolError(f"create function @ {ea:#x}: {res['error']}")
+
+    def undefine(self, ea: int, size: int | None = None) -> None:
+        """Undefine the item at ``ea`` back to raw bytes (IDA's 'u')."""
+        item: dict = {"addr": hex(ea)}
+        if size:
+            item["size"] = int(size)
+        res = self._first_result(self.client.call("undefine", items=[item]))
+        if res.get("error"):
+            raise IDAToolError(f"undefine @ {ea:#x}: {res['error']}")
+
+    def region_label(self, ea: int) -> str:
+        """Display name for a non-function address (segment-qualified)."""
+        try:
+            sec = self.section_of(ea)
+        except Exception:  # noqa: BLE001
+            sec = None
+        return f"{sec} @ {ea:#x}" if sec else f"<no function> @ {ea:#x}"
+
     @staticmethod
     def _fetch_output(url: str, timeout: float = 15.0):
         """GET the server's cached full-output blob (plain HTTP, not MCP)."""

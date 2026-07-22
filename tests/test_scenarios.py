@@ -1254,6 +1254,56 @@ async def s_rename_history(c: Ctx):
     app.program.client.call("rename", batch={"func": {"addr": hex(htarget), "name": hsym}})
 
 
+@scenario("region_define")
+async def s_region_define(c: Ctx):
+    """A non-function address opens a flat listing (region) instead of being
+    refused, and 'p' there creates a function and upgrades the view."""
+    app = c.app
+    fn = c.find_func(lambda f: 0x10 <= f.size <= 0x60 and f.name.startswith("sub_"))
+    if fn is None:
+        c.check("found a small sub_ function for the region test", False)
+        return
+    addr, size = fn.addr, fn.size
+    try:
+        # setup: undefine the whole function so [addr, addr+size) is a bare region
+        c.prog.undefine(addr, size=size)
+        c.prog.bump_items()
+        c.check("function removed by undefine",
+                c.prog.function_of(addr) is None, "still a function")
+
+        # navigate there via the real 'g' prompt -> opens a REGION, not refused
+        await c.goto_ui(hex(addr))
+        await c.wait(lambda: app._cur is not None and app._cur.ea == addr, 25)
+        c.check("goto to a non-function address opens a region (not refused)",
+                app._cur is not None and app._cur.is_region
+                and app._active == "disasm",
+                f"cur={app._cur} active={app._active} status={c.status()!r}")
+        await c.wait(lambda: c.dis.total > 0 and c.dis._cursor_ea() is not None, 25)
+        c.check("region listing renders lines with a resolvable cursor address",
+                c.dis.total > 0 and c.dis._cursor_ea() == addr,
+                f"total={c.dis.total} cur_ea={c.dis._cursor_ea()}")
+
+        # cursor on the entry line; 'p' (re)creates the function
+        c.dis.focus()
+        c.dis.cursor, c.dis.cursor_x = 0, 0
+        await c.pause(0.05)
+        await c.press("p")
+        await c.wait(lambda: c.prog.function_of(addr) is not None
+                     and app._cur is not None and not app._cur.is_region, 25)
+        c.check("'p' creates a function and upgrades the region to a function view",
+                c.prog.function_of(addr) is not None
+                and not app._cur.is_region and app._cur.ea == addr,
+                f"fn={c.prog.function_of(addr)} cur={app._cur}")
+    finally:
+        # idempotency: guarantee the function is back even if a check failed
+        if c.prog.function_of(addr) is None:
+            try:
+                c.prog.define_func(addr)
+            except Exception:  # noqa: BLE001
+                pass
+        c.prog.bump_items()
+
+
 # --------------------------------------------------------------------------- #
 # Runner
 # --------------------------------------------------------------------------- #
