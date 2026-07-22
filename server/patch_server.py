@@ -209,6 +209,23 @@ def _idatui_head_row(ea):
     return row
 
 
+def _idatui_unknown_row(ea, size):
+    """One collapsed row for a run of ``size`` undefined bytes starting at
+    ``ea``. A single byte is rendered normally (shows its value); a longer run
+    collapses to ``db N dup(?)`` so a big .bss/gap doesn't explode into millions
+    of one-byte rows."""
+    import ida_name
+
+    if size <= 1:
+        return _idatui_head_row(ea)
+    row = {"ea": hex(ea), "kind": "unknown", "size": int(size),
+           "text": f"db {size} dup(?)"}
+    nm = ida_name.get_ea_name(ea)
+    if nm:
+        row["name"] = nm
+    return row
+
+
 @tool
 @idasync
 def heads(
@@ -264,24 +281,42 @@ def heads(
 
     # Walk by item END (not next_head): next_head SKIPS undefined bytes, but a
     # flat listing must show them (IDA renders undefined as `db ?` lines, and
-    # navigating to an unmarked address must land ON it). get_item_end steps by
-    # the item's size for code/data and by 1 through undefined bytes.
-    def _step(e):
+    # navigating to an unmarked address must land ON it). Defined items advance
+    # by get_item_end; a run of undefined bytes is COLLAPSED into one row (its
+    # end found in O(1) via next_head, which skips undefined) so a large .bss or
+    # gap doesn't explode into millions of one-byte rows.
+    def _is_unknown(e):
+        f = ida_bytes.get_flags(e)
+        return not (ida_bytes.is_code(f) or ida_bytes.is_data(f))
+
+    def _run_end(e):
+        """End (exclusive) of the undefined run starting at ``e``."""
+        nh = ida_bytes.next_head(e, hi)
+        return nh if (nh != idaapi.BADADDR and e < nh <= hi) else hi
+
+    def _advance(e):
+        if _is_unknown(e):
+            return _run_end(e)
         nxt = ida_bytes.get_item_end(e)
         return nxt if nxt > e else e + 1
+
+    def _row(e):
+        if _is_unknown(e):
+            return _idatui_unknown_row(e, _run_end(e) - e)
+        return _idatui_head_row(e)
 
     ea = ida_bytes.get_item_head(start)
     for _ in range(offset):
         if ea >= hi or ea == idaapi.BADADDR:
             break
-        ea = _step(ea)
+        ea = _advance(ea)
     more = False
     while ea != idaapi.BADADDR and ea < hi:
         if len(rows) >= count:
             more = True
             break
-        rows.append(_idatui_head_row(ea))
-        ea = _step(ea)
+        rows.append(_row(ea))
+        ea = _advance(ea)
     cursor = {"next": hex(ea)} if more else {"done": True}
     return {"addr": str(addr), "heads": rows, "cursor": cursor}
 '''
