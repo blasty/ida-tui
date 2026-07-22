@@ -79,6 +79,28 @@ class Line:
         )
 
 
+@dataclass(frozen=True)
+class Head:
+    """One flat-listing item (from the ``heads`` server tool): a code
+    instruction, a data item, or an undefined byte run."""
+
+    ea: int
+    kind: str            # 'code' | 'data' | 'unknown'
+    size: int
+    text: str
+    name: str | None = None
+
+    @classmethod
+    def from_raw(cls, d: dict) -> "Head":
+        return cls(
+            ea=_as_int(d["ea"]),
+            kind=d.get("kind", "unknown"),
+            size=int(d.get("size", 0) or 0),
+            text=d.get("text", ""),
+            name=d.get("name"),
+        )
+
+
 @dataclass
 class Ref:
     addr: int
@@ -470,6 +492,127 @@ class DisasmModel:
 
 
 # --------------------------------------------------------------------------- #
+# Listing model: lazily-grown flat listing (code + data + undefined) per segment
+# --------------------------------------------------------------------------- #
+class ListingModel:
+    """A flat, IDA-style disassembly *listing* over one segment: code, data and
+    undefined heads interleaved, unlike ``DisasmModel`` (one function, code only).
+
+    Backed by the injected ``heads`` server tool, which walks item heads and
+    renders each via ``generate_disasm_line``. The segment is walked lazily in
+    forward pages (``FunctionIndex`` style); line index == position in the walked
+    head list. Random access to an address is O(distance-from-seg-start) the
+    first time (then cached) — the same tradeoff as ``disasm offset=N``. Grows
+    on demand as the viewport scrolls. Synchronous + thread-safe.
+    """
+
+    PAGE = 500  # heads per server call (well under the tool's 2000 cap)
+
+    def __init__(self, program: "Program", seg_start: int, seg_end: int,
+                 name: str | None = None):
+        self._prog = program
+        self.seg_start = seg_start
+        self.seg_end = seg_end
+        self.name = name or f"seg @ {seg_start:#x}"
+        self._heads: list[Head] = []
+        self._by_ea: dict[int, int] = {}
+        self._next: int | None = seg_start  # next address to fetch from
+        self._done = False
+        self._lock = threading.Lock()
+
+    def _load_next_page(self) -> int:
+        with self._lock:
+            if self._done or self._next is None:
+                return 0
+            frm = self._next
+        payload = self._prog.client.call("heads", addr=hex(frm), count=self.PAGE)
+        rows = payload.get("heads", []) if isinstance(payload, dict) else []
+        cur = payload.get("cursor", {}) if isinstance(payload, dict) else {}
+        with self._lock:
+            base = len(self._heads)
+            for i, r in enumerate(rows):
+                try:
+                    h = Head.from_raw(r)
+                except (KeyError, ValueError, TypeError):
+                    continue
+                self._by_ea.setdefault(h.ea, base + i)
+                self._heads.append(h)
+            nxt = cur.get("next")
+            if nxt is None:
+                self._done = True
+                self._next = None
+            else:
+                self._next = _as_int(nxt)
+            return len(rows)
+
+    def ensure(self, n: int) -> None:
+        """Ensure at least ``n`` heads are loaded (or all, if fewer exist)."""
+        while not self._done and len(self._heads) < n:
+            if self._load_next_page() == 0:
+                break
+
+    def ensure_ea(self, ea: int) -> int:
+        """Walk forward until the head containing ``ea`` is loaded; return its
+        line index (or the nearest head at/after it), or -1 if past the end."""
+        while True:
+            idx = self.index_of_ea(ea)
+            if idx >= 0:
+                return idx
+            with self._lock:
+                have = len(self._heads)
+                last_ea = self._heads[-1].ea if self._heads else -1
+                done = self._done
+            if done or (have and last_ea >= ea):
+                # Loaded past ea without an exact head hit: return the first head
+                # at/after ea (a mid-item address lands on its containing head).
+                return self._first_at_or_after(ea)
+            if self._load_next_page() == 0:
+                return self._first_at_or_after(ea)
+
+    def _first_at_or_after(self, ea: int) -> int:
+        with self._lock:
+            heads = self._heads
+            for i, h in enumerate(heads):
+                if h.ea <= ea < h.ea + max(h.size, 1):
+                    return i
+                if h.ea > ea:
+                    return i
+        return -1
+
+    def load_all(self, progress: Callable[[int], None] | None = None) -> None:
+        while not self._done:
+            if self._load_next_page() == 0:
+                break
+            if progress:
+                progress(len(self._heads))
+
+    @property
+    def complete(self) -> bool:
+        with self._lock:
+            return self._done
+
+    def loaded(self) -> int:
+        with self._lock:
+            return len(self._heads)
+
+    def __len__(self) -> int:
+        return self.loaded()
+
+    def get(self, i: int) -> Head | None:
+        with self._lock:
+            return self._heads[i] if 0 <= i < len(self._heads) else None
+
+    def window(self, start: int, count: int) -> list[Head]:
+        self.ensure(start + count)
+        with self._lock:
+            return list(self._heads[start:start + count])
+
+    def index_of_ea(self, ea: int) -> int:
+        with self._lock:
+            return self._by_ea.get(ea, -1)
+
+
+# --------------------------------------------------------------------------- #
 # Hex model: block-cached byte view over the loaded image (VA-addressed)
 # --------------------------------------------------------------------------- #
 class HexModel:
@@ -565,6 +708,7 @@ class Program:
         )
         self._indices: dict[str | None, FunctionIndex] = {}
         self._disasm: dict[int, DisasmModel] = {}
+        self._listings: dict[int, ListingModel] = {}  # keyed by segment start
         self._decomp: dict[int, tuple[Decompilation, int]] = {}
         self._name_gen = 0  # bumped on rename; invalidates stale name caches
         self._sections: list[tuple[int, int, str]] | None = None
@@ -680,13 +824,32 @@ class Program:
     def section_of(self, ea: int) -> str | None:
         """Name of the segment/section containing ``ea`` (e.g. '.got', '.text',
         '.data.rel.ro', 'LOAD'), or None if unmapped."""
+        b = self.segment_bounds(ea)
+        return b[2] if b else None
+
+    def segment_bounds(self, ea: int) -> tuple[int, int, str] | None:
+        """(start, end, name) of the segment containing ``ea``, or None."""
         secs = self.sections()
         if not secs:
             return None
         i = bisect.bisect_right([s[0] for s in secs], ea) - 1
         if 0 <= i < len(secs) and secs[i][0] <= ea < secs[i][1]:
-            return secs[i][2]
+            return secs[i]
         return None
+
+    def listing(self, ea: int) -> ListingModel | None:
+        """Flat listing (code+data+undefined) for the segment containing ``ea``,
+        cached per segment. None if ``ea`` is unmapped."""
+        seg = self.segment_bounds(ea)
+        if seg is None:
+            return None
+        start, end, name = seg
+        with self._lock:
+            m = self._listings.get(start)
+            if m is None:
+                m = ListingModel(self, start, end, name)
+                self._listings[start] = m
+            return m
 
     # -- structs / local types -------------------------------------------- #
     def list_structs(self, filter: str = "") -> list[Struct]:
@@ -863,6 +1026,7 @@ class Program:
             self._name_gen += 1
             self._indices.clear()
             self._decomp.clear()
+            self._listings.clear()
             models = list(self._disasm.values())
             self._disasm.clear()
         for m in models:

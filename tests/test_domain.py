@@ -146,6 +146,42 @@ def main(argv):
         except KeyError as e:
             check("resolve symbol name", False, str(e))
 
+    # ---- flat listing (code + data + undefined heads) ------------------ #
+    print("\n[listing]")
+    seg = prog.segment_bounds(fattest.addr)
+    check("segment_bounds finds the .text segment", seg is not None and seg[0] <= fattest.addr < seg[1],
+          str(seg))
+    lm = prog.listing(fattest.addr)
+    check("listing() returns a model for a mapped address", lm is not None)
+    if lm is not None:
+        lm.ensure(20)
+        w = lm.window(0, 20)
+        check("listing window returns heads", len(w) == 20, str(len(w)))
+        eas = [h.ea for h in w]
+        check("listing head addrs strictly increasing", all(b > a for a, b in zip(eas, eas[1:])),
+              str(eas[:4]))
+        check("listing heads carry a kind", all(h.kind in ("code", "data", "unknown") for h in w),
+              str({h.kind for h in w}))
+        check("listing head sizes positive", all(h.size >= 1 for h in w),
+              str([h.size for h in w[:6]]))
+        # random access to a mid-segment address lands on the containing head
+        mid = w[10].ea
+        li = lm.ensure_ea(mid)
+        check("ensure_ea lands on the exact head for a head address",
+              li >= 0 and lm.get(li).ea == mid, f"idx={li}")
+        # a mid-item byte resolves to its containing head
+        if w[4].size > 1:
+            inside = w[4].ea + 1
+            li2 = lm.ensure_ea(inside)
+            check("ensure_ea resolves a mid-item byte to its head",
+                  li2 >= 0 and lm.get(li2).ea == w[4].ea, f"idx={li2} ea={w[4].ea:#x}")
+        dt_cold, _ = ms(lambda: lm.window(0, 20))
+        check("listing window revisit is cached/instant", dt_cold < 5, f"{dt_cold:.1f}ms")
+        dt_all, _ = ms(lambda: lm.load_all())
+        check("listing load_all completes the segment", lm.complete and len(lm) > 20,
+              f"n={len(lm)} complete={lm.complete}")
+        print(f"    {seg[2]}: {len(lm)} heads walked in {dt_all:.0f}ms")
+
     prog.close()
     print(f"\n{PASS} passed, {FAIL} failed")
     return 1 if FAIL else 0

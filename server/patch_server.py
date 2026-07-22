@@ -178,6 +178,104 @@ def file_regions() -> dict:
         out.append({"start": hex(seg.start_ea), "end": hex(seg.end_ea), "file_off": fo})
         seg = ida_segment.get_next_seg(seg.start_ea)
     return {"regions": out}
+
+
+def _idatui_head_row(ea):
+    """One flat-listing row for the head at ``ea``: kind (code/data/unknown),
+    byte size, rendered text, and any symbol name."""
+    import ida_bytes
+    import ida_lines
+    import ida_name
+
+    f = ida_bytes.get_flags(ea)
+    if ida_bytes.is_code(f):
+        kind = "code"
+    elif ida_bytes.is_data(f):
+        kind = "data"
+    else:
+        kind = "unknown"
+    line = ida_lines.generate_disasm_line(ea, 0)
+    text = ida_lines.tag_remove(line) if line else ""
+    text = " ".join(text.split())  # collapse IDA's column padding
+    row = {
+        "ea": hex(ea),
+        "kind": kind,
+        "size": int(ida_bytes.get_item_size(ea)),
+        "text": text,
+    }
+    nm = ida_name.get_ea_name(ea)
+    if nm:
+        row["name"] = nm
+    return row
+
+
+@tool
+@idasync
+def heads(
+    addr: Annotated[str, "Start address or name to walk from"],
+    count: Annotated[int, "Max heads to return (default 200, max 2000)"] = 200,
+    offset: Annotated[int, "Skip first N heads from addr (default 0)"] = 0,
+    end: Annotated[str, "Optional exclusive end address; default = segment end"] = "",
+    back: Annotated[bool, "Walk backwards: return the count heads ENDING just before addr, in forward order"] = False,
+) -> dict:
+    """Walk item heads from ``addr`` as a flat listing: every head is rendered
+    (code OR data OR undefined) via generate_disasm_line and stepped with
+    next_head/prev_head. Unlike ``disasm`` (code-only, bails at the first data
+    byte) this shows db/dw/dd/... lines for data and undefined regions — IDA's
+    real disassembly view. Address-paged: page forward by re-calling with
+    ``addr`` = the returned cursor.next; page up with ``back=true``."""
+    import ida_bytes
+    import ida_segment
+    import idaapi
+
+    count = 2000 if count > 2000 else (1 if count < 1 else count)
+    offset = max(int(offset), 0)
+    try:
+        start = parse_address(addr)
+    except Exception as e:
+        return {"addr": str(addr), "error": str(e), "heads": [], "cursor": {"done": True}}
+    seg = ida_segment.getseg(start)
+    if not seg:
+        return {"addr": str(addr), "error": "no segment", "heads": [], "cursor": {"done": True}}
+    lo, hi = seg.start_ea, seg.end_ea
+    if end:
+        try:
+            hi = min(hi, parse_address(end))
+        except Exception:
+            pass
+
+    rows = []
+    if back:
+        # Collect up to (count+offset) heads strictly before `start`, then take
+        # the window closest to `start`, returned in forward order.
+        walk = []
+        cur = ida_bytes.prev_head(start, lo)
+        while cur != idaapi.BADADDR and cur >= lo and len(walk) < count + offset:
+            walk.append(cur)
+            cur = ida_bytes.prev_head(cur, lo)
+        walk.reverse()
+        chosen = walk[: len(walk) - offset] if offset else walk
+        chosen = chosen[-count:]
+        rows = [_idatui_head_row(e) for e in chosen]
+        first = chosen[0] if chosen else start
+        pea = ida_bytes.prev_head(first, lo)
+        cursor = {"done": True} if pea == idaapi.BADADDR or pea < lo else {"prev": hex(pea)}
+        return {"addr": str(addr), "heads": rows, "cursor": cursor}
+
+    ea = ida_bytes.get_item_head(start)
+    for _ in range(offset):
+        if ea >= hi or ea == idaapi.BADADDR:
+            break
+        ea = ida_bytes.next_head(ea, hi)
+    more = False
+    while ea != idaapi.BADADDR and ea < hi:
+        if len(rows) >= count:
+            more = True
+            break
+        rows.append(_idatui_head_row(ea))
+        ea = ida_bytes.next_head(ea, hi)
+    cursor = {"next": hex(ea)} if more else {"done": True}
+    return {"addr": str(addr), "heads": rows, "cursor": cursor}
 '''
 
 SNIPPET = f"{BEGIN}\n{BODY.strip()}\n{END}\n"
