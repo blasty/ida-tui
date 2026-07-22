@@ -35,7 +35,7 @@ from .client import IDAClient, IDAToolError
 # Clamps derived from measured caps (list ~700, disasm ~500). Margin included.
 LIST_PAGE = 500
 DISASM_BLOCK = 256  # instructions per cached/fetched block (<= disasm cap)
-HEX_BLOCK = 4096    # bytes per cached/fetched hex block
+HEX_BLOCK = 16384   # bytes per cached/fetched hex block (compact read_raw -> cheap)
 DECOMPILE_TIMEOUT = 15.0  # s; cap per decompile so a failing one can't hang the CLI
 
 _TRUNC_RE = re.compile(r"\[(\d+) chars total\]\s*$")
@@ -714,6 +714,7 @@ class Program:
         self._sections: list[tuple[int, int, str]] | None = None
         self._fileregions: list[tuple[int, int, int]] | None = None
         self._hexmodel: "HexModel | None" = None
+        self._no_read_raw = False  # set if the server lacks the read_raw tool
         self._lock = threading.Lock()
 
     # -- prefetch plumbing ------------------------------------------------- #
@@ -802,9 +803,29 @@ class Program:
         return None
 
     def read_bytes(self, ea: int, n: int) -> bytes:
-        """Raw bytes [ea, ea+n) from IDA (gaps read as zero)."""
+        """Raw bytes [ea, ea+n) from IDA (gaps read as zero).
+
+        Fast path: the injected ``read_raw`` tool returns one contiguous hex
+        string (C-speed both ends). Falls back to the stock ``get_bytes`` (a
+        per-byte '0x..'-with-spaces string) on an older server without it.
+        """
         if n <= 0:
             return b""
+        if not self._no_read_raw:
+            try:
+                r = self.client.call("read_raw", addr=hex(ea), size=int(n))
+                h = r.get("hex") if isinstance(r, dict) else None
+                if isinstance(h, str):
+                    out = bytes.fromhex(h)
+                    return out[:n] if len(out) >= n else out + b"\x00" * (n - len(out))
+            except IDAToolError as e:
+                # Tool missing on this server: stop trying it, use get_bytes.
+                if "read_raw" in str(e) or "Unknown tool" in str(e) or "not found" in str(e):
+                    self._no_read_raw = True
+                else:
+                    return b"\x00" * n
+            except (ValueError, KeyError):
+                pass  # malformed hex -> fall through to the legacy decoder
         try:
             r = self.client.call("get_bytes", regions=[{"addr": hex(ea), "size": int(n)}])
         except IDAToolError:

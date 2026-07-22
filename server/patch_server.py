@@ -180,6 +180,45 @@ def file_regions() -> dict:
     return {"regions": out}
 
 
+@tool
+@idasync
+def read_raw(
+    addr: Annotated[str, "Start address (hex or name)"],
+    size: Annotated[int, "Number of bytes to read"],
+) -> dict:
+    """Read ``size`` bytes at ``addr`` as ONE contiguous lowercase hex string
+    (no per-byte '0x'/spaces). The hot path for the hex view and disasm opcode
+    bytes.
+
+    Fast: does a single bulk ``ida_bytes.get_bytes`` (C-speed) instead of the
+    per-byte read_bytes_bss_safe loop (2 IDA calls/byte). Unloaded bytes come
+    back from IDA as the 0xFF sentinel, so we only re-check is_loaded for the
+    (usually sparse) 0xFF bytes and zero the genuinely-unloaded ones — matching
+    get_bytes' bss semantics without paying per-byte for the whole range.
+
+    Encoding is compact hex (~2.5x smaller than get_bytes' '0x..'-with-spaces)
+    and, unlike get_bytes, does not truncate on large reads."""
+    import ida_bytes
+
+    ea = parse_address(addr)
+    n = max(int(size), 0)
+    if n == 0:
+        return {"addr": addr, "hex": "", "n": 0}
+    raw = ida_bytes.get_bytes(ea, n)
+    if raw is None or len(raw) < n:  # nothing (or not all) mapped
+        base = bytearray(raw or b"")
+        base.extend(b"\\xff" * (n - len(base)))
+        raw = bytes(base)
+    ba = bytearray(raw)
+    # Only unloaded bytes read as 0xFF; correct just those to 0 (bss => zero).
+    i = ba.find(0xFF)
+    while i != -1:
+        if not ida_bytes.is_loaded(ea + i):
+            ba[i] = 0
+        i = ba.find(0xFF, i + 1)
+    return {"addr": addr, "hex": bytes(ba).hex(), "n": len(ba)}
+
+
 def _idatui_head_row(ea):
     """One flat-listing row for the head at ``ea``: kind (code/data/unknown),
     byte size, rendered text, and any symbol name."""
