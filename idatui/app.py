@@ -97,6 +97,7 @@ class NavEntry:
     dec_scroll_y: int = -1 # pseudocode viewport top (-1 = derive)
     dec_scroll_x: int = 0  # pseudocode horizontal scroll
     is_region: bool = False  # not inside a function (flat listing view)
+    view: str = "listing"  # which code view to restore this entry in
 
 
 class SearchRequested(Message):
@@ -2811,7 +2812,9 @@ class IdaTui(App):
         if addr is None:
             self.app.call_from_thread(self._status, "nothing to follow on this line")
             return
-        self._do_navigate(addr, push=True)
+        # Following FROM pseudocode: keep the reader in the decompiler when the
+        # target is decompilable, instead of dropping to the linear listing.
+        self._do_navigate(addr, push=True, prefer_decomp=True)
 
     def _ref_on_line(self, line: str) -> int | None:
         """Address of the first decompiler ref whose name appears on ``line``."""
@@ -2916,7 +2919,10 @@ class IdaTui(App):
 
     def _on_xref_chosen(self, addr: int | None) -> None:
         if addr is not None:
-            self._goto_ea(addr, push=True, focus_name=self._xref_focus_name)
+            # If xrefs was invoked from the decompiler, land the jump back in the
+            # decompiler (when the target is decompilable) rather than the listing.
+            self._goto_ea(addr, push=True, focus_name=self._xref_focus_name,
+                          prefer_decomp=(self._active == "decomp"))
 
     # -- rename ------------------------------------------------------------ #
     @staticmethod
@@ -3396,21 +3402,56 @@ class IdaTui(App):
     # -- navigation to an arbitrary address ------------------------------- #
     @work(thread=True, group="nav")
     def _goto_ea(self, ea: int, push: bool = True,
-                 focus_name: str | None = None) -> None:
-        self._do_navigate(ea, push, focus_name)
+                 focus_name: str | None = None, prefer_decomp: bool = False) -> None:
+        self._do_navigate(ea, push, focus_name, prefer_decomp)
 
-    def _do_navigate(self, ea: int, push: bool,
-                     focus_name: str | None = None) -> None:  # worker context
+    def _do_navigate(self, ea: int, push: bool, focus_name: str | None = None,
+                     prefer_decomp: bool = False) -> None:  # worker context
         assert self.program is not None
-        # Unified: everything opens the one continuous listing at ``ea``. A
+        fn = self.program.function_of(ea)
+        # Jumping FROM the decompiler: stay in pseudocode when the target is a
+        # decompilable function, landing on the line that matches ``ea``.
+        if prefer_decomp and fn is not None:
+            dec = self.program.decompile(fn.addr)
+            if not dec.failed and dec.code:
+                dec_idx = self._decomp_line_for(fn.addr, ea)
+                self.app.call_from_thread(
+                    self._open_decomp_entry, fn.addr, fn.name, max(dec_idx, 0), push)
+                return
+        # Otherwise: everything opens the one continuous listing at ``ea``. A
         # function name is used for the status label; a region gets a segment
         # label. F5/Tab decompiles the function under the cursor from here.
-        fn = self.program.function_of(ea)
         lm = self.program.listing(ea)
         idx = max(lm.ensure_ea(ea), 0) if lm is not None else 0
         name = fn.name if fn is not None else self.program.region_label(ea)
         self.app.call_from_thread(
             self._open_at, ea, name, idx, push, -1, 0, fn is None)
+
+    def _open_decomp_entry(self, fn_addr: int, fn_name: str, dec_idx: int,
+                           push: bool) -> None:
+        """Open ``fn_addr`` in the decompiler as a real navigation (nav history
+        aware), landing on pseudocode line ``dec_idx``."""
+        if push:
+            # Snapshot where we jumped from so 'back' returns there. If that was
+            # the pseudocode (F5 makes a transient _cur not yet on the stack),
+            # record its position and push it as a decomp entry.
+            if self._active == "decomp" and self._cur is not None:
+                dv = self.query_one(DecompView)
+                src = self._cur
+                src.view = "decomp"
+                src.dec_cursor = dv.cursor
+                src.dec_cursor_x = dv.cursor_x
+                src.dec_scroll_y = round(dv.scroll_offset.y)
+                if not self._nav or self._nav[-1] is not src:
+                    self._nav.append(src)
+            else:
+                self._save_current_pos()
+        self._decomp_return = None  # a real navigation abandons the F5 return
+        entry = NavEntry(ea=fn_addr, name=fn_name, view="decomp",
+                         dec_cursor=dec_idx)
+        if push:
+            self._nav.append(entry)
+        self._open_entry(entry, push=False)
 
     def _decomp_col_for(self, fn_addr: int, line_idx: int, name: str) -> int:
         """Column of ``name`` (whole-word) on pseudocode line ``line_idx``, so an
@@ -3680,6 +3721,18 @@ class IdaTui(App):
         if self.program is None:
             return
         self._cur = entry
+        if entry.view == "decomp":
+            # This entry was viewed in the decompiler (a jump from pseudocode, or
+            # a back/forward to one) — restore it there instead of the listing.
+            self._active = "decomp"
+            dec = self.query_one(DecompView)
+            if dec.loaded_ea == entry.ea:
+                # already decompiled: reposition without a recompile
+                dec.goto(entry.dec_cursor, entry.dec_cursor_x,
+                         entry.dec_scroll_y if entry.dec_scroll_y >= 0 else -1,
+                         entry.dec_scroll_x)
+            self._show_active()  # loads the pseudocode if loaded_ea != entry.ea
+            return
         # Unified model: the code view is always the continuous listing,
         # positioned at this entry. The decompiler is a per-function toggle
         # (F5/Tab -> _decomp_from_listing), never opened implicitly.
