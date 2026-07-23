@@ -1619,6 +1619,31 @@ async def s_continuous_view(c: Ctx):
                 app._active == "listing", f"active={app._active}")
 
 
+@scenario("func_banners")
+async def s_func_banners(c: Ctx):
+    """The unified listing shows IDA-style function boundary banners: a
+    SUBROUTINE separator + 'name proc near' header and a 'name endp' footer,
+    and those banner rows are display-only (navigation lands on real code)."""
+    app = c.app
+    fn = await c.open_biggest("listing")
+    c.lst.model.load_all()
+    heads = [c.lst.model.get(i) for i in range(len(c.lst.model))]
+    ci = c.lst.model.index_of_ea(fn.addr)
+    c.check("navigation to a function lands on its code head, not a banner",
+            ci >= 0 and c.lst.model.get(ci).kind == "code",
+            f"kind={c.lst.model.get(ci).kind if ci >= 0 else None}")
+    c.check("a SUBROUTINE separator banner is present",
+            any(h.kind == "sep" and "S U B R O U T I N E" in h.text for h in heads))
+    c.check("a 'name proc near' header is present",
+            any(h.kind == "funchdr" and h.text.endswith("proc near") for h in heads))
+    c.check("a 'name endp' footer is present",
+            any(h.kind == "funchdr" and h.text.endswith("endp") for h in heads))
+    # the proc header for the origin function carries its name
+    hdr = next((h for h in heads if h.kind == "funchdr"
+                and h.text == f"{fn.name} proc near"), None)
+    c.check("the proc header names the function", hdr is not None, f"fn={fn.name}")
+
+
 # --------------------------------------------------------------------------- #
 # Runner
 # --------------------------------------------------------------------------- #

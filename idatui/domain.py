@@ -595,7 +595,8 @@ class ListingModel:
             if self._done or self._next is None:
                 return 0
             frm = self._next
-        payload = self._prog.client.call("heads", addr=hex(frm), count=self.PAGE)
+        payload = self._prog.client.call(
+            "heads", addr=hex(frm), count=self.PAGE, annotate=True)
         rows = payload.get("heads", []) if isinstance(payload, dict) else []
         cur = payload.get("cursor", {}) if isinstance(payload, dict) else {}
         page = []
@@ -608,7 +609,10 @@ class ListingModel:
         with self._lock:
             base = len(self._heads)
             for i, h in enumerate(page):
-                self._by_ea.setdefault(h.ea, base + i)
+                # Banner rows (function headers/separators) are display-only;
+                # don't index them so navigation lands on real code/data.
+                if h.kind not in ("sep", "funchdr"):
+                    self._by_ea.setdefault(h.ea, base + i)
                 self._heads.append(h)
             nxt = cur.get("next")
             if nxt is None:

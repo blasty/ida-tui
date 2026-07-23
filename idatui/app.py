@@ -54,6 +54,8 @@ _S_OPBYTES = Style(color="grey50")  # raw opcode bytes column
 _S_DATA = Style(color="#c8a15a")   # data items in the flat listing (db/dw/strings)
 _S_UNK = Style(color="grey54", italic=True)  # undefined bytes in the flat listing
 _S_MEMBER = Style(color="#9a8a6a")  # struct field rows (expanded, indented)
+_S_SEP = Style(color="grey42")      # function boundary separators / banners
+_S_FUNCHDR = Style(color="#d7a021", bold=True)  # 'name proc near'/'endp' headers
 
 # Tokens that look like identifiers but aren't renamable symbols (so 'n' on them
 # in the listing names the address instead of trying to rename the token).
@@ -963,6 +965,8 @@ class ListingView(SearchMixin, NavMixin, ColumnCursor, ScrollView, can_focus=Tru
         h = self._head(idx)
         if h is None:
             return None
+        if h.kind in ("sep", "funchdr"):
+            return h.text
         indent = "    " if h.kind == "member" else ""
         return (f"{h.ea:08X}  " + self._op_field(h) + indent
                 + self._name_prefix(h) + h.text)
@@ -1092,6 +1096,10 @@ class ListingView(SearchMixin, NavMixin, ColumnCursor, ScrollView, can_focus=Tru
         h = model.get(idx)
         if h is None:
             strip = Strip([Segment(f"  {idx:>8}  …", _S_DIM)])
+        elif h.kind == "sep":
+            strip = Strip([Segment(h.text, _S_SEP)])
+        elif h.kind == "funchdr":
+            strip = Strip([Segment(h.text, _S_FUNCHDR)])
         else:
             segs: list[Segment] = [Segment(f"{h.ea:08X}  ", _S_ADDR)]
             op = self._op_field(h)

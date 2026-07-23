@@ -338,6 +338,32 @@ def _idatui_struct_member_rows(ea):
     return rows
 
 
+def _idatui_func_header_rows(ea):
+    """IDA-style subroutine banner rows shown just before a function's entry."""
+    import ida_funcs
+
+    name = ida_funcs.get_func_name(ea) or "sub_%X" % ea
+    bar = "=" * 15 + " S U B R O U T I N E " + "=" * 15
+    return [
+        {"ea": hex(ea), "kind": "sep", "size": 0, "text": ""},
+        {"ea": hex(ea), "kind": "sep", "size": 0, "text": "; " + bar},
+        {"ea": hex(ea), "kind": "funchdr", "size": 0,
+         "text": name + " proc near", "name": name},
+    ]
+
+
+def _idatui_func_footer_rows(ea, func):
+    """End-of-function marker shown just after a function's last item."""
+    import ida_funcs
+
+    name = ida_funcs.get_func_name(func.start_ea) or "sub_%X" % func.start_ea
+    return [
+        {"ea": hex(ea), "kind": "funchdr", "size": 0,
+         "text": name + " endp", "name": name},
+        {"ea": hex(ea), "kind": "sep", "size": 0, "text": "; " + "-" * 60},
+    ]
+
+
 @tool
 @idasync
 def heads(
@@ -346,6 +372,7 @@ def heads(
     offset: Annotated[int, "Skip first N heads from addr (default 0)"] = 0,
     end: Annotated[str, "Optional exclusive end address; default = segment end"] = "",
     back: Annotated[bool, "Walk backwards: return the count heads ENDING just before addr, in forward order"] = False,
+    annotate: Annotated[bool, "Emit IDA-style function boundary banner rows (kind sep/funchdr)"] = False,
 ) -> dict:
     """Walk item heads from ``addr`` as a flat listing: every head is rendered
     (code OR data OR undefined) via generate_disasm_line and stepped with
@@ -415,10 +442,20 @@ def heads(
     def _rows_for(e):
         if _is_unknown(e):
             return [_idatui_unknown_row(e, _run_end(e) - e)]
+        func = idaapi.get_func(e) if annotate else None
+        at_start = func is not None and func.start_ea == e
+        out = []
+        if at_start:
+            out.extend(_idatui_func_header_rows(e))
         row = _idatui_head_row(e)
-        out = [row]
+        if at_start:
+            row = dict(row)
+            row["name"] = None  # the name is shown on the proc header line
+        out.append(row)
         if row.get("kind") == "data":
             out.extend(_idatui_struct_member_rows(e))  # expand struct fields
+        if func is not None and ida_bytes.get_item_end(e) >= func.end_ea:
+            out.extend(_idatui_func_footer_rows(e, func))
         return out
 
     ea = ida_bytes.get_item_head(start)
