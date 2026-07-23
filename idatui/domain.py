@@ -1274,8 +1274,20 @@ class Program:
             return int(s, 16)
         if re.fullmatch(r"[0-9a-fA-F]+", s):
             return int(s, 16)
-        # Symbol name -> ask the server. lookup_funcs takes an array of strings
-        # and returns [{"query":..., "fn": {addr,name,size} | null, "error":...}].
+        # Symbol name -> resolve to the address the NAME denotes (get_name_ea via
+        # resolve_names). This handles functions, data AND mid-function labels
+        # (loc_/locret_): lookup_funcs would map a label to its *containing*
+        # function's entry, so double-clicking a label jumped to the wrong place.
+        try:
+            payload = self.client.call("resolve_names", queries=[s])
+            res = payload.get("result", []) if isinstance(payload, dict) else []
+            ea = res[0].get("ea") if res and isinstance(res[0], dict) else None
+            if ea:
+                return _as_int(ea)
+        except IDAToolError:
+            pass  # older server without resolve_names -> fall back below
+        # Fall back to function-name resolution (also drives the 'did you mean'
+        # suggestion when the name is unknown).
         try:
             payload = self.client.call("lookup_funcs", queries=[s])
         except IDAToolError as e:

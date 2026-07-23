@@ -42,6 +42,25 @@ def _idatui_lv_get(x):
 
 @tool
 @idasync
+def resolve_names(
+    queries: Annotated[list, "Symbol name(s) to resolve to their OWN address"],
+) -> list:
+    """Resolve named locations (functions, labels like loc_/locret_, data) to the
+    exact address the NAME denotes, via get_name_ea. Unlike lookup_funcs, a
+    mid-function label resolves to the label's address, not the containing
+    function's entry."""
+    import idaapi
+    qs = queries if isinstance(queries, list) else [queries]
+    out = []
+    for q in qs:
+        q = str(q).strip()
+        ea = idaapi.get_name_ea(idaapi.BADADDR, q)
+        out.append({"query": q, "ea": (hex(ea) if ea != idaapi.BADADDR else None)})
+    return out
+
+
+@tool
+@idasync
 def del_type(
     name: Annotated[str, "Local type name to delete (struct/union/enum/typedef)"],
 ) -> dict:
