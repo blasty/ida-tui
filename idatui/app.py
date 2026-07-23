@@ -987,6 +987,8 @@ class ListingView(SearchMixin, NavMixin, ColumnCursor, ScrollView, can_focus=Tru
         self._ranges: dict[int, list[tuple[int, int]]] = {}
         self._op_mode = 1       # opcode column: 0=off, 1=limited, 2=full ('o' cycles)
         self._op_w = 0          # char width of the hex-bytes field (excl. gap)
+        self._search_loading = False
+        self._search_pending: list = []  # done-callbacks awaiting the load
 
     # -- text helpers ------------------------------------------------------ #
     def _head(self, idx: int) -> Head | None:
@@ -1130,11 +1132,33 @@ class ListingView(SearchMixin, NavMixin, ColumnCursor, ScrollView, can_focus=Tru
         return self._line_plain(i)
 
     def _search_ensure(self, done) -> None:
-        # Search the currently-loaded portion; the background grower streams the
-        # rest of the segment in on its own (a blocking full load_all here would
-        # stall/thrash on a big segment). Unloaded lines read back as None from
-        # _search_line_text and are skipped until they arrive.
-        done()
+        # Search needs the whole segment loaded to find every match. Kick off a
+        # SINGLE background load (guarded so per-keystroke updates don't spawn
+        # one worker each — an exclusive worker would cancel+restart on every
+        # keypress and never finish) and queue the callbacks until it lands.
+        model = self.model
+        if model is None or model.complete:
+            done()
+            return
+        self._search_pending.append(done)
+        if not self._search_loading:
+            self._search_loading = True
+            self._search_load_all()
+
+    @work(thread=True, group="listing-search-load")
+    def _search_load_all(self) -> None:
+        model = self.model
+        if model is not None:
+            model.load_all()
+        self.app.call_from_thread(self._search_loaded)
+
+    def _search_loaded(self) -> None:
+        self._search_loading = False
+        if self.model is not None:
+            self._grew(len(self.model))
+        pending, self._search_pending = self._search_pending, []
+        for cb in pending:
+            cb()
 
     # -- rendering --------------------------------------------------------- #
     def render_line(self, y: int) -> Strip:
