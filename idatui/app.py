@@ -975,9 +975,9 @@ class ListingView(SearchMixin, NavMixin, ColumnCursor, ScrollView, can_focus=Tru
         h = self._head(idx)
         if h is None:
             return None
-        # Function-name headers sit at depth 0 (with the address); everything
-        # else is indented one level, code/data opcode+text included.
-        if h.kind == "funchdr":
+        # Function headers and code labels sit at depth 0 (with the address);
+        # everything else is indented one level (opcode+text included).
+        if h.kind in ("funchdr", "label"):
             return f"{h.ea:08X}  {h.text}"
         base = f"{h.ea:08X}  " + _LST_INDENT
         if h.kind == "sep":
@@ -1090,19 +1090,11 @@ class ListingView(SearchMixin, NavMixin, ColumnCursor, ScrollView, can_focus=Tru
         return self._line_plain(i)
 
     def _search_ensure(self, done) -> None:
-        # Search needs the whole segment; finish loading it first if streaming.
-        if self.model is not None and not self.model.complete:
-            self._search_load_all(done)
-        else:
-            done()
-
-    @work(thread=True, exclusive=True, group="listing-search-load")
-    def _search_load_all(self, done) -> None:  # type: ignore[no-untyped-def]
-        model = self.model
-        if model is not None:
-            model.load_all()
-            self.app.call_from_thread(self._grew, len(model))
-        self.app.call_from_thread(done)
+        # Search the currently-loaded portion; the background grower streams the
+        # rest of the segment in on its own (a blocking full load_all here would
+        # stall/thrash on a big segment). Unloaded lines read back as None from
+        # _search_line_text and are skipped until they arrive.
+        done()
 
     # -- rendering --------------------------------------------------------- #
     def render_line(self, y: int) -> Strip:
@@ -1124,6 +1116,10 @@ class ListingView(SearchMixin, NavMixin, ColumnCursor, ScrollView, can_focus=Tru
             # depth-0: address + 'name proc'/'endp' (no indent)
             strip = Strip([Segment(f"{h.ea:08X}  ", _S_ADDR),
                            Segment(h.text, _S_FUNCHDR)])
+        elif h.kind == "label":
+            # depth-0: address + 'loc_XXX:' on its own line
+            strip = Strip([Segment(f"{h.ea:08X}  ", _S_ADDR),
+                           Segment(h.text, _S_LABEL)])
         else:
             # depth-1: address, one indent, then opcode+text
             segs: list[Segment] = [Segment(f"{h.ea:08X}  ", _S_ADDR),

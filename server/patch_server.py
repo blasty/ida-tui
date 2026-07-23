@@ -451,6 +451,14 @@ def heads(
         if at_start:
             row = dict(row)
             row["name"] = None  # the name is shown on the proc header line
+        elif annotate and row.get("kind") == "code" and row.get("name"):
+            # A code label (loc_XXX/jump target) gets its OWN line at depth 0,
+            # like IDA; strip it from the instruction row below.
+            nm = row["name"]
+            out.append({"ea": hex(e), "kind": "label", "size": 0,
+                        "text": nm + ":", "name": nm})
+            row = dict(row)
+            row["name"] = None
         out.append(row)
         if row.get("kind") == "data":
             out.extend(_idatui_struct_member_rows(e))  # expand struct fields

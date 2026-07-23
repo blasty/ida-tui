@@ -609,9 +609,10 @@ class ListingModel:
         with self._lock:
             base = len(self._heads)
             for i, h in enumerate(page):
-                # Banner rows (function headers/separators) are display-only;
-                # don't index them so navigation lands on real code/data.
-                if h.kind not in ("sep", "funchdr"):
+                # Banner/label rows (function headers, separators, code labels)
+                # are display-only; don't index them so navigation lands on the
+                # real code/data head at that address.
+                if h.kind not in ("sep", "funchdr", "label"):
                     self._by_ea.setdefault(h.ea, base + i)
                 self._heads.append(h)
             nxt = cur.get("next")
