@@ -3124,7 +3124,18 @@ class IdaTui(App):
         if cur is None:
             return
         if self._active == "decomp":
-            self.query_one(DecompView).loaded_ea = None  # force re-decompile
+            # Snapshot the LIVE pseudocode position before forcing a recompile.
+            # dec_scroll_y isn't tracked on every move, so without this the reload
+            # falls into show()'s derive path (a bare scroll_to) and leaves a
+            # stale frame until the next cursor move; capturing the real scroll
+            # makes show() take the robust _apply_scroll path and repaint now.
+            dec = self.query_one(DecompView)
+            if cur.ea == dec.loaded_ea:
+                cur.dec_cursor = dec.cursor
+                cur.dec_cursor_x = dec.cursor_x
+                cur.dec_scroll_y = round(dec.scroll_offset.y)
+                cur.dec_scroll_x = round(dec.scroll_offset.x)
+            dec.loaded_ea = None  # force re-decompile
             self._show_active()
         else:
             # Capture the LIVE listing position straight from the widget (the
