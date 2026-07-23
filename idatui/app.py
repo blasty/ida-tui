@@ -607,6 +607,7 @@ class DisasmView(SearchMixin, NavMixin, ColumnCursor, ScrollView, can_focus=True
         Binding("p", "define_func", "Func", show=False),
         Binding("u", "undefine", "Undef", show=False),
         Binding("tab,shift+tab", "app.toggle_view", "Pseudocode", priority=True),
+        Binding("L", "app.continuous_here", "Listing"),
         *SearchMixin.SEARCH_BINDINGS,
         *NavMixin.NAV_BINDINGS,
         *ColumnCursor.COL_BINDINGS,
@@ -1165,6 +1166,7 @@ class DecompView(SearchMixin, NavMixin, ColumnCursor, ScrollView, can_focus=True
 
     BINDINGS = [
         Binding("tab,shift+tab", "app.toggle_view", "Disasm", priority=True),
+        Binding("L", "app.continuous_here", "Listing"),
         Binding("j,down", "cursor_down", "Down", show=False),
         Binding("k,up", "cursor_up", "Up", show=False),
         Binding("ctrl+d", "half_page(1)", "½↓", show=False),
@@ -3392,6 +3394,42 @@ class IdaTui(App):
 
     def _code_view(self):  # type: ignore[no-untyped-def]
         return self.query_one(DecompView if self._pref == "decomp" else DisasmView)
+
+    def _active_code_view(self):  # type: ignore[no-untyped-def]
+        """The currently-shown code widget (for reading the cursor address)."""
+        if self._active == "listing":
+            return self.query_one(ListingView)
+        if self._active == "disasm":
+            return self.query_one(DisasmView)
+        if self._active == "decomp":
+            return self.query_one(DecompView)
+        return None
+
+    def action_continuous_here(self) -> None:
+        """'L': open the continuous segment listing at the cursor — one long
+        flat view where functions, data and undefined bytes are interleaved,
+        instead of the function-bounded disassembly."""
+        if self.program is None:
+            return
+        view = self._active_code_view()
+        ea = self._line_ea_for(view) if view is not None else None
+        if ea is None and self._cur is not None:
+            ea = self._cur.ea
+        if ea is None:
+            self._status("no address here to open the continuous listing")
+            return
+        if self._cur is not None and self._cur.is_region:
+            self._status("already in the continuous listing")
+            return
+        self._goto_continuous(ea)
+
+    @work(thread=True, group="nav")
+    def _goto_continuous(self, ea: int, push: bool = True) -> None:
+        assert self.program is not None
+        name = self.program.region_label(ea)
+        lm = self.program.listing(ea)
+        idx = max(lm.ensure_ea(ea), 0) if lm is not None else 0
+        self.app.call_from_thread(self._open_at, ea, name, idx, push, -1, 0, True)
 
     @work(thread=True, exclusive=True, group="goto")
     def _goto(self, target: str) -> None:

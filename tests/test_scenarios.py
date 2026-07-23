@@ -1604,6 +1604,33 @@ async def s_listing_struct_expand(c: Ctx):
         c.prog.bump_items()
 
 
+@scenario("continuous_view")
+async def s_continuous_view(c: Ctx):
+    """'L' opens one long continuous segment listing (functions + data
+    interleaved) at the cursor, instead of the function-bounded disasm."""
+    app = c.app
+    fn = await c.open_biggest("disasm")
+    func_total = c.dis.total
+    fn_ea = fn.addr
+    c.dis.focus()
+    await c.press("L")
+    await c.wait(lambda: app._active == "listing" and app._cur is not None
+                 and app._cur.is_region and c.lst.total > 0, 25)
+    c.check("L opens the continuous listing",
+            app._active == "listing" and app._cur.is_region,
+            f"active={app._active} cur={app._cur}")
+    c.check("cursor lands at the origin function in the continuous view",
+            c.lst._cursor_ea() == fn_ea, f"cur_ea={c.lst._cursor_ea()}")
+    # the continuous listing spans the whole segment, not just the function
+    c.lst.model.load_all()
+    c.check("continuous listing extends past the function's bounds",
+            len(c.lst.model) > func_total,
+            f"listing={len(c.lst.model)} func={func_total}")
+    kinds = {c.lst.model.get(i).kind for i in range(len(c.lst.model))}
+    c.check("continuous listing interleaves code with data/undefined",
+            "code" in kinds and ("data" in kinds or "unknown" in kinds), str(kinds))
+
+
 # --------------------------------------------------------------------------- #
 # Runner
 # --------------------------------------------------------------------------- #
