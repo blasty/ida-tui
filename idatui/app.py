@@ -3577,13 +3577,14 @@ class IdaTui(App):
                     # Jumping to the function itself: land on its name in the
                     # prototype (line 0), not column 0.
                     dec_idx = 0
-                    token = fn.name
+                    col = self._decomp_col_for(fn.addr, 0, fn.name)
                 else:
                     # A mid-function site (e.g. an xref jump to a call site):
-                    # land on the referenced symbol on that line, not column 0.
-                    dec_idx = max(self._decomp_line_for(fn.addr, ea), 0)
-                    token = focus_name or fn.name
-                col = self._decomp_col_for(fn.addr, dec_idx, token) if token else 0
+                    # anchor on the address but snap to the nearest line that
+                    # actually holds the referenced symbol (the marker line and
+                    # the symbol's line can differ), landing on the token.
+                    dec_idx, col = self._decomp_locate(fn.addr, ea,
+                                                       focus_name or fn.name)
                 self.app.call_from_thread(
                     self._open_decomp_entry, fn.addr, fn.name, dec_idx, col, push)
                 return
@@ -3637,6 +3638,40 @@ class IdaTui(App):
         clean = _ADDR_MARK_STRIP_RE.sub("", lines[line_idx])
         m = re.search(rf"\b{re.escape(name)}\b", clean)
         return m.start() if m else 0
+
+    def _decomp_locate(self, fn_addr: int, ea: int,
+                       token: str | None) -> tuple[int, int]:
+        """Best (line, column) for address ``ea`` in ``fn_addr``'s pseudocode.
+
+        Anchors on the /*0xEA*/ marker line for ``ea``, but Hex-Rays can attribute
+        an address to a line a step off from where the referenced symbol actually
+        appears. So when ``token`` is given, snap to the whole-word occurrence of
+        it NEAREST the anchor line (preferring the anchor line itself, then the
+        line just below), which disambiguates repeated symbols by address."""
+        assert self.program is not None
+        try:
+            dec = self.program.decompile(fn_addr)
+        except Exception:  # noqa: BLE001
+            return (0, 0)
+        lines = (dec.code or "").splitlines()
+        if not lines:
+            return (0, 0)
+        anchor = self._decomp_line_for(fn_addr, ea)
+        anchor = anchor if anchor >= 0 else 0
+        if not token:
+            return (anchor, 0)
+        pat = re.compile(rf"\b{re.escape(token)}\b")
+        best: tuple[int, int] | None = None
+        best_key: tuple[int, int] | None = None
+        for i, ln in enumerate(lines):
+            m = pat.search(_ADDR_MARK_STRIP_RE.sub("", ln))
+            if not m:
+                continue
+            # rank: nearest to the anchor; tie -> the line at/after the anchor.
+            key = (abs(i - anchor), 0 if i >= anchor else 1)
+            if best_key is None or key < best_key:
+                best_key, best = key, (i, m.start())
+        return best if best is not None else (anchor, 0)
 
     def _decomp_line_for(self, fn_addr: int, ea: int) -> int:
         """Pseudocode line index best matching address ``ea``: the line whose
