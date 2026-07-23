@@ -98,6 +98,10 @@ class Head:
     name: str | None = None
     raw: bytes | None = None  # opcode/item bytes (filled in for code by the model)
 
+    @property
+    def label(self) -> str | None:  # Line-compatible alias
+        return self.name
+
     @classmethod
     def from_raw(cls, d: dict) -> "Head":
         return cls(
@@ -680,6 +684,21 @@ class ListingModel:
         with self._lock:
             return self._by_ea.get(ea, -1)
 
+    # -- DisasmModel-compatible accessors (unified model) ------------------ #
+    def cached_line(self, idx: int) -> Head | None:
+        """Alias of get() for the disasm view's Line interface."""
+        return self.get(idx)
+
+    def lines(self, start: int, count: int, prefetch: bool = True) -> list[Head]:
+        return self.window(start, count)
+
+    def is_cached(self, start: int, count: int) -> bool:
+        with self._lock:
+            return start + count <= len(self._heads)
+
+    def ensure_async(self, start: int, count: int) -> None:
+        pass  # the background grower streams the rest in; nothing to prefetch
+
 
 # --------------------------------------------------------------------------- #
 # Hex model: block-cached byte view over the loaded image (VA-addressed)
@@ -1114,12 +1133,13 @@ class Program:
         return dec
 
     def bump_names(self) -> None:
-        """Signal that symbol names changed (a rename). Disasm names are live in
-        the IDB, so clearing the block caches is enough for those; decompilation
-        is generation-checked and force-recompiled lazily on next access."""
+        """Signal that symbol names changed (a rename). Disasm/listing names are
+        live in the IDB, so clearing the cached rows is enough for those;
+        decompilation is generation-checked and force-recompiled lazily."""
         with self._lock:
             self._name_gen += 1
             models = list(self._disasm.values())
+            self._listings.clear()  # listing head rows cache names -> refetch
         for m in models:
             m.invalidate()
 

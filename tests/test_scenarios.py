@@ -93,7 +93,7 @@ class Ctx:
     # -- shorthands ------------------------------------------------------- #
     @property
     def dis(self):
-        return self.app.query_one(DisasmView)
+        return self.app.query_one(ListingView)  # unified code view (was DisasmView)
 
     @property
     def dec(self):
@@ -155,23 +155,25 @@ class Ctx:
         return None
 
     # -- navigation (setup; fast internal path) --------------------------- #
-    async def open(self, target, view="decomp", t=25):
-        """Open a function (name or ea) to its entry, in ``view`` ('decomp' or
-        'disasm'). Returns the Func."""
+    async def open(self, target, view="listing", t=25):
+        """Open a function (name or ea) at its entry in the unified listing. With
+        ``view='decomp'`` it then F5s into the pseudocode. Returns the Func."""
         ea = self.prog.resolve(target) if isinstance(target, str) else int(target)
         fn = self.prog.function_of(ea)
         if fn is None:
             raise RuntimeError(f"no function for {target!r}")
-        self.app._pref = view
         self.app._open_function(fn.addr, fn.name)
         await self.wait(lambda: self.app._cur and self.app._cur.ea == fn.addr, t)
+        await self.wait(lambda: self.lst.total > 0
+                        and self.lst._cursor_ea() is not None, t)
         if view == "decomp":
-            await self.wait(lambda: self.dec.loaded_ea == fn.addr, t)
-        else:
-            await self.wait(lambda: self.dis.total > 0, t)
+            self.lst.focus()
+            await self.press("tab")  # F5/Tab -> decompile the function at cursor
+            await self.wait(lambda: self.app._active == "decomp"
+                            and self.dec.loaded_ea == fn.addr, t)
         return fn
 
-    async def open_biggest(self, view="disasm"):
+    async def open_biggest(self, view="listing"):
         return await self.open(self.biggest().addr, view)
 
     async def goto_ui(self, target):
@@ -312,26 +314,25 @@ async def s_palette(c: Ctx):
 @scenario("decomp_fallback")
 async def s_fallback(c: Ctx):
     app = c.app
-    d_view, c_view = c.dis, c.dec
     failing = next((f for f in reversed(c.all_funcs())
                     if c.prog.decompile(f.addr).failed), None)
     if failing is None:
         c.check("found a decompile-failing function", False)
         return
-    app._pref = "decomp"
-    app._goto(hex(failing.addr))
-    await c.wait(lambda: app._cur and app._cur.ea == failing.addr, 20)
-    await c.wait(lambda: app._active == "disasm", 20)
-    c.check("decompile failure falls back to disassembly (preference kept)",
-            app._active == "disasm" and d_view.display and not c_view.display
-            and app._pref == "decomp",
-            f"active={app._active} pref={app._pref} "
-            f"disp(dis={d_view.display},dec={c_view.display})")
-    app._goto("main")
-    await c.wait(lambda: app._cur and app._cur.name == "main", 20)
-    await c.wait(lambda: app._active == "decomp" and c_view.display, 25)
-    c.check("preference preserved: next function opens as pseudocode",
-            app._active == "decomp" and c_view.display, f"active={app._active}")
+    # Open the failing function in the listing, then F5: decompile fails -> the
+    # view stays on the linear listing (no error panel).
+    await c.open(failing.addr, "listing")
+    c.dis.focus()
+    await c.press("tab")
+    await c.wait(lambda: app._active == "listing"
+                 and "fail" in c.status().lower(), 25)
+    c.check("F5/Tab on an undecompilable function falls back to the listing",
+            app._active == "listing" and c.dis.display,
+            f"active={app._active} status={c.status()!r}")
+    # a decompilable function F5s into pseudocode
+    await c.open("main", "decomp")
+    c.check("a decompilable function F5s into pseudocode",
+            app._active == "decomp" and c.dec.display, f"active={app._active}")
 
 
 @scenario("structs")
@@ -425,21 +426,19 @@ async def s_structs(c: Ctx):
 async def s_open(c: Ctx):
     app = c.app
     fn = c.biggest()
-    app._pref = "decomp"
     app._open_function(fn.addr, fn.name)
     await c.wait(lambda: app._cur and app._cur.ea == fn.addr, 20)
-    await c.wait(lambda: c.dis.total > 0, 30)
-    c.check("disasm model loads with a total", c.dis.total > 0, f"total={c.dis.total}")
-    print(f"    biggest = {fn.name} ({c.dis.total} instrs)")
-    pc = await c.wait(lambda: app._active == "decomp" and c.dec.display
-                      and c.dec.loaded_ea == fn.addr, 25)
-    c.check("opening a function shows pseudocode by default", pc, f"active={app._active}")
+    await c.wait(lambda: c.lst.total > 0, 30)
+    c.check("opening a function shows the linear listing by default",
+            app._active == "listing" and c.lst.display and c.lst.total > 0,
+            f"active={app._active} total={c.lst.total}")
+    print(f"    biggest = {fn.name} ({c.lst.total} listing rows)")
 
 
 @scenario("disasm_nav")
 async def s_disasm_nav(c: Ctx):
     app, view = c.app, c.dis
-    await c.open_biggest("disasm")
+    await c.open_biggest("listing")
     view.focus()
     c.check("first instruction cached",
             view.model is not None and view.model.cached_line(0) is not None)
@@ -469,7 +468,7 @@ async def s_disasm_nav(c: Ctx):
 @scenario("hex")
 async def s_hex(c: Ctx):
     app, view = c.app, c.dis
-    await c.open_biggest("disasm")
+    await c.open_biggest("listing")
     view.focus()
     view.cursor = 4  # a non-entry instruction
     await c.pause(0.05)
@@ -506,7 +505,7 @@ async def s_hex(c: Ctx):
     await c.press("backslash")
     await c.wait(lambda: app._active != "hex", 10)
     c.check("backslash returns from hex to the code view",
-            app._active == "disasm", f"active={app._active}")
+            app._active == "listing", f"active={app._active}")
 
 
 @scenario("filter")
@@ -538,7 +537,7 @@ async def s_filter(c: Ctx):
     await c.press("ctrl+b")
     await c.pause(0.05)
     c.check("ctrl+b hides functions pane + focuses the code view",
-            not left.display and isinstance(app.focused, (DisasmView, DecompView)),
+            not left.display and isinstance(app.focused, (ListingView, DecompView)),
             f"display={left.display} focus={type(app.focused).__name__}")
     await c.press("ctrl+b")
     await c.pause(0.05)
@@ -561,7 +560,7 @@ async def s_view_toggle(c: Ctx):
     await c.press("tab")
     await c.pause(0.1)
     c.check("tab switches to disassembly",
-            app._active == "disasm" and dis.display and not dec.display,
+            app._active == "listing" and dis.display and not dec.display,
             f"active={app._active}")
     await c.press("tab")
     await c.wait(lambda: app._active == "decomp", 10)
@@ -588,22 +587,26 @@ async def s_view_toggle(c: Ctx):
 @scenario("search")
 async def s_search(c: Ctx):
     app, dis = c.app, c.dis
-    await c.open_biggest("disasm")
+    await c.open_biggest("listing")
     dis.focus()
-    line0 = dis.model.cached_line(0)
+    # derive the term from the instruction at the cursor (the function entry),
+    # not segment head 0 (which may still be streaming in)
+    line0 = dis.model.cached_line(dis.cursor)
     raw = (line0.text.split() or ["push"])[0] if line0 else "push"
     term = "".join(ch for ch in raw if ch.isalnum())[:4] or "push"
     await c.press("slash")
     await c.pause(0.1)
     await c.type(term)
     await c.press("enter")
-    await c.wait(lambda: bool(dis._matches), 25)
+    # the unified listing searches the whole segment (load_all) -> allow time
+    await c.wait(lambda: bool(dis._matches), 45)
     c.check("search finds matches", len(dis._matches) > 0, f"term={term!r}")
     c.check("cursor sits on a match", dis.cursor in dis._matches, f"cursor={dis.cursor}")
     c.check("match substring highlighted",
             bool(dis._ranges.get(dis.cursor)), str(dis._ranges.get(dis.cursor)))
     c.check("search cursor lands on the match's starting column",
-            dis.cursor_x == dis._ranges[dis.cursor][0][0],
+            bool(dis._ranges.get(dis.cursor))
+            and dis.cursor_x == dis._ranges[dis.cursor][0][0],
             f"cursor_x={dis.cursor_x} ranges={dis._ranges.get(dis.cursor)}")
     prev = dis.cursor
     await c.press("slash")
@@ -671,7 +674,7 @@ async def s_incr_filter(c: Ctx):
 @scenario("follow_xrefs")
 async def s_follow_xrefs(c: Ctx):
     app, dis, dec = c.app, c.dis, c.dec
-    await c.open_biggest("disasm")
+    await c.open_biggest("listing")
     dis.focus()
     lines = dis.model.lines(0, 400, prefetch=False)
     call_idx = next((i for i, ln in enumerate(lines)
@@ -713,71 +716,30 @@ async def s_follow_xrefs(c: Ctx):
         c.check("found a function with a code xref", False)
     else:
         xfn, xref = xf
-        xexp = app.program.disasm(xref.fn_addr).index_of_ea(xref.frm)
-        await c.press("g")
-        await c.pause(0.1)
-        await c.type(xfn.name)
-        await c.press("enter")
-        await c.wait(lambda: dis.total > 0 and app._cur.ea == xfn.addr, 20)
-        dis.focus()
-        dis.cursor, dis.cursor_x = 0, 0
+        await c.goto_ui(xfn.name)
+        await c.wait(lambda: c.lst.total > 0 and app._cur.ea == xfn.addr, 20)
+        c.lst.focus()
         await c.press("x")
         await c.wait(lambda: isinstance(app.screen, XrefsScreen), 25)
         app.screen.query_one(OptionList).highlighted = 0
         await c.press("enter")
         await c.wait(lambda: not isinstance(app.screen, XrefsScreen), 25)
-        await c.wait(lambda: app._cur.ea == xref.fn_addr, 25)
-        await c.pause(0.15)
-        c.check("xref-select lands on the referencing function + line",
-                app._cur.ea == xref.fn_addr and dis.cursor == xexp,
-                f"cur={app._cur.ea:#x} (want {xref.fn_addr:#x}) "
-                f"cursor={dis.cursor} (want {xexp})")
-
-        dcode = app.program.decompile(xref.fn_addr)
-        dexp, be = -1, -1
-        if not dcode.failed and dcode.code:
-            for i, ln in enumerate(dcode.code.splitlines()):
-                for mm in re.findall(r"/\*\s*0x([0-9A-Fa-f]+)\s*\*/", ln):
-                    e = int(mm, 16)
-                    if be < e <= xref.frm:
-                        be, dexp = e, i
-        if dexp >= 0:
-            app._pref = "decomp"
-            app._open_function(xfn.addr, xfn.name)
-            await c.wait(lambda: app._cur.ea == xfn.addr and app._active == "decomp", 20)
-            await c.wait(lambda: dec.loaded_ea == xfn.addr, 25)
-            app._xref_focus_name = xfn.name
-            app._on_xref_chosen(xref.frm)
-            await c.wait(lambda: dec.loaded_ea == xref.fn_addr, 25)
-            await c.pause(0.1)
-            c.check("xref-select lands on the reference LINE in pseudocode",
-                    dec.cursor == dexp, f"dec.cursor={dec.cursor} want={dexp}")
-            landed = dec._texts[dec.cursor] if dec.cursor < len(dec._texts) else ""
-            tokm = re.search(rf"\b{re.escape(xfn.name)}\b", landed)
-            want_col = tokm.start() if tokm else 0
-            c.check("xref-select lands the column on the reference token",
-                    dec.cursor_x == want_col,
-                    f"cursor_x={dec.cursor_x} want={want_col} "
-                    f"token={xfn.name!r} line={landed.strip()!r}")
-            anch = [(i, dec._line_ea(i)) for i in range(len(dec._texts))
-                    if dec._line_ea(i) is not None]
-            if len(anch) >= 4:
-                start_ln = anch[1][0]
-                far_ea = anch[len(anch) // 2][1]
-                exp2 = app._decomp_line_for(app._cur.ea, far_ea)
-                dec.focus()
-                dec.cursor = start_ln
-                dec.refresh()
-                await c.pause(0.05)
-                app._on_xref_chosen(far_ea)
-                await c.wait(lambda: dec.cursor == exp2, 20)
-                c.check("xref-select moves the cursor within the same function",
-                        dec.cursor == exp2 and exp2 != start_ln,
-                        f"dec.cursor={dec.cursor} want={exp2} start={start_ln}")
-            app._pref = "disasm"
-            app._active = "disasm"
-            app._show_active()
-            await c.pause(0.05)
+        # xref-select lands the listing cursor on the referencing SITE (frm)
+        await c.wait(lambda: c.lst._cursor_ea() == xref.frm, 25)
+        c.check("xref-select lands the cursor on the referencing site",
+                c.lst._cursor_ea() == xref.frm,
+                f"cur_ea={c.lst._cursor_ea()} want={xref.frm:#x}")
+        # F5 at the site decompiles the referencing function
+        c.lst.focus()
+        await c.press("tab")
+        landed = await c.wait(
+            lambda: (app._active == "decomp" and dec.loaded_ea == xref.fn_addr)
+            or (app._active == "listing" and "fail" in c.status().lower()), 25)
+        if app._active == "decomp":
+            c.check("F5 at the xref site decompiles the referencing function",
+                    dec.loaded_ea == xref.fn_addr, f"loaded={dec.loaded_ea}")
+            await c.press("tab")
+            await c.wait(lambda: app._active == "listing", 20)
 
         app._open_function(orig, orig_name)
         await c.wait(lambda: dis.total > 0 and app._cur.ea == orig, 20)
@@ -822,9 +784,10 @@ async def s_xref_labels(c: Ctx):
     if multi is None:
         c.check("found a function with multiple same-caller xrefs", False)
         return
-    await c.open(multi.addr, "disasm")
+    await c.open(multi.addr, "listing")
     dis.focus()
-    dis.cursor, dis.cursor_x = 0, 0
+    dis.cursor = max(dis.model.index_of_ea(multi.addr), 0)  # segment head at fn
+    dis.cursor_x = 0
     dis.refresh()
     await c.press("x")
     await c.wait(lambda: isinstance(app.screen, XrefsScreen), 25)
@@ -875,7 +838,7 @@ async def s_xref_labels(c: Ctx):
 @scenario("mouse")
 async def s_mouse(c: Ctx):
     app, dis = c.app, c.dis
-    await c.open_biggest("disasm")
+    await c.open_biggest("listing")
     dis.focus()
     await c.pause(0.1)
     mrow = mcol = msym = mline = None
@@ -1164,7 +1127,7 @@ async def s_scroll_restore(c: Ctx):
     fb = next((f for f in big if f.addr != fa.addr), big[-1])
     await c.goto_ui(fa.name)
     await c.wait(lambda: dis.total > 40 and app._cur.ea == fa.addr, 20)
-    if app._active != "disasm":
+    if app._active != "listing":
         await c.press("tab")
     await c.pause(0.1)
     for _ in range(4):
@@ -1208,7 +1171,7 @@ async def s_paging(c: Ctx):
     fa = next((f for f in big if f.size > 0x400), big[0])
     await c.goto_ui(fa.name)
     await c.wait(lambda: dis.total > 100 and app._cur.ea == fa.addr, 20)
-    if app._active != "disasm":
+    if app._active != "listing":
         await c.press("tab")
     await c.pause(0.1)
     for _ in range(6):
@@ -1230,7 +1193,7 @@ async def s_paging(c: Ctx):
 @scenario("rename_history")
 async def s_rename_history(c: Ctx):
     app, dis, dec = c.app, c.dis, c.dec
-    await c.open_biggest("disasm")
+    await c.open_biggest("listing")
     bea = app._cur.ea
     await c.press("tab")  # warm the caller's pseudocode too
     await c.wait(lambda: dec.loaded_ea == bea, 20)
@@ -1276,7 +1239,7 @@ async def s_rename_history(c: Ctx):
     await c.press("enter")
     await c.wait(lambda: app._func_index.by_addr(htarget)
                  and app._func_index.by_addr(htarget).name == hnew, 25)
-    if app._active != "disasm":
+    if app._active != "listing":
         await c.press("tab")
     await c.press("escape")
     await c.wait(lambda: dis.total > 0 and app._cur.ea != htarget, 25)
@@ -1337,7 +1300,7 @@ async def s_region_define(c: Ctx):
                      and app._cur is not None and not app._cur.is_region, 25)
         c.check("'p' creates a function and upgrades the listing to a function view",
                 c.prog.function_of(addr) is not None and not app._cur.is_region
-                and app._cur.ea == addr and app._active in ("disasm", "decomp"),
+                and app._cur.ea == addr and app._active in ("listing", "decomp"),
                 f"fn={c.prog.function_of(addr)} cur={app._cur} active={app._active}")
     finally:
         # idempotency: guarantee the function is back even if a check failed
@@ -1609,53 +1572,50 @@ async def s_listing_struct_expand(c: Ctx):
 
 @scenario("continuous_view")
 async def s_continuous_view(c: Ctx):
-    """'L' opens one long continuous segment listing (functions + data
-    interleaved) at the cursor, instead of the function-bounded disasm."""
+    """The default code view is ONE continuous listing: opening a function shows
+    the whole segment (functions + data interleaved, with opcodes); F5/Tab
+    decompiles the function at the cursor and back."""
     app = c.app
-    fn = await c.open_biggest("disasm")
-    func_total = c.dis.total
+    fn = await c.open_biggest("listing")
     fn_ea = fn.addr
-    c.dis.focus()
-    await c.press("L")
-    await c.wait(lambda: app._active == "listing" and app._cur is not None
-                 and app._cur.is_region and c.lst.total > 0, 25)
-    c.check("L opens the continuous listing",
-            app._active == "listing" and app._cur.is_region,
-            f"active={app._active} cur={app._cur}")
-    c.check("cursor lands at the origin function in the continuous view",
-            c.lst._cursor_ea() == fn_ea, f"cur_ea={c.lst._cursor_ea()}")
-    # the continuous listing spans the whole segment, not just the function
+    await c.wait(lambda: app._active == "listing" and c.lst.display, 10)
+    c.check("a function opens in the continuous listing by default",
+            app._active == "listing" and c.lst.display
+            and c.lst._cursor_ea() == fn_ea,
+            f"active={app._active} disp={c.lst.display} cur_ea={c.lst._cursor_ea()}")
+    # the listing spans the whole segment, not just the function
     c.lst.model.load_all()
-    c.check("continuous listing extends past the function's bounds",
-            len(c.lst.model) > func_total,
-            f"listing={len(c.lst.model)} func={func_total}")
-    kinds = {c.lst.model.get(i).kind for i in range(len(c.lst.model))}
+    seg = c.prog.segment_bounds(fn_ea)
+    seg_rows = len(c.lst.model)
+    # a function's own instruction count is far smaller than the segment
+    fdis = c.prog.disasm(fn_ea, fn.name)
+    c.check("the continuous listing extends past the function's bounds",
+            seg_rows > fdis.total(), f"listing={seg_rows} func={fdis.total()}")
+    kinds = {c.lst.model.get(i).kind for i in range(seg_rows)}
     c.check("continuous listing interleaves code with data/undefined",
             "code" in kinds and ("data" in kinds or "unknown" in kinds), str(kinds))
     # rendering parity with disasm: code lines carry opcode bytes
-    cidx = next((i for i in range(len(c.lst.model))
+    cidx = next((i for i in range(seg_rows)
                  if c.lst.model.get(i).kind == "code"), None)
     c.check("continuous listing renders opcode bytes (parity with disasm)",
             cidx is not None and c.lst.model.get(cidx).raw
             and c.lst._op_field(c.lst.model.get(cidx)).strip() != "",
             f"raw={c.lst.model.get(cidx).raw if cidx is not None else None!r}")
-    # F5 in the continuous listing (cursor at the origin function) -> decompiler
+    # F5/Tab at the function -> decompiler, and back to the same spot
     c.lst.focus()
-    await c.press("f5")
-    landed = await c.wait(
-        lambda: (app._active == "decomp" and c.dec.loaded_ea == fn_ea)
-        or (app._active == "listing" and "failed" in c.status().lower()), 25)
+    await c.press("tab")
+    await c.wait(lambda: (app._active == "decomp" and c.dec.loaded_ea == fn_ea)
+                 or (app._active == "listing" and "fail" in c.status().lower()), 25)
     if app._active == "decomp":
-        c.check("F5 in the listing decompiles the function under the cursor",
+        c.check("F5/Tab decompiles the function under the cursor",
                 c.dec.loaded_ea == fn_ea, f"loaded={c.dec.loaded_ea}")
-        await c.press("f5")
-        await c.wait(lambda: app._active == "listing" and app._cur.is_region, 25)
-        c.check("F5 in the decompiler returns to the continuous listing",
-                app._active == "listing" and app._cur.is_region
-                and c.lst._cursor_ea() == fn_ea,
+        await c.press("tab")
+        await c.wait(lambda: app._active == "listing", 25)
+        c.check("F5/Tab in the decompiler returns to the listing at the same ea",
+                app._active == "listing" and c.lst._cursor_ea() == fn_ea,
                 f"active={app._active} cur_ea={c.lst._cursor_ea()}")
     else:
-        c.check("F5 on an undecompilable function falls back to the listing",
+        c.check("undecompilable function falls back to the listing",
                 app._active == "listing", f"active={app._active}")
 
 

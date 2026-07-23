@@ -54,6 +54,14 @@ _S_OPBYTES = Style(color="grey50")  # raw opcode bytes column
 _S_DATA = Style(color="#c8a15a")   # data items in the flat listing (db/dw/strings)
 _S_UNK = Style(color="grey54", italic=True)  # undefined bytes in the flat listing
 _S_MEMBER = Style(color="#9a8a6a")  # struct field rows (expanded, indented)
+
+# Tokens that look like identifiers but aren't renamable symbols (so 'n' on them
+# in the listing names the address instead of trying to rename the token).
+_ASM_KEYWORDS = frozenset({
+    "db", "dw", "dd", "dq", "dt", "byte", "word", "dword", "qword", "tbyte",
+    "offset", "short", "near", "far", "ptr", "dup", "cs", "ds", "es", "fs",
+    "gs", "ss", "align", "public", "assume", "end",
+})
 _S_CURSOR = Style(bgcolor="grey30")
 _S_DIM = Style(color="grey42", italic=True)
 _S_MATCH = Style(bgcolor="#7a5c00")  # all search matches
@@ -606,7 +614,8 @@ class DisasmView(SearchMixin, NavMixin, ColumnCursor, ScrollView, can_focus=True
         Binding("c", "define_code", "Code", show=False),
         Binding("p", "define_func", "Func", show=False),
         Binding("u", "undefine", "Undef", show=False),
-        Binding("tab,shift+tab,f5", "app.toggle_view", "Pseudocode", priority=True),
+        Binding("tab,shift+tab", "app.toggle_view", "Pseudocode", priority=True),
+        Binding("f5", "app.toggle_view", "Decompile", priority=True),
         Binding("L", "app.continuous_here", "Listing"),
         *SearchMixin.SEARCH_BINDINGS,
         *NavMixin.NAV_BINDINGS,
@@ -1204,7 +1213,8 @@ class DecompView(SearchMixin, NavMixin, ColumnCursor, ScrollView, can_focus=True
     """
 
     BINDINGS = [
-        Binding("tab,shift+tab,f5", "app.toggle_view", "Disasm", priority=True),
+        Binding("tab,shift+tab", "app.toggle_view", "Disasm", priority=True),
+        Binding("f5", "app.toggle_view", "Decompile", priority=True),
         Binding("L", "app.continuous_here", "Listing"),
         Binding("j,down", "cursor_down", "Down", show=False),
         Binding("k,up", "cursor_up", "Up", show=False),
@@ -1437,7 +1447,8 @@ class HexView(ScrollView, can_focus=True):
         Binding("G,end", "goto_bottom", show=False),
         Binding("enter", "to_code", "To code"),
         Binding("escape", "leave", "Back"),
-        Binding("tab,shift+tab,f5", "app.toggle_view", "Code", priority=True),
+        Binding("tab,shift+tab", "app.toggle_view", "Code", priority=True),
+        Binding("f5", "app.toggle_view", "Decompile", priority=True),
     ]
 
     cursor = reactive(0, repaint=False)
@@ -2144,8 +2155,8 @@ class IdaTui(App):
         self._filter_timer = None
         self._sort_col = 0        # 0=addr, 1=name, 2=size
         self._sort_reverse = False
-        self._pref = "decomp"    # preferred code view (changed by Tab)
-        self._active = "decomp"  # currently shown view (falls back on decomp fail)
+        self._pref = "listing"   # unified: the linear listing is the code view
+        self._active = "listing"  # currently shown view
         self._hex_pending_ea: int | None = None
         self._cur: NavEntry | None = None
         self._decomp_return: NavEntry | None = None  # listing to return to from F5
@@ -2164,13 +2175,11 @@ class IdaTui(App):
             fp = FunctionsPanel(id="left")
             fp.display = False  # overlay-first: reveal the docked pane with Ctrl+B
             yield fp
-            dis = DisasmView()
-            dis.display = False
-            yield dis
-            yield DecompView()  # pseudocode is the default view
+            # The unified continuous listing is the one code view; DisasmView is
+            # deprecated (kept only for DisasmModel, still used by the domain).
             lst = ListingView()
-            lst.display = False
             yield lst
+            yield DecompView()
             hx = HexView()
             hx.display = False
             yield hx
@@ -2207,7 +2216,7 @@ class IdaTui(App):
         inp.can_focus = False
         # The names pane is an overlay now (Ctrl+N); focus the default code view
         # (pseudocode) so app bindings work before anything is opened.
-        self.query_one(DecompView).focus()
+        self.query_one(ListingView).focus()
         self._connect()
         if self._rpc_path:
             self._start_rpc()
@@ -2444,7 +2453,7 @@ class IdaTui(App):
         left.display = not left.display
         if not left.display:
             self.query_one(DecompView if self._active == "decomp"
-                           else DisasmView).focus()
+                           else ListingView).focus()
         else:
             self.query_one("#func-table", DataTable).focus()
 
@@ -2488,17 +2497,16 @@ class IdaTui(App):
                 return
             self._decomp_from_listing(ea)
             return
-        if self._active == "decomp" and self._decomp_return is not None:
-            # F5/Tab in a decompiler view reached from the listing -> back to it.
-            ret = self._decomp_return
-            self._decomp_return = None
+        # active == "decomp": F5/Tab returns to the linear listing.
+        ret = self._decomp_return
+        self._decomp_return = None
+        if ret is not None:
             self._cur = ret
-            self._active = "listing"
+        self._active = "listing"
+        if ret is not None:
             self._open_entry(ret, push=False)
-            return
-        self._active = "decomp" if self._active == "disasm" else "disasm"
-        self._pref = self._active  # an explicit toggle sets the preference
-        self._show_active()
+        else:
+            self._show_active()
 
     @work(thread=True, group="nav")
     def _decomp_from_listing(self, ea: int) -> None:
@@ -2536,9 +2544,7 @@ class IdaTui(App):
             self._active = self._code_mode()
             self._show_active()
             return
-        if self._active == "disasm":
-            ea = self.query_one(DisasmView)._cursor_ea()
-        elif self._active == "listing":
+        if self._active in ("listing", "disasm"):
             ea = self.query_one(ListingView)._cursor_ea()
         else:
             dec = self.query_one(DecompView)
@@ -2583,7 +2589,7 @@ class IdaTui(App):
             table.focus()
         else:
             self.query_one(DecompView if self._active == "decomp"
-                           else DisasmView).focus()
+                           else ListingView).focus()
 
     # -- input submit (filter / goto) ------------------------------------- #
     def on_search_requested(self, msg: SearchRequested) -> None:
@@ -2833,15 +2839,29 @@ class IdaTui(App):
                 self._status("no address on this line to name")
                 return
             head = msg.view.cur_head()
-            cur = head.name if (head is not None and head.name) else ""
-            self._rename_ctx = (msg.view, cur)
-            self._rename_addr = ea
+            word = msg.view.word_under_cursor()
+            mnem = head.text.split(" ", 1)[0] if (head and head.text) else ""
+            # If the cursor is on a symbol token (a call/branch target, a data
+            # reference, or this head's own label) rename THAT symbol; otherwise
+            # create/rename a label at the head's address (bare/undefined bytes).
+            if (word and self._looks_like_symbol(word) and word != mnem
+                    and word.lower() not in _ASM_KEYWORDS):
+                self._rename_ctx = (msg.view, word)
+                self._rename_addr = None
+                placeholder = f"rename '{word}' —  Enter=apply  Esc=cancel"
+                prefill = word
+            else:
+                cur = head.name if (head is not None and head.name) else ""
+                self._rename_ctx = (msg.view, cur)
+                self._rename_addr = ea
+                placeholder = f"name @ {ea:#x} —  Enter=apply  Esc=cancel"
+                prefill = cur
             self.query_one("#status", Static).display = False
             inp = self.query_one("#rename", Input)
-            inp.placeholder = f"name @ {ea:#x} —  Enter=apply  Esc=cancel"
+            inp.placeholder = placeholder
             inp.can_focus = True
             inp.display = True
-            inp.value = cur
+            inp.value = prefill
             inp.focus()
             return
         if not msg.name:
@@ -2942,16 +2962,26 @@ class IdaTui(App):
             return
         self.app.call_from_thread(self._after_comment, ea, text)
 
-    def _after_comment(self, ea: int, text: str) -> None:
+    def _reload_active_code(self) -> None:
+        """Refresh whichever code view is showing after an edit (comment/rename/
+        retype), in place: re-decompile if in the decompiler, else reload the
+        listing."""
         cur = self._cur
+        if cur is None:
+            return
+        if self._active == "decomp":
+            self.query_one(DecompView).loaded_ea = None  # force re-decompile
+            self._show_active()
+        else:
+            self._save_current_pos()
+            self._open_entry(cur, push=False)
+
+    def _after_comment(self, ea: int, text: str) -> None:
         # A comment shows in both views but only after Hex-Rays recompiles, so
         # reuse the name-generation invalidation (bumps gen -> decompile is
-        # force_recompiled lazily; disasm block caches are cleared).
+        # force_recompiled lazily; disasm/listing caches are cleared).
         self.program.bump_names()
-        if cur is not None:
-            self._save_current_pos()
-            self.query_one(DecompView).loaded_ea = None  # force pseudocode reload
-            self._open_entry(cur, push=False)
+        self._reload_active_code()
         self._dirty = True
         verb = "cleared comment" if not text else "commented"
         self._status(f"{verb} @ {ea:#x}   (Ctrl+S to save)")
@@ -3031,11 +3061,7 @@ class IdaTui(App):
         # A type change alters the pseudocode (and disasm operand types), so
         # recompile via the name-generation invalidation and reopen in place.
         self.program.bump_names()
-        cur = self._cur
-        if cur is not None:
-            self._save_current_pos()
-            self.query_one(DecompView).loaded_ea = None
-            self._open_entry(cur, push=False)
+        self._reload_active_code()
         self._dirty = True
         what = "prototype" if kind == "func" else f"'{word}'"
         self._status(f"retyped {what}   (Ctrl+S to save)")
@@ -3148,10 +3174,7 @@ class IdaTui(App):
         # A renamed symbol can appear in many functions, so invalidate globally;
         # each function refreshes its names the next time it's viewed.
         self.program.bump_names()
-        if cur is not None:
-            self._save_current_pos()
-            self.query_one(DecompView).loaded_ea = None  # force pseudocode reload
-            self._open_entry(cur, push=False)
+        self._reload_active_code()
         if kind == "func" and addr is not None and self._func_index is not None:
             self._func_index.update_name(addr, new)
             for e in self._nav:
@@ -3274,33 +3297,15 @@ class IdaTui(App):
     def _do_navigate(self, ea: int, push: bool,
                      focus_name: str | None = None) -> None:  # worker context
         assert self.program is not None
+        # Unified: everything opens the one continuous listing at ``ea``. A
+        # function name is used for the status label; a region gets a segment
+        # label. F5/Tab decompiles the function under the cursor from here.
         fn = self.program.function_of(ea)
-        if fn is None:
-            # Not inside a function: open a flat listing (region) anchored here
-            # rather than refusing. This is where you land on code IDA didn't
-            # mark, or on data — use c/p to define it (see _do_edit_item).
-            name = self.program.region_label(ea)
-            lm = self.program.listing(ea)
-            idx = max(lm.ensure_ea(ea), 0) if lm is not None else 0
-            self.app.call_from_thread(
-                self._open_at, ea, name, idx, push, -1, 0, True)
-            return
-        model = self.program.disasm(fn.addr, fn.name)
-        idx = 0 if ea == fn.addr else model.index_of_ea(ea)
-        # The disasm cursor alone doesn't position the pseudocode pane. For a
-        # mid-function target with the decompiler active, resolve the address to
-        # its pseudocode line (via the per-line /*0xEA*/ markers) so the jump
-        # lands on the reference there too (e.g. selecting an xref). A plain
-        # function-entry jump is line 0 in both views -> skip the decompile.
-        # With a focus_name (the symbol the xref was on), also land the column
-        # on that token where it appears in the line.
-        dec_idx, dec_col = -1, 0
-        if self._active == "decomp" and ea != fn.addr:
-            dec_idx = self._decomp_line_for(fn.addr, ea)
-            if dec_idx >= 0 and focus_name:
-                dec_col = self._decomp_col_for(fn.addr, dec_idx, focus_name)
+        lm = self.program.listing(ea)
+        idx = max(lm.ensure_ea(ea), 0) if lm is not None else 0
+        name = fn.name if fn is not None else self.program.region_label(ea)
         self.app.call_from_thread(
-            self._open_at, fn.addr, fn.name, idx, push, dec_idx, dec_col)
+            self._open_at, ea, name, idx, push, -1, 0, fn is None)
 
     def _decomp_col_for(self, fn_addr: int, line_idx: int, name: str) -> int:
         """Column of ``name`` (whole-word) on pseudocode line ``line_idx``, so an
@@ -3473,14 +3478,12 @@ class IdaTui(App):
         self.query_one("#func-table", DataTable).focus()
 
     def _code_view(self):  # type: ignore[no-untyped-def]
-        return self.query_one(DecompView if self._pref == "decomp" else DisasmView)
+        return self.query_one(DecompView if self._pref == "decomp" else ListingView)
 
     def _active_code_view(self):  # type: ignore[no-untyped-def]
         """The currently-shown code widget (for reading the cursor address)."""
-        if self._active == "listing":
+        if self._active in ("listing", "disasm"):
             return self.query_one(ListingView)
-        if self._active == "disasm":
-            return self.query_one(DisasmView)
         if self._active == "decomp":
             return self.query_one(DecompView)
         return None
@@ -3546,82 +3549,53 @@ class IdaTui(App):
         self._open_function(ea, name)
 
     def _save_current_pos(self) -> None:
-        """Snapshot the active views' cursor + scroll into the top history entry
+        """Snapshot the listing cursor + scroll into the top history entry
         (called just before we navigate away)."""
         if not self._nav:
             return
         e = self._nav[-1]
-        dis = self.query_one(DisasmView)
-        e.cursor, e.cursor_x = dis.cursor, dis.cursor_x
-        e.scroll_y = round(dis.scroll_offset.y)
-        dec = self.query_one(DecompView)
-        if dec.loaded_ea == e.ea:
-            e.dec_cursor, e.dec_cursor_x = dec.cursor, dec.cursor_x
-            e.dec_scroll_y = round(dec.scroll_offset.y)
-            e.dec_scroll_x = round(dec.scroll_offset.x)
+        lst = self.query_one(ListingView)
+        if lst.model is not None:
+            e.cursor, e.cursor_x = lst.cursor, lst.cursor_x
+            e.scroll_y = round(lst.scroll_offset.y)
 
-    def _open_function(self, ea: int, name: str, push: bool = True) -> None:
-        if push:
-            self._save_current_pos()
-        entry = NavEntry(ea=ea, name=name, cursor=0)
-        if push:
-            self._nav.append(entry)
-        self._open_entry(entry, push=False)
+    @work(thread=True, group="nav")
+    def _open_function(self, ea: int, name: str | None = None,
+                       push: bool = True) -> None:
+        # Unified: opening a function is just navigating the one linear listing
+        # to its entry address.
+        self._do_navigate(ea, push)
+
 
     def _code_mode(self) -> str:
-        """The code view to return to from hex: the flat listing for a region,
-        else the preferred function view (disasm/decomp)."""
-        if self._cur is not None and self._cur.is_region:
-            return "listing"
-        return self._pref
+        """The code view to return to from hex — always the unified listing."""
+        return "listing"
 
     def _open_entry(self, entry: NavEntry, push: bool) -> None:
         if self.program is None:
             return
         self._cur = entry
-        # A region (not inside a function) has no pseudocode: show the flat
-        # segment listing (code + data + undefined) instead of the func views.
-        if entry.is_region:
-            self._active = "listing"
-            lm = self.program.listing(entry.ea)
-            sy = entry.scroll_y if entry.scroll_y >= 0 else None
-            if lm is not None:
-                self.query_one(ListingView).load(
-                    lm, entry.name, cursor=entry.cursor,
-                    cursor_x=entry.cursor_x, scroll_y=sy)
-            self._show_active()
-            return
-        # Each open honours the preferred view; a decomp failure last time fell
-        # back to disasm without changing the preference, so retry decomp here.
-        self._active = self._pref
-        model = self.program.disasm(entry.ea, entry.name)
+        # Unified model: the code view is always the continuous listing,
+        # positioned at this entry. The decompiler is a per-function toggle
+        # (F5/Tab -> _decomp_from_listing), never opened implicitly.
+        lm = self.program.listing(entry.ea)
         sy = entry.scroll_y if entry.scroll_y >= 0 else None
-        self.query_one(DisasmView).load(
-            model, entry.name, cursor=entry.cursor, cursor_x=entry.cursor_x, scroll_y=sy)
-        dec = self.query_one(DecompView)
-        # If the decompiler already shows this function, _show_active won't reload
-        # it (and thus won't reposition), so move its cursor to the target line
-        # here — e.g. an xref/goto whose target is inside the current function.
-        reposition_dec = dec.loaded_ea == entry.ea
+        if lm is not None:
+            self.query_one(ListingView).load(
+                lm, entry.name, cursor=entry.cursor,
+                cursor_x=entry.cursor_x, scroll_y=sy)
+        self._active = "listing"
         self._show_active()
-        if reposition_dec and self._active == "decomp":
-            dsy = entry.dec_scroll_y if entry.dec_scroll_y >= 0 else -1
-            dec.goto(entry.dec_cursor, entry.dec_cursor_x, dsy, entry.dec_scroll_x)
 
     def _show_active(self) -> None:
-        dis = self.query_one(DisasmView)
         dec = self.query_one(DecompView)
         lst = self.query_one(ListingView)
         hx = self.query_one(HexView)
-        dis.display = dec.display = lst.display = hx.display = False
-        if self._active == "listing":
+        dec.display = lst.display = hx.display = False
+        if self._active in ("listing", "disasm"):
             lst.display = True
             lst.focus()
             self._status_for_cur("listing")
-        elif self._active == "disasm":
-            dis.display = True
-            dis.focus()
-            self._status_for_cur("disasm")
         elif self._active == "hex":
             hx.display = True
             hx.focus()
@@ -3730,17 +3704,6 @@ class IdaTui(App):
         if self._cur is not None:
             loc = f" @ {msg.ea:#x}" if msg.ea is not None else ""
             self._status(f"{self._cur.name}{loc}   [pseudocode line {msg.index}]")
-
-    def on_disasm_view_cursor_moved(self, msg: DisasmView.CursorMoved) -> None:
-        if self._nav:
-            # Keep the top-of-history position current (line + column) so that
-            # returning here later lands exactly where we left.
-            self._nav[-1].cursor = msg.index
-            self._nav[-1].cursor_x = self.query_one(DisasmView).cursor_x
-        ea = msg.ea
-        if ea is not None:
-            name = self._nav[-1].name if self._nav else ""
-            self._status(f"{name}  @ {ea:#x}   (line {msg.index})")
 
     def on_listing_view_cursor_moved(self, msg: ListingView.CursorMoved) -> None:
         if self._nav:
