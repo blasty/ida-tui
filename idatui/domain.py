@@ -306,8 +306,14 @@ class DisasmModel:
         self._lock = threading.Lock()
         self._inflight: set[int] = set()
 
+    def _end_kw(self) -> dict:
+        end = self._function_end()
+        return {"end": hex(end)} if end is not None else {}
+
     def total(self) -> int:
-        """Total instruction count (fetched once; ~200ms on huge funcs)."""
+        """Instruction/row count of the function (fetched once). Uses disasm's
+        ``include_total`` — one fast call, no response-size truncation. For a
+        code function this equals the heads row count that backs the lines."""
         if self._total is not None:
             return self._total
         payload = self._prog.client.call(
@@ -361,15 +367,22 @@ class DisasmModel:
                 self._max_raw = biggest
         return out
 
+    @staticmethod
+    def _line_from_head(r: dict) -> Line:
+        """Adapt a ``heads`` row to a disasm Line (label = the head's name)."""
+        return Line(ea=_as_int(r["ea"]), text=r.get("text", ""),
+                    label=r.get("name"))
+
     def _fetch_block(self, b: int) -> list[Line]:
-        # Over-fetch one instruction so the block knows where its last
-        # instruction ends (variable-length archs give no size field).
+        # The function disasm view is a listing filtered to the function: fetch a
+        # block of heads (one per instruction for code). Over-fetch one row so
+        # the block knows where its last instruction ends (opcode-byte sizing).
         payload = self._prog.client.call(
-            "disasm", addr=hex(self.ea), offset=b * self.BLOCK,
-            max_instructions=self.BLOCK + 1,
+            "heads", addr=hex(self.ea), offset=b * self.BLOCK,
+            count=self.BLOCK + 1, **self._end_kw(),
         )
-        raw = payload.get("asm", {}).get("lines", []) if isinstance(payload, dict) else []
-        fetched = [Line.from_raw(r) for r in raw]
+        rows = payload.get("heads", []) if isinstance(payload, dict) else []
+        fetched = [self._line_from_head(r) for r in rows]
         lines = fetched[:self.BLOCK]
         if len(fetched) > self.BLOCK:
             end_ea: int | None = fetched[self.BLOCK].ea
