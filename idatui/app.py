@@ -241,6 +241,27 @@ def _word_bounds(text: str, x: int) -> tuple[int, int]:
     return (s, e)
 
 
+def _word_occurrences(text: str, word: str) -> list[tuple[int, int]]:
+    """[start, end) spans of every WHOLE-word occurrence of ``word`` in ``text``
+    (for highlight-all-occurrences of the token under the cursor)."""
+    if not word or not text:
+        return []
+    isw = lambda c: c.isalnum() or c == "_"  # noqa: E731
+    out: list[tuple[int, int]] = []
+    n = len(word)
+    i = 0
+    while True:
+        j = text.find(word, i)
+        if j < 0:
+            break
+        before_ok = j == 0 or not isw(text[j - 1])
+        after_ok = j + n >= len(text) or not isw(text[j + n])
+        if before_ok and after_ok:
+            out.append((j, j + n))
+        i = j + n
+    return out
+
+
 def _overlay_over(strip: Strip, ranges: list[tuple[int, int]], style: Style) -> Strip:
     """Like _overlay_ranges but ``style`` OVERRIDES the existing cell styles
     (used for the cursor cell / word, which must win over the line background)."""
@@ -290,8 +311,20 @@ class ColumnCursor:
         Binding("dollar_sign", "col_end", "eol", show=False),
     ]
 
+    _hl_word: str | None = None  # token to highlight across all visible lines
+
     def _line_plain(self, idx: int) -> str | None:
         raise NotImplementedError
+
+    def _refresh_hl(self) -> None:
+        """Recompute the highlight-all token from the word under the cursor; if it
+        changed, repaint the whole viewport (occurrences elsewhere changed)."""
+        w = self.word_under_cursor()
+        if not (w and len(w) >= 2 and (w[0].isalpha() or w[0] == "_")):
+            w = None
+        if w != self._hl_word:
+            self._hl_word = w
+            self.refresh()
 
     def _hscroll(self) -> None:
         pass
@@ -306,6 +339,7 @@ class ColumnCursor:
         self.cursor_x = max(0, min(max(len(plain) - 1, 0), self.cursor_x + dx))
         self._hscroll()
         _refresh_lines(self, self.cursor)
+        self._refresh_hl()
 
     def action_col_left(self) -> None:
         self._move_x(-1)
@@ -317,12 +351,14 @@ class ColumnCursor:
         self.cursor_x = 0
         self._hscroll()
         _refresh_lines(self, self.cursor)
+        self._refresh_hl()
 
     def action_col_end(self) -> None:
         plain = self._line_plain(self.cursor) or ""
         self.cursor_x = max(len(plain) - 1, 0)
         self._hscroll()
         _refresh_lines(self, self.cursor)
+        self._refresh_hl()
 
     def action_col_word(self, direction: int) -> None:
         plain = self._line_plain(self.cursor) or ""
@@ -346,6 +382,7 @@ class ColumnCursor:
             self.cursor_x = max(i, 0)
         self._hscroll()
         _refresh_lines(self, self.cursor)
+        self._refresh_hl()
 
     def word_under_cursor(self) -> str | None:
         plain = self._line_plain(self.cursor)
@@ -373,6 +410,7 @@ class ColumnCursor:
         self._scroll_cursor_into_view()
         self._hscroll()
         self.refresh()
+        self._refresh_hl()
         self._after_cursor_move()
 
     def on_click(self, event) -> None:  # type: ignore[no-untyped-def]
@@ -584,6 +622,7 @@ class SearchMixin:
         self.scroll_to(y=max(self.cursor - self._visible_height() // 2, 0), animate=False)
         self._hscroll()  # bring the match column into horizontal view
         self.refresh()
+        self._refresh_hl()
 
     def clear_search(self) -> None:
         self._term = ""
@@ -861,6 +900,7 @@ class DisasmView(SearchMixin, NavMixin, ColumnCursor, ScrollView, can_focus=True
             self.refresh()  # scrolled: the whole viewport shifted
         else:
             _refresh_lines(self, old, self.cursor)  # only the two changed rows
+        self._refresh_hl()
         self.post_message(DisasmView.CursorMoved(self.cursor, self._cursor_ea()))
 
     def _after_cursor_move(self) -> None:
@@ -1143,10 +1183,15 @@ class ListingView(SearchMixin, NavMixin, ColumnCursor, ScrollView, can_focus=Tru
             else:
                 segs.append(Segment(h.text, _S_UNK))
             strip = Strip(segs)
+        plain = self._line_plain(idx) if (self._hl_word or idx == self.cursor) else None
         if idx in self._ranges:
             strip = _overlay_ranges(strip, self._ranges[idx], self._match_style(idx))
+        if self._hl_word and plain:
+            occ = _word_occurrences(plain, self._hl_word)
+            if occ:
+                strip = _overlay_ranges(strip, occ, _S_WORD)
         if idx == self.cursor:
-            strip = _cursor_decorate(strip, self._line_plain(idx) or "", self.cursor_x)
+            strip = _cursor_decorate(strip, plain or "", self.cursor_x)
         return strip.adjust_cell_length(width, _S_INSN)
 
     # -- navigation -------------------------------------------------------- #
@@ -1401,6 +1446,10 @@ class DecompView(SearchMixin, NavMixin, ColumnCursor, ScrollView, can_focus=True
         base = self._strips[idx]
         if idx in self._ranges:
             base = _overlay_ranges(base, self._ranges[idx], self._match_style(idx))
+        if self._hl_word:
+            occ = _word_occurrences(self._texts[idx], self._hl_word)
+            if occ:
+                base = _overlay_ranges(base, occ, _S_WORD)
         if idx == self.cursor:
             base = _cursor_decorate(base, self._texts[idx], self.cursor_x)
         code_w = max(width - gw, 0)
@@ -1435,6 +1484,7 @@ class DecompView(SearchMixin, NavMixin, ColumnCursor, ScrollView, can_focus=True
             self.refresh()
         else:
             _refresh_lines(self, old, self.cursor)
+        self._refresh_hl()
         self._after_cursor_move()
 
     def action_cursor_down(self) -> None:
