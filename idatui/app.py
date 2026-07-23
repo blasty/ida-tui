@@ -3683,15 +3683,21 @@ class IdaTui(App):
         # Unified model: the code view is always the continuous listing,
         # positioned at this entry. The decompiler is a per-function toggle
         # (F5/Tab -> _decomp_from_listing), never opened implicitly.
+        lst = self.query_one(ListingView)
         lm = self.program.listing(entry.ea)
         sy = entry.scroll_y if entry.scroll_y >= 0 else None
         if lm is not None:
             if sy is None:
                 # Fresh jump (not a back/forward restore, which carries its own
-                # scroll): keep a few lines of context above the target instead
-                # of parking it on the very top row. Cursor stays on the target.
-                sy = max(entry.cursor - _JUMP_CONTEXT, 0)
-            self.query_one(ListingView).load(
+                # scroll). If the target is already on-screen in the SAME listing,
+                # leave the viewport alone and just move the cursor; otherwise
+                # scroll so the target sits a few lines below the top for context.
+                top = round(lst.scroll_offset.y)
+                if lst.model is lm and top <= entry.cursor < top + lst._visible_height():
+                    sy = top
+                else:
+                    sy = max(entry.cursor - _JUMP_CONTEXT, 0)
+            lst.load(
                 lm, entry.name, cursor=entry.cursor,
                 cursor_x=entry.cursor_x, scroll_y=sy)
         self._active = "listing"
