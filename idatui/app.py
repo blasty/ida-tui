@@ -2290,12 +2290,13 @@ class IdaTui(App):
 
     def __init__(self, url: str, db: str | None, keepalive: bool = True,
                  open_path: str | None = None, rpc_path: str | None = None,
-                 ttl: int = 1800) -> None:
+                 ttl: int = 1800, ensure_server: bool = False) -> None:
         super().__init__()
         self._url = url
         self._db = db
         self._open_path = open_path
         self._ttl = ttl
+        self._ensure_server = ensure_server
         self._do_keepalive = keepalive
         self._rpc_path = rpc_path
         self._rpc = None
@@ -2443,6 +2444,17 @@ class IdaTui(App):
     @work(thread=True, exclusive=True, group="connect")
     def _connect(self) -> None:
         try:
+            if self._ensure_server:
+                # Start the analysis server here (not in the launcher) so the
+                # chrome + overlay are already up while we wait for it.
+                from .launch import _ensure_server as _ensure
+                if not _ensure(self._url, self._open_path,
+                               progress=lambda m: self.app.call_from_thread(
+                                   self._status, m)):
+                    self.app.call_from_thread(
+                        self._status, "could not start the analysis server")
+                    self.app.call_from_thread(self._dismiss_loading)
+                    return
             client = IDAClient(self._url, db=self._db)
             client.connect()
             if self._open_path is not None:

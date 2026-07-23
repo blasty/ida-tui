@@ -68,30 +68,34 @@ def _start_supervisor(target: str | None) -> subprocess.Popen | None:
         return None
 
 
-def _ensure_server(url: str, target: str | None, timeout: float = 90.0) -> bool:
+def _ensure_server(url: str, target: str | None, timeout: float = 90.0,
+                   progress=None) -> bool:
     """Make sure the supervisor is listening; start it if not. Returns True when
-    the port is up. Only auto-starts a local server."""
+    the port is up. Only auto-starts a local server. ``progress`` (if given) gets
+    human-readable status lines instead of stderr — so the TUI can narrate the
+    wait in its loading overlay."""
+    def note(msg: str) -> None:
+        (progress or _log)(msg)
+
     host, port = _server_addr(url)
     if _server_up(host, port):
         return True
     if host not in ("127.0.0.1", "localhost", "::1"):
-        _log(f"server at {host}:{port} is down and not local — cannot auto-start")
+        note(f"server at {host}:{port} is down and not local — cannot auto-start")
         return False
-    _log(f"supervisor not running — starting it (log: {_server_log_path()})")
+    note(f"starting analysis server (log: {_server_log_path()})…")
     proc = _start_supervisor(target)
     deadline = time.time() + timeout
-    spun = False
+    t0 = time.time()
     while time.time() < deadline:
         if _server_up(host, port):
-            if spun:
-                _log("supervisor is up")
             return True
         if proc is not None and proc.poll() is not None:
-            _log("supervisor exited during startup — check the log above")
+            note("analysis server exited during startup — check the log")
             return False
-        spun = True
+        note(f"starting analysis server… ({int(time.time() - t0)}s)")
         time.sleep(0.5)
-    _log(f"supervisor did not come up within {timeout:.0f}s")
+    note(f"analysis server did not come up within {timeout:.0f}s")
     return False
 
 
@@ -194,54 +198,34 @@ def main(argv: list[str] | None = None) -> int:
                  f"{os.path.dirname(binary)}")
             return 2
 
-    # 1) supervisor up (seed it with our target so its initial worker is useful)
-    if not args.no_server:
-        # If we're about to start a fresh supervisor (it's down), nothing holds
-        # this binary's DB, so clear any stale unpacked lock files a crashed
-        # worker left behind. The supervisor is seeded with this target and opens
-        # it on startup; a wedged DB there crash-loops the whole supervisor
-        # before the TUI's own recovery can ever run.
-        if binary is not None and not _server_up(*_server_addr(args.url)):
-            swept = _sweep_locks(binary)
-            if swept:
-                _log(f"cleared {swept} stale lock file(s) from a crashed worker")
-        if not _ensure_server(args.url, binary):
-            return 1
-    elif not _server_up(*_server_addr(args.url)):
+    # Everything slow — starting the supervisor and opening/analyzing the binary
+    # — is deferred to the TUI so its chrome + "loading…" overlay are on screen
+    # the whole time, instead of a blank terminal before the TUI even starts.
+    # Here we only do the instant checks.
+    server_down = not _server_up(*_server_addr(args.url))
+    if args.no_server and server_down:
         _log("supervisor is down and --no-server was given")
         return 1
+    if binary is not None and server_down:
+        # About to start a fresh supervisor (nothing holds the DB): clear any
+        # stale unpacked lock files a crashed worker left, so the supervisor's
+        # seeded initial open doesn't crash-loop on a wedged DB.
+        swept = _sweep_locks(binary)
+        if swept:
+            _log(f"cleared {swept} stale lock file(s) from a crashed worker")
 
-    # 2) resolve the session. If a session is already open on this binary, adopt
-    #    it (instant). Otherwise DON'T open here — defer the (possibly long)
-    #    analysis to the TUI so its chrome + "loading…" overlay are on screen
-    #    during the wait, instead of a blank terminal before the TUI even starts.
-    db = args.db
-    open_path = None
-    if binary is not None and db is None:
-        try:
-            client = IDAClient(args.url)
-            client.connect()
-            db = _existing_session(client, binary)
-        except Exception:  # noqa: BLE001 -- probe only; the TUI will open it
-            db = None
-        finally:
-            try:
-                client.close()
-            except Exception:  # noqa: BLE001
-                pass
-        if db:
-            _log(f"adopting the open session for {os.path.basename(binary)} ({db})")
-        else:
-            open_path = binary  # TUI opens it with the loading overlay up
-
-    # 3) hand off to the TUI (imported late so --help works without textual)
+    # Hand off to the TUI (imported late so --help works without textual). It
+    # ensures the server (with on-screen progress), then opens/adopts the binary
+    # — idb_open is idempotent, so an already-open session is adopted instantly.
     try:
         from .app import IdaTui
     except ImportError as e:
         _log(f"the TUI needs textual; run with ~/ida-venv/bin/python  ({e})")
         return 1
     rpc_path = os.path.abspath(os.path.expanduser(args.rpc)) if args.rpc else None
-    IdaTui(url=args.url, db=db, open_path=open_path, ttl=args.ttl,
+    IdaTui(url=args.url, db=args.db,
+           open_path=(binary if args.db is None else None), ttl=args.ttl,
+           ensure_server=not args.no_server,
            keepalive=not args.no_keepalive, rpc_path=rpc_path).run()
     return 0
 
