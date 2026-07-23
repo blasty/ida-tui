@@ -5,8 +5,9 @@ This is NOT wired into the app. It exists to make the "should idatui keep the
 MCP transport or interface with IDA directly?" question a decision you can feel
 and measure, behind a tiny Backend seam that mirrors idatui's hot paths.
 
-    # A/B latency table (opens a COPY in-process; also hits a running server
-    # on :8745 if there is one, so you can compare apples to apples):
+    # 3-way latency table: direct (in-process idalib) vs a unix-socket worker
+    # (our own idalib subprocess, length-prefixed pickle) vs the mcp HTTP server
+    # on :8745 (if one is running). Each idalib backend opens its own copy.
     ~/ida-venv/bin/python experiments/inproc_spike.py --bench [--n 400]
 
     # tiny Textual app on the IN-PROCESS backend. F5/Enter decompiles the
@@ -163,6 +164,125 @@ class McpBackend:
 
 
 # --------------------------------------------------------------------------- #
+# Option C: our own thin idalib worker over a unix socket (length-prefixed
+# pickle). Same DirectBackend, but in a subprocess (crash isolation + thread
+# decoupling kept) with a lean protocol tuned to these ops (bytes ride raw, no
+# hex/JSON). This is the "is a purpose-built local IPC most of the win?" column.
+# --------------------------------------------------------------------------- #
+import pickle as _pickle
+import struct as _struct
+
+_pack = lambda o: _pickle.dumps(o, protocol=_pickle.HIGHEST_PROTOCOL)
+_unpack = _pickle.loads
+_SER = "pickle"
+
+
+def _recvn(sock, n):
+    buf = bytearray()
+    while len(buf) < n:
+        chunk = sock.recv(n - len(buf))
+        if not chunk:
+            return None
+        buf += chunk
+    return bytes(buf)
+
+
+def _send(sock, obj):
+    data = _pack(obj)
+    sock.sendall(_struct.pack(">I", len(data)) + data)
+
+
+def _recv(sock):
+    hdr = _recvn(sock, 4)
+    if hdr is None:
+        return None
+    (n,) = _struct.unpack(">I", hdr)
+    return _unpack(_recvn(sock, n))
+
+
+_WORKER_OPS = ("functions", "resolve", "read_bytes", "disasm_line",
+               "decompile", "xrefs_to")
+
+
+def _worker_main(sockpath: str, dbpath: str) -> None:
+    """Runs in a child process. Opens idalib on ITS main thread (constraint
+    satisfied), then serves one client serially over a unix socket."""
+    import socket as sk
+    direct = DirectBackend(dbpath)
+    ops = {name: getattr(direct, name) for name in _WORKER_OPS}
+    try:
+        os.unlink(sockpath)
+    except OSError:
+        pass
+    srv = sk.socket(sk.AF_UNIX, sk.SOCK_STREAM)
+    srv.bind(sockpath)
+    srv.listen(1)
+    conn, _ = srv.accept()
+    while True:
+        req = _recv(conn)
+        if req is None:
+            break
+        op, args = req
+        if op == "__close__":
+            break
+        try:
+            _send(conn, (True, ops[op](*args)))
+        except Exception as e:  # noqa: BLE001
+            _send(conn, (False, repr(e)))
+    direct.close()
+
+
+class UnixWorkerBackend:
+    name = f"unix worker ({_SER}/AF_UNIX)"
+
+    def __init__(self, dbpath: str) -> None:
+        import socket as sk
+        self.sockpath = f"/tmp/inproc_spike_{os.getpid()}.sock"
+        self.proc = __import__("subprocess").Popen(
+            [sys.executable, os.path.abspath(__file__),
+             "--worker", self.sockpath, dbpath])
+        deadline = time.time() + 120
+        self.sock = None
+        while time.time() < deadline:
+            try:
+                s = sk.socket(sk.AF_UNIX, sk.SOCK_STREAM)
+                s.connect(self.sockpath)
+                self.sock = s
+                break
+            except OSError:
+                if self.proc.poll() is not None:
+                    raise RuntimeError("worker exited during startup")
+                time.sleep(0.1)
+        if self.sock is None:
+            raise RuntimeError("worker did not come up")
+
+    def _call(self, op, *args):
+        _send(self.sock, (op, args))
+        ok, val = _recv(self.sock)
+        if not ok:
+            raise RuntimeError(val)
+        return val
+
+    def functions(self):       return self._call("functions")
+    def resolve(self, name):   return self._call("resolve", name)
+    def read_bytes(self, ea, n): return self._call("read_bytes", ea, n)
+    def disasm_line(self, ea): return self._call("disasm_line", ea)
+    def decompile(self, ea):   return self._call("decompile", ea)
+    def xrefs_to(self, ea):    return self._call("xrefs_to", ea)
+
+    def close(self):
+        try:
+            _send(self.sock, ("__close__", ()))
+            self.sock.close()
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            self.proc.terminate()
+        except Exception:  # noqa: BLE001
+            pass
+
+
+# --------------------------------------------------------------------------- #
 # bench
 # --------------------------------------------------------------------------- #
 def _time(fn, n):
@@ -174,54 +294,88 @@ def _time(fn, n):
     return (time.perf_counter() - t) / n * 1e6  # us/call
 
 
-def bench(target: str, n: int) -> None:
-    tmp = "/tmp/inproc_spike_target"
+def _copy(target: str, tag: str) -> str:
+    tmp = f"/tmp/inproc_spike_{tag}"
     shutil.copy(target, tmp)
     for e in (".i64", ".id0", ".id1", ".id2", ".nam", ".til"):
         try:
             os.remove(tmp + e)
         except OSError:
             pass
+    return tmp
+
+
+def bench(target: str, n: int) -> None:
+    backends: dict[str, Backend] = {}
+
     print(f"opening {os.path.basename(target)} in-process (main thread)…", flush=True)
-    direct = DirectBackend(tmp)
-    print(f"  open+analysis: {direct.open_secs:.2f}s\n", flush=True)
+    direct = DirectBackend(_copy(target, "direct"))
+    print(f"  open+analysis: {direct.open_secs:.2f}s", flush=True)
+    backends["direct"] = direct
+
+    try:
+        print("spawning unix-socket worker (its own idalib subprocess)…", flush=True)
+        backends["unix"] = UnixWorkerBackend(_copy(target, "worker"))
+    except Exception as e:  # noqa: BLE001
+        print(f"  unix worker unavailable: {e}", flush=True)
+
+    try:
+        import socket
+        socket.create_connection(("127.0.0.1", 8745), 0.3).close()
+        backends["mcp"] = McpBackend()
+        print("benching the running mcp server on :8745 too", flush=True)
+    except Exception as e:  # noqa: BLE001
+        print(f"  (no mcp server on :8745) [{e}]", flush=True)
+    print(flush=True)
 
     funcs = direct.functions()
     sample = [ea for ea, _ in funcs[: min(40, len(funcs))]]
     main = direct.resolve("main") or sample[0]
+    _nx = [0]
 
-    mcp = None
-    try:
-        import socket
-        socket.create_connection(("127.0.0.1", 8745), 0.3).close()
-        mcp = McpBackend()
-        print("also benching the running mcp server on :8745\n", flush=True)
-    except Exception as e:  # noqa: BLE001
-        print(f"(no mcp server on :8745 — direct-only numbers)  [{e}]\n", flush=True)
+    def _next_sample():
+        _nx[0] = (_nx[0] + 1) % len(sample)
+        return sample[_nx[0]]
 
     ops = {
         "resolve(main)":        (lambda b: b.resolve("main"), n),
-        "read_bytes(main,16)":  (lambda b: b.read_bytes(main, 16), n),
-        "read_bytes(main,4096)": (lambda b: b.read_bytes(main, 4096), n),
-        "disasm_line(main)":    (lambda b: b.disasm_line(main), n),
-        "xrefs_to(sample)":     (lambda b, i=[0]: b.xrefs_to(sample[i.__setitem__(0,(i[0]+1)%len(sample)) or i[0]]), min(n, 200)),
+        "read_bytes(16)":       (lambda b: b.read_bytes(main, 16), n),
+        "read_bytes(4096)":     (lambda b: b.read_bytes(main, 4096), n),
+        "disasm_line":          (lambda b: b.disasm_line(main), n),
+        "xrefs_to":             (lambda b: b.xrefs_to(_next_sample()), min(n, 200)),
         "decompile(cached)":    (lambda b: b.decompile(main), min(n, 40)),
     }
-    print(f"{'op':22} {'direct us':>12} {'mcp us':>12} {'speedup':>9}")
-    print("-" * 58)
+    names = list(backends)
+    hdr = f"{'op':20}" + "".join(f"{nm+' us':>14}" for nm in names)
+    print(hdr)
+    print("-" * len(hdr))
+    results: dict[str, dict[str, float]] = {nm: {} for nm in names}
     for label, (fn, cnt) in ops.items():
-        d = _time(lambda: fn(direct), cnt)
-        if mcp is not None:
+        row = f"{label:20}"
+        for nm in names:
             try:
-                m = _time(lambda: fn(mcp), cnt)
-                print(f"{label:22} {d:12.1f} {m:12.1f} {m/d:8.0f}x")
+                us = _time(lambda: fn(backends[nm]), cnt)
+                results[nm][label] = us
+                row += f"{us:14.1f}"
             except Exception as e:  # noqa: BLE001
-                print(f"{label:22} {d:12.1f} {'ERR':>12}   ({e})")
-        else:
-            print(f"{label:22} {d:12.1f} {'-':>12} {'-':>9}")
-    direct.close()
-    if mcp:
-        mcp.close()
+                row += f"{'ERR':>14}"
+                results[nm][label] = float("nan")
+        print(row, flush=True)
+
+    if "mcp" in names:
+        print("\nspeedup vs mcp:")
+        for label in ops:
+            m = results["mcp"].get(label, float("nan"))
+            parts = []
+            for nm in names:
+                if nm == "mcp":
+                    continue
+                v = results[nm].get(label, float("nan"))
+                parts.append(f"{nm} {m/v:.0f}x" if v == v and v else f"{nm} -")
+            print(f"  {label:20} {'   '.join(parts)}")
+
+    for b in backends.values():
+        b.close()
 
 
 # --------------------------------------------------------------------------- #
@@ -331,6 +485,10 @@ def tui(target: str) -> None:
 
 
 def main(argv=None):
+    # worker mode: invoked as a subprocess by UnixWorkerBackend
+    if argv is None and len(sys.argv) >= 4 and sys.argv[1] == "--worker":
+        _worker_main(sys.argv[2], sys.argv[3])
+        return
     p = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     p.add_argument("--bench", action="store_true", help="A/B latency table")
     p.add_argument("--tui", action="store_true", help="feel the inline hitch")
