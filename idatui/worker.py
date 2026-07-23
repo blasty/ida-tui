@@ -112,7 +112,11 @@ def serve(sockpath: str, binpath: str) -> None:
         fn = tools.get(name)
         if fn is None:
             raise KeyError(f"unknown tool: {name!r}")
-        return fn(**args)
+        result = fn(**args)
+        # Match the MCP server's structuredContent: a dict passes through, any
+        # other return (list/scalar) is wrapped as {"result": ...}. domain.py
+        # parses that exact shape (e.g. lookup_funcs -> payload["result"]).
+        return result if isinstance(result, dict) else {"result": result}
 
     try:
         os.unlink(sockpath)
