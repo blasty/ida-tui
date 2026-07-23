@@ -59,6 +59,7 @@ _S_FUNCHDR = Style(color="#d7a021", bold=True)  # 'name proc'/'endp' headers
 
 _LST_INDENT = "    "   # one depth level: function names sit at level 0, code at 1
 _OP_LIMIT = 8         # opcode bytes shown in the 'limited' column mode
+_JUMP_CONTEXT = 4     # lines of context kept above a jump target (cursor stays on it)
 
 # Tokens that look like identifiers but aren't renamable symbols (so 'n' on them
 # in the listing names the address instead of trying to rename the token).
@@ -3685,6 +3686,11 @@ class IdaTui(App):
         lm = self.program.listing(entry.ea)
         sy = entry.scroll_y if entry.scroll_y >= 0 else None
         if lm is not None:
+            if sy is None:
+                # Fresh jump (not a back/forward restore, which carries its own
+                # scroll): keep a few lines of context above the target instead
+                # of parking it on the very top row. Cursor stays on the target.
+                sy = max(entry.cursor - _JUMP_CONTEXT, 0)
             self.query_one(ListingView).load(
                 lm, entry.name, cursor=entry.cursor,
                 cursor_x=entry.cursor_x, scroll_y=sy)
