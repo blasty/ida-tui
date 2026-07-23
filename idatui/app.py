@@ -42,7 +42,7 @@ from textual.widgets.option_list import Option
 
 from .highlight import highlight_c
 
-from .client import IDAClient, IDAToolError
+from .client import IDAClient, IDAToolError, IDAConnectionError
 from .domain import DisasmModel, Func, Head, ListingModel, Program, Struct
 
 # Styles for the disassembly listing.
@@ -2347,6 +2347,8 @@ class IdaTui(App):
         self._decomp_return: NavEntry | None = None  # listing to return to from F5
         self._busy_screen: BusyScreen | None = None
         self._xref_active = False  # an xref gather is in flight (blocks re-entry)
+        self._conn_screen: LoadingScreen | None = None
+        self._reconnecting = False  # a reconnect attempt is in flight
         self._search_ctx: tuple[object | None, int] = (None, 1)
         self._rename_ctx: tuple[object | None, str] = (None, "")
         self._rename_addr: int | None = None  # set for address-based (listing) naming
@@ -2444,7 +2446,10 @@ class IdaTui(App):
 
     # -- status helper ----------------------------------------------------- #
     def _status(self, text: str) -> None:
-        self.query_one("#status", Static).update(text)
+        try:
+            self.query_one("#status", Static).update(text)
+        except Exception:  # noqa: BLE001 -- status bar transiently unavailable
+            pass
         if self._loading_screen is not None:  # mirror progress into the overlay
             self._loading_screen.update_note(text)
 
@@ -2468,6 +2473,94 @@ class IdaTui(App):
             except Exception:  # noqa: BLE001
                 pass
         return len(text)
+
+    # -- connection loss / recovery --------------------------------------- #
+    def _handle_exception(self, error: BaseException) -> None:
+        """Intercept a lost-connection error from any worker so the whole app
+        doesn't die when the analysis server goes away (it can idle out, be
+        killed, or the box can sleep). Everything else crashes as usual."""
+        from textual.worker import WorkerFailed
+        orig = error.error if isinstance(error, WorkerFailed) else error
+        if isinstance(orig, IDAConnectionError):
+            self._on_connection_lost()
+            return
+        super()._handle_exception(error)
+
+    def _on_connection_lost(self) -> None:
+        if self._reconnecting:
+            return
+        self._reconnecting = True
+        self._conn_screen = LoadingScreen(
+            "the analysis server", note="connection lost \u2014 reconnecting\u2026")
+        self.push_screen(self._conn_screen)
+        self._reconnect()
+
+    def _conn_note(self, text: str) -> None:
+        if self._conn_screen is not None:
+            self._conn_screen.update_note(text)
+
+    def _dismiss_conn(self) -> None:
+        cs = self._conn_screen
+        self._conn_screen = None
+        if cs is not None:
+            try:
+                cs.dismiss()
+            except Exception:  # noqa: BLE001 -- already popped (Esc)
+                pass
+
+    @work(thread=True, exclusive=True, group="reconnect")
+    def _reconnect(self) -> None:
+        try:
+            from .launch import _ensure_server
+            if not _ensure_server(
+                    self._url, self._open_path,
+                    progress=lambda m: self.app.call_from_thread(self._conn_note, m)):
+                self.app.call_from_thread(self._reconnect_failed,
+                                          "analysis server is unreachable")
+                return
+            client = IDAClient(self._url, db=None)
+            client.connect()
+            if self._open_path is not None:
+                path = os.path.abspath(os.path.expanduser(self._open_path))
+                self.app.call_from_thread(
+                    self._conn_note, f"re-opening {os.path.basename(path)}\u2026")
+                res = client.call("idb_open", input_path=path,
+                                  idle_ttl_sec=self._ttl, timeout=1800.0)
+                if not (isinstance(res, dict) and res.get("success")):
+                    self.app.call_from_thread(self._reconnect_failed, "re-open failed")
+                    return
+                client.set_db(res["session"]["session_id"])
+            else:
+                client.set_db(client.resolve_db())
+            client.health()
+            if self._ka is not None:
+                try:
+                    self._ka.stop()
+                except Exception:  # noqa: BLE001
+                    pass
+            if self._do_keepalive:
+                self._ka = client.keepalive(interval=120.0).start()
+            program = Program(client)
+        except Exception as e:  # noqa: BLE001
+            self.app.call_from_thread(self._reconnect_failed, str(e))
+            return
+        self.app.call_from_thread(self._after_reconnect, client, program)
+
+    def _after_reconnect(self, client: IDAClient, program: "Program") -> None:
+        self.client = client
+        self.program = program
+        self._reconnecting = False
+        self._dismiss_conn()
+        self._status("reconnected \u2014 reloading\u2026")
+        self._load_functions()  # rebuild the function index against the new client
+        cur = self._cur
+        if cur is not None:  # refresh the current view with the new program
+            self._open_entry(cur, push=False)
+
+    def _reconnect_failed(self, why: str) -> None:
+        self._reconnecting = False
+        self._conn_note(f"reconnect failed: {why}  \u2014  retry on next action, or 'q'")
+        self._status(f"reconnect failed: {why}")
 
     # -- connection + initial load ---------------------------------------- #
     @work(thread=True, exclusive=True, group="connect")
