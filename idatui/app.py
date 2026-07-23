@@ -2611,16 +2611,36 @@ class IdaTui(App):
             self._active = "listing"
             self._open_entry(ret, push=False)
         elif self._cur is not None:
-            # No F5 snapshot (we arrived via a decomp navigation): open the
-            # listing at the current pseudocode line's address, as a real listing
-            # view — otherwise we'd show a stale widget with _cur.view still
-            # "decomp", and the next edit would bounce back to the decompiler.
+            # No F5 snapshot (we arrived via a decomp navigation): show THIS entry
+            # in the listing at the current pseudocode line's address. Reuse the
+            # entry (it is _nav[-1]) rather than spawning a detached one, so cursor
+            # moves keep updating it and a later edit reloads at the right spot.
             dec = self.query_one(DecompView)
             ea = dec._line_ea(dec.cursor)
-            self._goto_ea(ea if ea is not None else self._cur.ea, push=False)
+            self._toggle_to_listing(ea if ea is not None else self._cur.ea)
         else:
             self._active = "listing"
             self._show_active()
+
+    @work(thread=True, group="nav")
+    def _toggle_to_listing(self, ea: int) -> None:
+        assert self.program is not None
+        lm = self.program.listing(ea)
+        idx = max(lm.ensure_ea(ea), 0) if lm is not None else 0
+        self.app.call_from_thread(self._apply_toggle_listing, idx)
+
+    def _apply_toggle_listing(self, idx: int) -> None:
+        cur = self._cur
+        if cur is None:
+            self._active = "listing"
+            self._show_active()
+            return
+        cur.view = "listing"
+        cur.cursor = idx
+        cur.cursor_x = 0
+        cur.scroll_y = -1  # derive a viewport (keeps the target in context)
+        self._active = "listing"
+        self._open_entry(cur, push=False)
 
     @work(thread=True, group="nav")
     def _decomp_from_listing(self, ea: int) -> None:
