@@ -3691,18 +3691,37 @@ class IdaTui(App):
         self._active = "listing"
         self._show_active()
 
+    # Prompt overlays that own the keyboard while visible; a background
+    # navigation must not yank focus out from under them (else typed keys leak
+    # into a code view as destructive verbs — e.g. 'u' = undefine).
+    _PROMPT_IDS = ("search", "rename", "comment", "retype", "goto", "func-filter")
+
+    def _prompt_active(self) -> bool:
+        for iid in self._PROMPT_IDS:
+            try:
+                if self.query_one(f"#{iid}", Input).display:
+                    return True
+            except Exception:  # noqa: BLE001 — widget not mounted yet
+                pass
+        return False
+
     def _show_active(self) -> None:
         dec = self.query_one(DecompView)
         lst = self.query_one(ListingView)
         hx = self.query_one(HexView)
+        # Don't steal focus from an open prompt (search/rename/…) — a late async
+        # navigation completing here would otherwise pull it into the code view.
+        grab = not self._prompt_active()
         dec.display = lst.display = hx.display = False
         if self._active in ("listing", "disasm"):
             lst.display = True
-            lst.focus()
+            if grab:
+                lst.focus()
             self._status_for_cur("listing")
         elif self._active == "hex":
             hx.display = True
-            hx.focus()
+            if grab:
+                hx.focus()
             ea = getattr(self, "_hex_pending_ea", None)
             self._hex_pending_ea = None
             if hx.model is None:
@@ -3714,7 +3733,8 @@ class IdaTui(App):
                 self._hex_status(hx.cursor_va())
         else:
             dec.display = True
-            dec.focus()
+            if grab:
+                dec.focus()
             if self._cur is not None and dec.loaded_ea != self._cur.ea:
                 self._status(f"{self._cur.name} — decompiling…")
                 dec.loading = True  # gray out + 'decompiling…' overlay

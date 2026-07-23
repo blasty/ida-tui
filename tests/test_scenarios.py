@@ -164,8 +164,12 @@ class Ctx:
             raise RuntimeError(f"no function for {target!r}")
         self.app._open_function(fn.addr, fn.name)
         await self.wait(lambda: self.app._cur and self.app._cur.ea == fn.addr, t)
+        # Wait for the cursor to actually LAND on the target, not merely for
+        # _cur.ea to match: re-opening a function we already navigated to (its
+        # _cur.ea is stale-true) schedules an async re-navigation, and proceeding
+        # before it lands would leave the cursor parked wherever we last were.
         await self.wait(lambda: self.lst.total > 0
-                        and self.lst._cursor_ea() is not None, t)
+                        and self.lst._cursor_ea() == fn.addr, t)
         if view == "decomp":
             self.lst.focus()
             await self.press("tab")  # F5/Tab -> decompile the function at cursor
