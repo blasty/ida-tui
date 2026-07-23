@@ -1441,10 +1441,11 @@ class DecompView(SearchMixin, NavMixin, ColumnCursor, ScrollView, can_focus=True
             else:
                 scroll_y = top
             width = max(self.size.width - self._gutter, 1)
-            sx = round(self.scroll_offset.x)
-            if self.cursor_x < sx:
-                scroll_x = self.cursor_x
-            elif self.cursor_x >= sx + width:
+            # Always baseline the horizontal scroll at 0 for a jump, then scroll
+            # right only if the target column falls outside the viewport — never
+            # keep a stale horizontal offset from wherever we were before.
+            sx = 0
+            if self.cursor_x >= sx + width:
                 scroll_x = self.cursor_x - width + 1
             else:
                 scroll_x = sx
