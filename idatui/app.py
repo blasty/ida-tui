@@ -2608,10 +2608,18 @@ class IdaTui(App):
         self._decomp_return = None
         if ret is not None:
             self._cur = ret
-        self._active = "listing"
-        if ret is not None:
+            self._active = "listing"
             self._open_entry(ret, push=False)
+        elif self._cur is not None:
+            # No F5 snapshot (we arrived via a decomp navigation): open the
+            # listing at the current pseudocode line's address, as a real listing
+            # view — otherwise we'd show a stale widget with _cur.view still
+            # "decomp", and the next edit would bounce back to the decompiler.
+            dec = self.query_one(DecompView)
+            ea = dec._line_ea(dec.cursor)
+            self._goto_ea(ea if ea is not None else self._cur.ea, push=False)
         else:
+            self._active = "listing"
             self._show_active()
 
     @work(thread=True, group="nav")
@@ -3085,6 +3093,7 @@ class IdaTui(App):
             self._show_active()
         else:
             self._save_current_pos()
+            cur.view = "listing"  # we're in the listing; keep the entry consistent
             self._open_entry(cur, push=False)
 
     def _after_comment(self, ea: int, text: str) -> None:
