@@ -3573,9 +3573,15 @@ class IdaTui(App):
         if prefer_decomp and fn is not None:
             dec = self.program.decompile(fn.addr)
             if not dec.failed and dec.code:
-                dec_idx = self._decomp_line_for(fn.addr, ea)
+                if ea == fn.addr:
+                    # Jumping to the function itself: land on its name in the
+                    # prototype (line 0), not column 0.
+                    dec_idx = 0
+                else:
+                    dec_idx = max(self._decomp_line_for(fn.addr, ea), 0)
+                col = self._decomp_col_for(fn.addr, dec_idx, fn.name)
                 self.app.call_from_thread(
-                    self._open_decomp_entry, fn.addr, fn.name, max(dec_idx, 0), push)
+                    self._open_decomp_entry, fn.addr, fn.name, dec_idx, col, push)
                 return
         # Otherwise: everything opens the one continuous listing at ``ea``. A
         # function name is used for the status label; a region gets a segment
@@ -3587,9 +3593,9 @@ class IdaTui(App):
             self._open_at, ea, name, idx, push, -1, 0, fn is None, focus_name)
 
     def _open_decomp_entry(self, fn_addr: int, fn_name: str, dec_idx: int,
-                           push: bool) -> None:
+                           dec_cursor_x: int, push: bool) -> None:
         """Open ``fn_addr`` in the decompiler as a real navigation (nav history
-        aware), landing on pseudocode line ``dec_idx``."""
+        aware), landing on pseudocode line ``dec_idx`` column ``dec_cursor_x``."""
         if push:
             # Snapshot where we jumped from so 'back' returns there. If that was
             # the pseudocode (F5 makes a transient _cur not yet on the stack),
@@ -3607,7 +3613,7 @@ class IdaTui(App):
                 self._save_current_pos()
         self._decomp_return = None  # a real navigation abandons the F5 return
         entry = NavEntry(ea=fn_addr, name=fn_name, view="decomp",
-                         dec_cursor=dec_idx)
+                         dec_cursor=dec_idx, dec_cursor_x=dec_cursor_x)
         if push:
             self._nav.append(entry)
         self._open_entry(entry, push=False)
