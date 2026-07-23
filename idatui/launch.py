@@ -196,6 +196,15 @@ def main(argv: list[str] | None = None) -> int:
 
     # 1) supervisor up (seed it with our target so its initial worker is useful)
     if not args.no_server:
+        # If we're about to start a fresh supervisor (it's down), nothing holds
+        # this binary's DB, so clear any stale unpacked lock files a crashed
+        # worker left behind. The supervisor is seeded with this target and opens
+        # it on startup; a wedged DB there crash-loops the whole supervisor
+        # before the TUI's own recovery can ever run.
+        if binary is not None and not _server_up(*_server_addr(args.url)):
+            swept = _sweep_locks(binary)
+            if swept:
+                _log(f"cleared {swept} stale lock file(s) from a crashed worker")
         if not _ensure_server(args.url, binary):
             return 1
     elif not _server_up(*_server_addr(args.url)):
