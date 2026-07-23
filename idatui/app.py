@@ -2317,13 +2317,15 @@ class IdaTui(App):
 
     def __init__(self, url: str, db: str | None, keepalive: bool = True,
                  open_path: str | None = None, rpc_path: str | None = None,
-                 ttl: int = 1800, ensure_server: bool = False) -> None:
+                 ttl: int = 1800, ensure_server: bool = False,
+                 backend: str = "mcp") -> None:
         super().__init__()
         self._url = url
         self._db = db
         self._open_path = open_path
         self._ttl = ttl
         self._ensure_server = ensure_server
+        self._backend = backend  # "mcp" (ida-pro-mcp) or "worker" (our idalib worker)
         self._do_keepalive = keepalive
         self._rpc_path = rpc_path
         self._rpc = None
@@ -2511,6 +2513,18 @@ class IdaTui(App):
     @work(thread=True, exclusive=True, group="reconnect")
     def _reconnect(self) -> None:
         try:
+            if self._backend == "worker":
+                from .worker_client import WorkerClient
+                if self._open_path is None:
+                    self.app.call_from_thread(self._reconnect_failed,
+                                              "no binary to reopen")
+                    return
+                client = WorkerClient(self._open_path, ttl=self._ttl)
+                client.connect(progress=lambda m: self.app.call_from_thread(
+                    self._conn_note, m))
+                self.app.call_from_thread(self._after_reconnect, client,
+                                          Program(client))
+                return
             from .launch import _ensure_server
             if not _ensure_server(
                     self._url, self._open_path,
@@ -2566,59 +2580,14 @@ class IdaTui(App):
     @work(thread=True, exclusive=True, group="connect")
     def _connect(self) -> None:
         try:
-            if self._ensure_server:
-                # Start the analysis server here (not in the launcher) so the
-                # chrome + overlay are already up while we wait for it.
-                from .launch import _ensure_server as _ensure
-                if not _ensure(self._url, self._open_path,
-                               progress=lambda m: self.app.call_from_thread(
-                                   self._status, m)):
-                    self.app.call_from_thread(
-                        self._status, "could not start the analysis server")
-                    self.app.call_from_thread(self._dismiss_loading)
-                    return
-            client = IDAClient(self._url, db=self._db)
-            client.connect()
-            if self._open_path is not None:
-                path = os.path.abspath(os.path.expanduser(self._open_path))
-                base = os.path.basename(path)
-                self.app.call_from_thread(
-                    self._status, f"opening {base} — analyzing…")
-
-                def _do_open():
-                    # Moderate idle TTL: the keepalive heartbeat (below) keeps the
-                    # session alive while the TUI runs; once it exits the worker
-                    # idles out and frees its slot (avoids piling to max-workers).
-                    return client.call("idb_open", input_path=path,
-                                       idle_ttl_sec=self._ttl, timeout=1800.0)
-
-                res = _do_open()
-                if not (isinstance(res, dict) and res.get("success")):
-                    # A hard-killed worker can wedge the DB; sweep its stale
-                    # unpacked lock files (never the .i64) and retry once.
-                    try:
-                        from .launch import _sweep_locks
-                        swept = _sweep_locks(path)
-                    except Exception:  # noqa: BLE001
-                        swept = 0
-                    if swept:
-                        self.app.call_from_thread(
-                            self._status, f"recovering {base} (removed {swept} "
-                            f"stale lock file(s))…")
-                        res = _do_open()
-                if not (isinstance(res, dict) and res.get("success")):
-                    err = res.get("error") if isinstance(res, dict) else res
-                    self.app.call_from_thread(self._status, f"open failed: {err}")
-                    self.app.call_from_thread(self._dismiss_loading)
-                    return
-                client.set_db(res["session"]["session_id"])
-            elif self._db is None:
-                client.set_db(client.resolve_db())
-            health = client.health()
-            module = health.get("module", "?")
+            client = (self._open_worker_client() if self._backend == "worker"
+                      else self._open_mcp_client())
+            if client is None:
+                return  # the opener already reported + dismissed the overlay
+            module = client.health().get("module", "?")
             if self._do_keepalive:
                 # Keep the session warm while we run; don't make it immortal, so
-                # it's reclaimed after the TUI closes.
+                # it's reclaimed after the TUI closes. (No-op for the worker.)
                 self._ka = client.keepalive(interval=120.0).start()
             program = Program(client)
         except Exception as e:  # noqa: BLE001
@@ -2629,6 +2598,72 @@ class IdaTui(App):
         self.program = program
         self.app.call_from_thread(self._status, f"{module} — loading functions…")
         self._load_functions()
+
+    def _open_mcp_client(self):  # type: ignore[no-untyped-def]
+        """ida-pro-mcp path: ensure the server, connect, open/adopt the DB.
+        Returns the client, or None after reporting the failure."""
+        if self._ensure_server:
+            # Start the analysis server here (not in the launcher) so the chrome
+            # + overlay are already up while we wait for it.
+            from .launch import _ensure_server as _ensure
+            if not _ensure(self._url, self._open_path,
+                           progress=lambda m: self.app.call_from_thread(
+                               self._status, m)):
+                self.app.call_from_thread(
+                    self._status, "could not start the analysis server")
+                self.app.call_from_thread(self._dismiss_loading)
+                return None
+        client = IDAClient(self._url, db=self._db)
+        client.connect()
+        if self._open_path is not None:
+            path = os.path.abspath(os.path.expanduser(self._open_path))
+            base = os.path.basename(path)
+            self.app.call_from_thread(self._status, f"opening {base} — analyzing…")
+
+            def _do_open():
+                return client.call("idb_open", input_path=path,
+                                   idle_ttl_sec=self._ttl, timeout=1800.0)
+
+            res = _do_open()
+            if not (isinstance(res, dict) and res.get("success")):
+                # A hard-killed worker can wedge the DB; sweep its stale unpacked
+                # lock files (never the .i64) and retry once.
+                try:
+                    from .launch import _sweep_locks
+                    swept = _sweep_locks(path)
+                except Exception:  # noqa: BLE001
+                    swept = 0
+                if swept:
+                    self.app.call_from_thread(
+                        self._status, f"recovering {base} (removed {swept} stale "
+                        f"lock file(s))…")
+                    res = _do_open()
+            if not (isinstance(res, dict) and res.get("success")):
+                err = res.get("error") if isinstance(res, dict) else res
+                self.app.call_from_thread(self._status, f"open failed: {err}")
+                self.app.call_from_thread(self._dismiss_loading)
+                return None
+            client.set_db(res["session"]["session_id"])
+        elif self._db is None:
+            client.set_db(client.resolve_db())
+        return client
+
+    def _open_worker_client(self):  # type: ignore[no-untyped-def]
+        """Our idalib-worker path: spawn the worker (it opens + analyzes the
+        binary in its own process) and connect. Returns the client, or None."""
+        from .worker_client import WorkerClient
+        if not self._open_path:
+            self.app.call_from_thread(
+                self._status, "the worker backend needs a binary path")
+            self.app.call_from_thread(self._dismiss_loading)
+            return None
+        base = os.path.basename(self._open_path)
+        self.app.call_from_thread(
+            self._status, f"starting worker — initial auto-analysis of {base}…")
+        client = WorkerClient(self._open_path, ttl=self._ttl)
+        client.connect(progress=lambda m: self.app.call_from_thread(
+            self._status, m))
+        return client
 
     @work(thread=True, exclusive=True, group="load-funcs")
     def _load_functions(self) -> None:

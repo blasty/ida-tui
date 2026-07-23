@@ -189,6 +189,10 @@ def main(argv: list[str] | None = None) -> int:
                    help="listen for RPC on this unix socket (puppeteer the TUI)")
     p.add_argument("--no-server", action="store_true",
                    help="do not auto-start the supervisor if it's down")
+    p.add_argument("--backend", choices=("mcp", "worker"),
+                   default=os.environ.get("IDATUI_BACKEND", "mcp"),
+                   help="'mcp' (ida-pro-mcp supervisor, default) or 'worker' "
+                        "(our own in-process idalib worker over a unix socket)")
     args = p.parse_args(argv)
 
     binary = None
@@ -202,21 +206,30 @@ def main(argv: list[str] | None = None) -> int:
                  f"{os.path.dirname(binary)}")
             return 2
 
-    # Everything slow — starting the supervisor and opening/analyzing the binary
-    # — is deferred to the TUI so its chrome + "loading…" overlay are on screen
-    # the whole time, instead of a blank terminal before the TUI even starts.
-    # Here we only do the instant checks.
-    server_down = not _server_up(*_server_addr(args.url))
-    if args.no_server and server_down:
-        _log("supervisor is down and --no-server was given")
-        return 1
-    if binary is not None and server_down:
-        # About to start a fresh supervisor (nothing holds the DB): clear any
-        # stale unpacked lock files a crashed worker left, so the supervisor's
-        # seeded initial open doesn't crash-loop on a wedged DB.
-        swept = _sweep_locks(binary)
+    if args.backend == "worker":
+        # The worker path owns no shared supervisor: the TUI spawns a private
+        # idalib worker that opens THIS binary. No server/lock plumbing here.
+        if binary is None:
+            _log("--backend worker needs a binary path")
+            return 2
+        swept = _sweep_locks(binary)  # a crashed worker can leave the DB wedged
         if swept:
             _log(f"cleared {swept} stale lock file(s) from a crashed worker")
+    else:
+        # Everything slow — starting the supervisor and opening/analyzing the
+        # binary — is deferred to the TUI so its chrome + "loading…" overlay are
+        # on screen the whole time. Here we only do the instant checks.
+        server_down = not _server_up(*_server_addr(args.url))
+        if args.no_server and server_down:
+            _log("supervisor is down and --no-server was given")
+            return 1
+        if binary is not None and server_down:
+            # About to start a fresh supervisor (nothing holds the DB): clear any
+            # stale unpacked lock files a crashed worker left, so the seeded
+            # initial open doesn't crash-loop on a wedged DB.
+            swept = _sweep_locks(binary)
+            if swept:
+                _log(f"cleared {swept} stale lock file(s) from a crashed worker")
 
     # Hand off to the TUI (imported late so --help works without textual). It
     # ensures the server (with on-screen progress), then opens/adopts the binary
@@ -229,7 +242,8 @@ def main(argv: list[str] | None = None) -> int:
     rpc_path = os.path.abspath(os.path.expanduser(args.rpc)) if args.rpc else None
     IdaTui(url=args.url, db=args.db,
            open_path=(binary if args.db is None else None), ttl=args.ttl,
-           ensure_server=not args.no_server,
+           ensure_server=(args.backend == "mcp" and not args.no_server),
+           backend=args.backend,
            keepalive=not args.no_keepalive, rpc_path=rpc_path).run()
     return 0
 
