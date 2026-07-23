@@ -1955,7 +1955,8 @@ class LoadingScreen(ModalScreen):
         with Vertical(id="loading-box"):
             yield Static(f"\u23f3  loading  {self._title}", id="loading-title")
             yield Static(self._note, id="loading-note")
-            yield Static("analyzing the binary\u2026 (Esc to hide)", id="loading-help")
+            yield Static("first open of a big binary can take a while  \u00b7  "
+                         "Esc to hide", id="loading-help")
 
     def update_note(self, text: str) -> None:
         try:
@@ -1965,6 +1966,26 @@ class LoadingScreen(ModalScreen):
 
     def action_hide(self) -> None:
         self.dismiss()
+
+
+class BusyScreen(ModalScreen):
+    """A tiny blocking overlay for a short async step (e.g. gathering xrefs) so
+    the user can't fire more actions into a half-finished operation. Esc cancels
+    (dismisses with "cancel"); a programmatic dismiss carries no result."""
+
+    BINDINGS = [Binding("escape", "cancel", "Cancel")]
+
+    def __init__(self, message: str) -> None:
+        super().__init__()
+        self._message = message
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="busy-box"):
+            yield Static(self._message, id="busy-msg")
+            yield Static("Esc to cancel", id="busy-help")
+
+    def action_cancel(self) -> None:
+        self.dismiss("cancel")
 
 
 # --------------------------------------------------------------------------- #
@@ -2268,11 +2289,16 @@ class IdaTui(App):
     #confirm-msg { height: auto; }
     #confirm-help { height: 1; color: $text-muted; margin-top: 1; }
     LoadingScreen { align: center middle; }
-    #loading-box { width: 64; height: auto; border: thick $accent;
+    #loading-box { width: 72; height: auto; border: thick $accent;
                    background: $panel; padding: 1 2; }
     #loading-title { height: 1; text-style: bold; }
-    #loading-note { height: 1; color: $text-muted; margin-top: 1; }
-    #loading-help { height: 1; color: $text-muted; }
+    #loading-note { height: auto; color: $text-muted; margin-top: 1; }
+    #loading-help { height: auto; color: $text-muted; margin-top: 1; }
+    BusyScreen { align: center middle; }
+    #busy-box { width: auto; min-width: 26; height: auto; border: thick $accent;
+                background: $panel; padding: 1 2; }
+    #busy-msg { height: 1; text-style: bold; }
+    #busy-help { height: 1; color: $text-muted; margin-top: 1; }
     """
 
     BINDINGS = [
@@ -2318,6 +2344,8 @@ class IdaTui(App):
         self._cur: NavEntry | None = None
         self._pending_focus_name: str | None = None  # token to land the cursor on
         self._decomp_return: NavEntry | None = None  # listing to return to from F5
+        self._busy_screen: BusyScreen | None = None
+        self._xref_active = False  # an xref gather is in flight (blocks re-entry)
         self._search_ctx: tuple[object | None, int] = (None, 1)
         self._rename_ctx: tuple[object | None, str] = (None, "")
         self._rename_addr: int | None = None  # set for address-based (listing) naming
@@ -2461,8 +2489,7 @@ class IdaTui(App):
                 path = os.path.abspath(os.path.expanduser(self._open_path))
                 base = os.path.basename(path)
                 self.app.call_from_thread(
-                    self._status,
-                    f"opening {base} — analyzing (a first open can take a while)…")
+                    self._status, f"opening {base} — analyzing…")
 
                 def _do_open():
                     # Moderate idle TTL: the keepalive heartbeat (below) keeps the
@@ -2865,6 +2892,8 @@ class IdaTui(App):
                                 view._line_ea(view.cursor))
 
     def on_xrefs_requested(self, msg: XrefsRequested) -> None:
+        if self._xref_active:  # one gather at a time; ignore a second 'x'
+            return
         view = msg.view
         word = view.word_under_cursor()
         if isinstance(view, DisasmView):
@@ -2873,10 +2902,12 @@ class IdaTui(App):
                 # span = this instruction .. the next, to pre-select the dialog
                 # entry for the site we invoked xrefs from.
                 nxt = view.model.cached_line(view.cursor + 1) if view.model else None
+                self._push_busy("finding xrefs\u2026")
                 self._xrefs_disasm(ea, word, ea, nxt.ea if nxt else None)
         elif isinstance(view, ListingView):
             ea = view._cursor_ea()
             if ea is not None:
+                self._push_busy("finding xrefs\u2026")
                 self._xrefs_disasm(ea, word, ea, view._next_ea())
         elif isinstance(view, DecompView) and view._texts:
             here = view._line_ea(view.cursor)
@@ -2887,7 +2918,27 @@ class IdaTui(App):
                     if e is not None and e > here:
                         end = e
                         break
+            self._push_busy("finding xrefs\u2026")
             self._xrefs_decomp(view._texts[view.cursor], word, here, end)
+
+    # -- blocking "busy" overlay for short async steps -------------------- #
+    def _push_busy(self, message: str) -> None:
+        self._xref_active = True
+        self._busy_screen = BusyScreen(message)
+        self.push_screen(self._busy_screen, self._on_busy_closed)
+
+    def _on_busy_closed(self, result: object = None) -> None:
+        self._busy_screen = None
+        if result == "cancel":  # user hit Esc while we were still gathering
+            self._xref_active = False
+
+    def _dismiss_busy(self) -> None:
+        bs = self._busy_screen
+        if bs is not None:
+            try:
+                bs.dismiss()  # no result -> _on_busy_closed leaves the flag alone
+            except Exception:  # noqa: BLE001 -- already popped
+                pass
 
     @staticmethod
     def _looks_like_symbol(word: str | None) -> bool:
@@ -2997,6 +3048,8 @@ class IdaTui(App):
             subj = self._ref_on_line(line) or (self._cur.ea if self._cur else None)
         if subj is not None:
             self._xrefs_present(subj, word, here_ea, here_end)
+        else:  # nothing to xref -> still clear the busy overlay
+            self.app.call_from_thread(self._present_xrefs, "xrefs", [], None, 0)
 
     @staticmethod
     def _xref_preselect(xr, here_ea, here_end) -> int:  # type: ignore[no-untyped-def]
@@ -3015,6 +3068,14 @@ class IdaTui(App):
     def _xrefs_present(self, subj: int, subj_name: str | None = None,
                        here_ea: int | None = None,
                        here_end: int | None = None) -> None:  # worker
+        assert self.program is not None
+        try:
+            return self._xrefs_present_inner(subj, subj_name, here_ea, here_end)
+        except Exception as e:  # noqa: BLE001 -- never leave the busy overlay stuck
+            self.app.call_from_thread(self._status, f"xrefs failed: {e}")
+            self.app.call_from_thread(self._present_xrefs, "xrefs", [], None, 0)
+
+    def _xrefs_present_inner(self, subj, subj_name, here_ea, here_end):  # type: ignore[no-untyped-def]
         assert self.program is not None
         xr = self.program.xrefs_to(subj)
         fn = self.program.function_of(subj)
@@ -3046,6 +3107,10 @@ class IdaTui(App):
 
     def _present_xrefs(self, label: str, items: list[tuple[int, str]],
                        focus_name: str | None = None, preselect: int = 0) -> None:
+        if not self._xref_active:
+            return  # cancelled (Esc) while we were still gathering
+        self._xref_active = False
+        self._dismiss_busy()
         if not items:
             self._status(f"{label}: none")
             return
