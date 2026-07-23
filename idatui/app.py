@@ -3577,9 +3577,13 @@ class IdaTui(App):
                     # Jumping to the function itself: land on its name in the
                     # prototype (line 0), not column 0.
                     dec_idx = 0
+                    token = fn.name
                 else:
+                    # A mid-function site (e.g. an xref jump to a call site):
+                    # land on the referenced symbol on that line, not column 0.
                     dec_idx = max(self._decomp_line_for(fn.addr, ea), 0)
-                col = self._decomp_col_for(fn.addr, dec_idx, fn.name)
+                    token = focus_name or fn.name
+                col = self._decomp_col_for(fn.addr, dec_idx, token) if token else 0
                 self.app.call_from_thread(
                     self._open_decomp_entry, fn.addr, fn.name, dec_idx, col, push)
                 return
