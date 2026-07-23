@@ -83,7 +83,11 @@ def _ensure_server(url: str, target: str | None, timeout: float = 90.0,
     if host not in ("127.0.0.1", "localhost", "::1"):
         note(f"server at {host}:{port} is down and not local — cannot auto-start")
         return False
-    note(f"starting analysis server (log: {_server_log_path()})…")
+    # The supervisor opens + auto-analyzes its seed binary BEFORE it binds the
+    # port (idalib_supervisor.main), so this whole wait is really IDA running
+    # initial auto-analysis — label it as such, not just "starting a server".
+    label = os.path.basename(target) if target else "binary"
+    note(f"starting IDA — initial auto-analysis of {label}…")
     proc = _start_supervisor(target)
     deadline = time.time() + timeout
     t0 = time.time()
@@ -93,9 +97,10 @@ def _ensure_server(url: str, target: str | None, timeout: float = 90.0,
         if proc is not None and proc.poll() is not None:
             note("analysis server exited during startup — check the log")
             return False
-        note(f"starting analysis server… ({int(time.time() - t0)}s)")
+        note(f"auto-analyzing {label}… ({int(time.time() - t0)}s)  "
+             f"first open of a big binary can take a while")
         time.sleep(0.5)
-    note(f"analysis server did not come up within {timeout:.0f}s")
+    note(f"analysis did not finish within {timeout:.0f}s")
     return False
 
 
