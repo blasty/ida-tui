@@ -984,6 +984,7 @@ class ListingView(SearchMixin, NavMixin, ColumnCursor, ScrollView, can_focus=Tru
         self.total = 0
         self._name = ""
         self._pending_scroll_y: int | None = None
+        self._pending_focus: str | None = None
         self._term = ""
         self._matches: list[int] = []
         self._ranges: dict[int, list[tuple[int, int]]] = {}
@@ -1031,13 +1032,15 @@ class ListingView(SearchMixin, NavMixin, ColumnCursor, ScrollView, can_focus=Tru
 
     # -- public API -------------------------------------------------------- #
     def load(self, model: ListingModel, name: str, cursor: int = 0,
-             cursor_x: int = 0, scroll_y: int | None = None) -> None:
+             cursor_x: int = 0, scroll_y: int | None = None,
+             focus: str | None = None) -> None:
         self.model = model
         self._name = name
         self.total = 0
         self.cursor = cursor
         self.cursor_x = cursor_x
         self._pending_scroll_y = scroll_y
+        self._pending_focus = focus  # token to land the cursor column on
         self._matches = []
         self._ranges = {}
         self._prime()
@@ -1062,13 +1065,23 @@ class ListingView(SearchMixin, NavMixin, ColumnCursor, ScrollView, can_focus=Tru
         self.total = total
         self.virtual_size = Size(0, total)
         self.cursor = max(0, min(self.cursor, max(total - 1, 0)))
+        self._update_op_w()  # finalize column layout before locating the token
+        # Land the cursor on the requested token's column (e.g. the ref an xref
+        # jump targets), now that the row is loaded and renderable.
+        if self._pending_focus:
+            plain = self._line_plain(self.cursor)
+            if plain:
+                occ = _word_occurrences(plain, self._pending_focus)
+                if occ:
+                    self.cursor_x = occ[0][0]
+            self._pending_focus = None
         self._clamp_x()
         if self._pending_scroll_y is not None and self._pending_scroll_y >= 0:
             self._apply_scroll(min(self._pending_scroll_y, max(total - 1, 0)))
         else:
             self._scroll_cursor_into_view()
         self._pending_scroll_y = None
-        self._update_op_w()
+        self._hscroll()  # bring the cursor column into horizontal view
         self.refresh()
         self.post_message(ListingView.CursorMoved(self.cursor, self._cursor_ea()))
 
@@ -2265,6 +2278,7 @@ class IdaTui(App):
         self._active = "listing"  # currently shown view
         self._hex_pending_ea: int | None = None
         self._cur: NavEntry | None = None
+        self._pending_focus_name: str | None = None  # token to land the cursor on
         self._decomp_return: NavEntry | None = None  # listing to return to from F5
         self._search_ctx: tuple[object | None, int] = (None, 1)
         self._rename_ctx: tuple[object | None, str] = (None, "")
@@ -2797,7 +2811,8 @@ class IdaTui(App):
         # Prefer the symbol under the cursor (handles multiple refs on a line).
         if self._looks_like_symbol(word):
             try:
-                self._do_navigate(self.program.resolve(word), push=True)
+                self._do_navigate(self.program.resolve(word), push=True,
+                                  focus_name=word)
                 return
             except Exception:  # noqa: BLE001 -- not a resolvable name; fall back
                 pass
@@ -3465,7 +3480,7 @@ class IdaTui(App):
         idx = max(lm.ensure_ea(ea), 0) if lm is not None else 0
         name = fn.name if fn is not None else self.program.region_label(ea)
         self.app.call_from_thread(
-            self._open_at, ea, name, idx, push, -1, 0, fn is None)
+            self._open_at, ea, name, idx, push, -1, 0, fn is None, focus_name)
 
     def _open_decomp_entry(self, fn_addr: int, fn_name: str, dec_idx: int,
                            push: bool) -> None:
@@ -3530,10 +3545,13 @@ class IdaTui(App):
 
     def _open_at(self, ea: int, name: str, cursor: int, push: bool,
                  dec_cursor: int = -1, dec_cursor_x: int = 0,
-                 is_region: bool = False) -> None:
+                 is_region: bool = False, focus_name: str | None = None) -> None:
         if push:
             self._save_current_pos()
         self._decomp_return = None  # a real navigation abandons the F5 return
+        # Land the cursor on this token (e.g. the ref an xref jump targets) once
+        # the row is loaded, instead of column 0.
+        self._pending_focus_name = focus_name
         entry = NavEntry(ea=ea, name=name, cursor=cursor, is_region=is_region)
         if dec_cursor >= 0:
             entry.dec_cursor = dec_cursor
@@ -3761,6 +3779,8 @@ class IdaTui(App):
         if self.program is None:
             return
         self._cur = entry
+        focus = self._pending_focus_name  # one-shot: consume it here
+        self._pending_focus_name = None
         if entry.view == "decomp":
             # This entry was viewed in the decompiler (a jump from pseudocode, or
             # a back/forward to one) — restore it there instead of the listing.
@@ -3792,7 +3812,7 @@ class IdaTui(App):
                     sy = max(entry.cursor - _JUMP_CONTEXT, 0)
             lst.load(
                 lm, entry.name, cursor=entry.cursor,
-                cursor_x=entry.cursor_x, scroll_y=sy)
+                cursor_x=entry.cursor_x, scroll_y=sy, focus=focus)
         self._active = "listing"
         self._show_active()
 
