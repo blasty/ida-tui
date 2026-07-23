@@ -189,11 +189,21 @@ def main(argv: list[str] | None = None) -> int:
                    help="listen for RPC on this unix socket (puppeteer the TUI)")
     p.add_argument("--no-server", action="store_true",
                    help="do not auto-start the supervisor if it's down")
-    p.add_argument("--backend", choices=("mcp", "worker"),
-                   default=os.environ.get("IDATUI_BACKEND", "mcp"),
-                   help="'mcp' (ida-pro-mcp supervisor, default) or 'worker' "
-                        "(our own in-process idalib worker over a unix socket)")
+    p.add_argument("--backend", choices=("mcp", "worker"), default=None,
+                   help="'worker' (our own idalib worker over a unix socket, the "
+                        "default when opening a binary) or 'mcp' (deprecated "
+                        "ida-pro-mcp supervisor; used for --db/attach)")
     args = p.parse_args(argv)
+
+    # Backend selection: explicit flag > IDATUI_BACKEND > worker for a fresh
+    # binary open, mcp for the attach modes (--db / bare `ida-tui`) which have no
+    # worker equivalent. The mcp path is deprecated and on its way out.
+    if args.backend is None:
+        args.backend = os.environ.get("IDATUI_BACKEND") or (
+            "worker" if (args.binary and not args.db) else "mcp")
+    if args.backend == "mcp":
+        _log("using the deprecated ida-pro-mcp backend "
+             "(the idalib worker is default for opening a binary)")
 
     binary = None
     if args.binary and not args.db:

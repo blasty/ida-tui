@@ -4,6 +4,14 @@
 bugs:
 
 current:
+[~] DITCH ida-pro-mcp -> our own idalib worker (idatui/worker.py + WorkerClient)
+    [x] worker + WorkerClient (drop-in for IDAClient, same tool shapes)
+    [x] --backend {worker,mcp}; worker is now the DEFAULT for opening a binary
+    [x] worker spawns under the IDA python; {"result":...} wrapping to match MCP
+    [ ] run the pilot suite against --backend worker (blocked: idalib reaping here)
+    [ ] progress reporting during analysis (worker streams notes to the overlay)
+    [ ] once solid: delete client.py, server/patch_server.py, spawn.sh, and
+        launch.py's whole supervisor/ensure_server/lock-sweep dance
 [x] RPC endpoint for robot-spectator-ida
     -> progressssss
 

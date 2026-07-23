@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
 """Inject idatui's extra ida-pro-mcp tools into the installed server package.
 
+DEPRECATED along with the ida-pro-mcp transport: the default backend is now the
+idalib worker (idatui/worker.py), which registers these same tools in-process and
+needs no patching. Kept only for `--backend mcp`; slated for removal.
+
 ida-pro-mcp lacks a few tools idatui needs. Rather than vendor/fork the server,
 we keep the tool source here and inject it (idempotently) into the installed
 ``api_types.py``. That module is imported by every worker

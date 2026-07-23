@@ -1,8 +1,13 @@
 # ida-tui
 
 A minimal, keyboard-first (mouse-capable) **TUI frontend for IDA Pro**, built with
-[Textual](https://textual.textualize.io/) and talking to the
-[ida-pro-mcp](https://github.com/mrexodia/ida-pro-mcp) (idalib) server.
+[Textual](https://textual.textualize.io/) and driving **idalib** (IDA headless).
+
+Opening a binary now spawns our own **idalib worker** — a private subprocess
+talking a unix socket (`idatui/worker.py` + `WorkerClient`), ~50–100× cheaper per
+call than the old transport. The
+[ida-pro-mcp](https://github.com/mrexodia/ida-pro-mcp) HTTP path is **deprecated**
+(kept behind `--backend mcp` / `--db` attach) and slated for removal.
 
 ## ⚠️ Status: not ready for public consumption
 

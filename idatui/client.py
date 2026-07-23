@@ -1,5 +1,12 @@
 """Persistent, thread-safe client for the ida-pro-mcp (idalib) MCP server.
 
+DEPRECATED. The default backend is now our own idalib worker (idatui.worker +
+idatui.worker_client.WorkerClient), which talks a unix socket instead of HTTP and
+is ~50-100x cheaper per call. This module (and the whole ida-pro-mcp
+supervisor/HTTP path: server/patch_server.py, spawn.sh, launch.py's server
+plumbing) is kept only for `--backend mcp` / --db attach and will be removed once
+the worker is battle-tested. Prefer WorkerClient for new code.
+
 This is the foundation the whole TUI stands on. Unlike the throwaway CLI in the
 ida-mcp skill (which re-does the MCP handshake and spins a fresh socket on every
 call), this client:
