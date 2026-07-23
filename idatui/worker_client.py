@@ -27,6 +27,34 @@ from .client import IDAToolError, IDAConnectionError, Session
 from .worker import recv as _recv
 from .worker import send as _send
 
+_WORKER_PY = os.path.join(os.path.dirname(os.path.abspath(__file__)), "worker.py")
+_worker_python_cache: str | None = None
+
+
+def _find_worker_python() -> str:
+    """A python that can import ``ida_pro_mcp`` (and thus idalib) — NOT necessarily
+    the TUI's python. On a typical box the TUI runs under a venv that has textual
+    + idalib but not ida_pro_mcp, while the system python has idalib +
+    ida_pro_mcp. Override with IDATUI_WORKER_PYTHON."""
+    global _worker_python_cache
+    if _worker_python_cache:
+        return _worker_python_cache
+    override = os.environ.get("IDATUI_WORKER_PYTHON")
+    candidates = [override] if override else []
+    candidates += ["/usr/bin/python", "/usr/bin/python3", sys.executable]
+    for py in candidates:
+        if not py or not os.path.exists(py):
+            continue
+        try:
+            r = subprocess.run([py, "-c", "import ida_pro_mcp"],
+                               capture_output=True, timeout=30)
+            if r.returncode == 0:
+                _worker_python_cache = py
+                return py
+        except Exception:  # noqa: BLE001
+            continue
+    return sys.executable  # last resort; the worker will report the real error
+
 
 class _NoopKeepAlive:
     """The worker is ours and never idles out, so keepalive is a no-op."""
@@ -45,7 +73,7 @@ class WorkerClient:
     def __init__(self, binary_path: str, *, ttl: int = 0,
                  python: str | None = None) -> None:
         self._bin = os.path.abspath(os.path.expanduser(binary_path))
-        self._python = python or sys.executable
+        self._python = python or _find_worker_python()
         tag = f"{os.getpid()}-{uuid.uuid4().hex[:8]}"
         self._sock_path = f"/tmp/idatui-worker-{tag}.sock"
         self._log_path = f"/tmp/idatui-worker-{tag}.log"
@@ -62,10 +90,11 @@ class WorkerClient:
             if self._sock is not None:
                 return self
             if self._proc is None or self._proc.poll() is not None:
+                # run worker.py as a SCRIPT (not -m idatui.worker) so we don't
+                # import the textual-dependent idatui package __init__ under the
+                # IDA python, which usually has no textual.
                 self._proc = subprocess.Popen(
-                    [self._python, "-m", "idatui.worker",
-                     self._sock_path, self._bin],
-                    cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                    [self._python, _WORKER_PY, self._sock_path, self._bin],
                     stdout=open(self._log_path, "wb"),
                     stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
                 )
