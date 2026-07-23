@@ -64,9 +64,13 @@ def _open_and_register(binpath: str):
     against this live database. Returns (tools_dict, module_name, save_fn)."""
     import idapro
     idapro.enable_console_messages(False)
-    rc = idapro.open_database(binpath, run_auto_analysis=True)
-    if rc:
-        raise RuntimeError(f"open_database({binpath!r}) failed rc={rc}")
+    if idapro.open_database(binpath, run_auto_analysis=True):  # nonzero == failure
+        raise RuntimeError(
+            f"failed to open {binpath}: the .i64 is likely held by a running "
+            f"ida-mcp worker (try: pkill -f idalib) or wedged from a crash "
+            f"(delete its .id0/.id1/.id2/.nam/.til next to the binary)")
+    import ida_auto
+    ida_auto.auto_wait()  # block until auto-analysis settles (match ida-mcp)
 
     # importing the package registers all api_*/patched tools against MCP_SERVER
     from ida_pro_mcp.ida_mcp import MCP_SERVER  # noqa: WPS433
@@ -153,7 +157,16 @@ def main(argv=None) -> None:
     if len(argv) < 2:
         sys.stderr.write("usage: python -m idatui.worker <sock> <binary>\n")
         raise SystemExit(2)
-    serve(argv[0], argv[1])
+    try:
+        serve(argv[0], argv[1])
+    except SystemExit:
+        raise
+    except BaseException as e:  # noqa: BLE001 -- surface a clean cause + code 1
+        import traceback
+        sys.stderr.write(f"\nWORKER-FATAL: {type(e).__name__}: {e}\n")
+        traceback.print_exc()
+        sys.stderr.flush()
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":

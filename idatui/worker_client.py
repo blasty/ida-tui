@@ -46,7 +46,9 @@ class WorkerClient:
                  python: str | None = None) -> None:
         self._bin = os.path.abspath(os.path.expanduser(binary_path))
         self._python = python or sys.executable
-        self._sock_path = f"/tmp/idatui-worker-{os.getpid()}-{uuid.uuid4().hex[:8]}.sock"
+        tag = f"{os.getpid()}-{uuid.uuid4().hex[:8]}"
+        self._sock_path = f"/tmp/idatui-worker-{tag}.sock"
+        self._log_path = f"/tmp/idatui-worker-{tag}.log"
         self._proc: subprocess.Popen | None = None
         self._sock: socket.socket | None = None
         self._sid = uuid.uuid4().hex[:8]
@@ -64,6 +66,8 @@ class WorkerClient:
                     [self._python, "-m", "idatui.worker",
                      self._sock_path, self._bin],
                     cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                    stdout=open(self._log_path, "wb"),
+                    stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
                 )
             deadline = time.time() + timeout
             t0 = time.time()
@@ -76,8 +80,8 @@ class WorkerClient:
                 except OSError:
                     if self._proc.poll() is not None:
                         raise IDAConnectionError(
-                            f"worker exited during startup (code "
-                            f"{self._proc.returncode})")
+                            f"worker exited (code {self._proc.returncode}): "
+                            f"{self._log_tail()}  [full log: {self._log_path}]")
                     if progress:
                         progress(f"auto-analyzing {os.path.basename(self._bin)}… "
                                  f"({int(time.time() - t0)}s)")
@@ -156,6 +160,23 @@ class WorkerClient:
 
     def keepalive(self, interval: float = 120.0) -> _NoopKeepAlive:
         return _NoopKeepAlive()
+
+    def _log_tail(self, n: int = 400) -> str:
+        """Last meaningful line(s) of the worker log (skip IDA's licence banner),
+        so a startup crash surfaces the real cause instead of just 'code 1'."""
+        try:
+            with open(self._log_path, encoding="utf-8", errors="replace") as f:
+                lines = [ln.strip() for ln in f if ln.strip()]
+        except OSError:
+            return "(no worker log)"
+        # the worker prints a clean 'WORKER-FATAL: ...' line on a startup crash
+        for ln in reversed(lines):
+            if ln.startswith("WORKER-FATAL:"):
+                return ln[len("WORKER-FATAL:"):].strip()[-n:]
+        skip = ("thank you", "licensed to", "[mcp]", "ida ", "hex-rays")
+        meaningful = [ln for ln in lines
+                      if not any(s in ln.lower() for s in skip)]
+        return " | ".join((meaningful or lines)[-3:])[-n:]
 
     # context manager parity with IDAClient
     def __enter__(self) -> "WorkerClient":
