@@ -900,6 +900,7 @@ class ListingView(SearchMixin, NavMixin, ColumnCursor, ScrollView, can_focus=Tru
         Binding("pageup", "page(-1)", "PgUp", show=False),
         Binding("home", "goto_top", "Top", show=False),
         Binding("G,end", "goto_bottom", "Bottom", show=False),
+        Binding("o", "toggle_opcodes", "Opcodes", show=False),
         Binding("c", "define_code", "Code", show=False),
         Binding("d", "make_data", "Data", show=False),
         Binding("a", "make_string", "Str", show=False),
@@ -930,6 +931,8 @@ class ListingView(SearchMixin, NavMixin, ColumnCursor, ScrollView, can_focus=Tru
         self._term = ""
         self._matches: list[int] = []
         self._ranges: dict[int, list[tuple[int, int]]] = {}
+        self._show_ops = True   # opcode-bytes column (toggle 'o'), like disasm
+        self._op_w = 0          # char width of the hex-bytes field (excl. gap)
 
     # -- text helpers ------------------------------------------------------ #
     def _head(self, idx: int) -> Head | None:
@@ -939,12 +942,21 @@ class ListingView(SearchMixin, NavMixin, ColumnCursor, ScrollView, can_focus=Tru
     def _name_prefix(h: Head) -> str:
         return f"{h.name}  " if h.name else ""
 
+    def _op_field(self, h: Head) -> str:
+        """The padded opcode-bytes column (empty when hidden / no bytes). Shared
+        format with the disasm view so cursor/search offsets line up."""
+        if not self._show_ops or self._op_w <= 0:
+            return ""
+        raw = h.raw or b""
+        return " ".join(f"{b:02X}" for b in raw).ljust(self._op_w) + "  "
+
     def _line_plain(self, idx: int) -> str | None:
         h = self._head(idx)
         if h is None:
             return None
         indent = "    " if h.kind == "member" else ""
-        return f"{h.ea:08X}  " + indent + self._name_prefix(h) + h.text
+        return (f"{h.ea:08X}  " + self._op_field(h) + indent
+                + self._name_prefix(h) + h.text)
 
     # -- public API -------------------------------------------------------- #
     def load(self, model: ListingModel, name: str, cursor: int = 0,
@@ -985,8 +997,29 @@ class ListingView(SearchMixin, NavMixin, ColumnCursor, ScrollView, can_focus=Tru
         else:
             self._scroll_cursor_into_view()
         self._pending_scroll_y = None
+        self._update_op_w()
         self.refresh()
         self.post_message(ListingView.CursorMoved(self.cursor, self._cursor_ea()))
+
+    def _update_op_w(self) -> bool:
+        """Recompute the opcode-column width from the widest code head seen.
+        Returns True if it changed (callers refresh + drop stale search index)."""
+        w = 0
+        if self.model is not None and self._show_ops:
+            mx = self.model.max_raw_len()
+            w = max(mx * 3 - 1, 0) if mx > 0 else 0
+        if w != self._op_w:
+            self._op_w = w
+            return True
+        return False
+
+    def action_toggle_opcodes(self) -> None:
+        self._show_ops = not self._show_ops
+        self._update_op_w()
+        self._ranges = {}  # column layout changed -> stale match offsets
+        self._clamp_x()
+        self.refresh()
+        self._app_status("opcodes " + ("on" if self._show_ops else "off"))
 
     @work(thread=True, exclusive=True, group="listing-grow")
     def _grow(self) -> None:
@@ -1012,6 +1045,7 @@ class ListingView(SearchMixin, NavMixin, ColumnCursor, ScrollView, can_focus=Tru
             return
         self.total = total
         self.virtual_size = Size(0, total)
+        self._update_op_w()  # more code streamed in -> widen the op column
         self.refresh()
 
     # -- search hooks ----------------------------------------------------- #
@@ -1051,6 +1085,11 @@ class ListingView(SearchMixin, NavMixin, ColumnCursor, ScrollView, can_focus=Tru
             strip = Strip([Segment(f"  {idx:>8}  …", _S_DIM)])
         else:
             segs: list[Segment] = [Segment(f"{h.ea:08X}  ", _S_ADDR)]
+            op = self._op_field(h)
+            if op:
+                segs.append(Segment(op, _S_OPBYTES))
+            if h.kind == "member":
+                segs.append(Segment("    ", _S_MEMBER))
             if h.name:
                 segs.append(Segment(f"{h.name}  ", _S_LABEL))
             if h.kind == "code":
@@ -1061,7 +1100,7 @@ class ListingView(SearchMixin, NavMixin, ColumnCursor, ScrollView, can_focus=Tru
             elif h.kind == "data":
                 segs.append(Segment(h.text, _S_DATA))
             elif h.kind == "member":
-                segs.append(Segment("    " + h.text, _S_MEMBER))
+                segs.append(Segment(h.text, _S_MEMBER))
             else:
                 segs.append(Segment(h.text, _S_UNK))
             strip = Strip(segs)

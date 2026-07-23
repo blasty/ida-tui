@@ -92,10 +92,11 @@ class Head:
     instruction, a data item, or an undefined byte run."""
 
     ea: int
-    kind: str            # 'code' | 'data' | 'unknown'
+    kind: str            # 'code' | 'data' | 'unknown' | 'member'
     size: int
     text: str
     name: str | None = None
+    raw: bytes | None = None  # opcode/item bytes (filled in for code by the model)
 
     @classmethod
     def from_raw(cls, d: dict) -> "Head":
@@ -538,10 +539,44 @@ class ListingModel:
         self._by_ea: dict[int, int] = {}
         self._next: int | None = seg_start  # next address to fetch from
         self._done = False
+        self._max_raw = 0  # widest opcode length (bytes) seen, for the op column
         self._lock = threading.Lock()
         # Serializes page loads so a background grower and an in-view search can
         # both drive loading without double-fetching the same page.
         self._load_lock = threading.Lock()
+
+    # Opcode bytes are only worth showing for code; cap the bulk read so a page
+    # containing a huge coalesced undefined run doesn't pull megabytes.
+    _OP_SPAN_CAP = 1 << 16
+
+    def _attach_opcode_bytes(self, page: list[Head]) -> list[Head]:
+        """Fill ``raw`` (opcode bytes) for the code heads in ``page`` via one
+        bulk read over their extent (variable-length safe)."""
+        code = [h for h in page if h.kind == "code" and h.size > 0]
+        if not code:
+            return page
+        lo = code[0].ea
+        hi = code[-1].ea + code[-1].size
+        if hi - lo <= 0 or hi - lo > self._OP_SPAN_CAP:
+            return page
+        data = self._prog.read_bytes(lo, hi - lo)
+        biggest = self._max_raw
+        out = []
+        for h in page:
+            if h.kind == "code" and h.size > 0:
+                off = h.ea - lo
+                b = bytes(data[off:off + h.size])
+                biggest = max(biggest, len(b))
+                out.append(replace(h, raw=b))
+            else:
+                out.append(h)
+        with self._lock:
+            self._max_raw = biggest
+        return out
+
+    def max_raw_len(self) -> int:
+        with self._lock:
+            return self._max_raw
 
     def load_next_page(self) -> int:
         """Load one more page of heads; returns how many were added."""
@@ -559,13 +594,16 @@ class ListingModel:
         payload = self._prog.client.call("heads", addr=hex(frm), count=self.PAGE)
         rows = payload.get("heads", []) if isinstance(payload, dict) else []
         cur = payload.get("cursor", {}) if isinstance(payload, dict) else {}
+        page = []
+        for r in rows:
+            try:
+                page.append(Head.from_raw(r))
+            except (KeyError, ValueError, TypeError):
+                continue
+        page = self._attach_opcode_bytes(page)
         with self._lock:
             base = len(self._heads)
-            for i, r in enumerate(rows):
-                try:
-                    h = Head.from_raw(r)
-                except (KeyError, ValueError, TypeError):
-                    continue
+            for i, h in enumerate(page):
                 self._by_ea.setdefault(h.ea, base + i)
                 self._heads.append(h)
             nxt = cur.get("next")

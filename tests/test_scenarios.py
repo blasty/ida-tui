@@ -117,7 +117,10 @@ class Ctx:
 
     # -- discovery -------------------------------------------------------- #
     def all_funcs(self):
-        return self.prog.functions().all_loaded()
+        idx = self.prog.functions()
+        if len(idx) == 0 and not idx.complete:
+            idx.load_all()  # a prior bump_items() cleared the index cache
+        return idx.all_loaded()
 
     def find_func(self, pred, limit=400):
         for f in self.all_funcs()[:limit]:
@@ -1629,6 +1632,13 @@ async def s_continuous_view(c: Ctx):
     kinds = {c.lst.model.get(i).kind for i in range(len(c.lst.model))}
     c.check("continuous listing interleaves code with data/undefined",
             "code" in kinds and ("data" in kinds or "unknown" in kinds), str(kinds))
+    # rendering parity with disasm: code lines carry opcode bytes
+    cidx = next((i for i in range(len(c.lst.model))
+                 if c.lst.model.get(i).kind == "code"), None)
+    c.check("continuous listing renders opcode bytes (parity with disasm)",
+            cidx is not None and c.lst.model.get(cidx).raw
+            and c.lst._op_field(c.lst.model.get(cidx)).strip() != "",
+            f"raw={c.lst.model.get(cidx).raw if cidx is not None else None!r}")
 
 
 # --------------------------------------------------------------------------- #
