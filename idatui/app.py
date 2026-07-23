@@ -606,7 +606,7 @@ class DisasmView(SearchMixin, NavMixin, ColumnCursor, ScrollView, can_focus=True
         Binding("c", "define_code", "Code", show=False),
         Binding("p", "define_func", "Func", show=False),
         Binding("u", "undefine", "Undef", show=False),
-        Binding("tab,shift+tab", "app.toggle_view", "Pseudocode", priority=True),
+        Binding("tab,shift+tab,f5", "app.toggle_view", "Pseudocode", priority=True),
         Binding("L", "app.continuous_here", "Listing"),
         *SearchMixin.SEARCH_BINDINGS,
         *NavMixin.NAV_BINDINGS,
@@ -1204,7 +1204,7 @@ class DecompView(SearchMixin, NavMixin, ColumnCursor, ScrollView, can_focus=True
     """
 
     BINDINGS = [
-        Binding("tab,shift+tab", "app.toggle_view", "Disasm", priority=True),
+        Binding("tab,shift+tab,f5", "app.toggle_view", "Disasm", priority=True),
         Binding("L", "app.continuous_here", "Listing"),
         Binding("j,down", "cursor_down", "Down", show=False),
         Binding("k,up", "cursor_up", "Up", show=False),
@@ -1437,7 +1437,7 @@ class HexView(ScrollView, can_focus=True):
         Binding("G,end", "goto_bottom", show=False),
         Binding("enter", "to_code", "To code"),
         Binding("escape", "leave", "Back"),
-        Binding("tab,shift+tab", "app.toggle_view", "Code", priority=True),
+        Binding("tab,shift+tab,f5", "app.toggle_view", "Code", priority=True),
     ]
 
     cursor = reactive(0, repaint=False)
@@ -2148,6 +2148,7 @@ class IdaTui(App):
         self._active = "decomp"  # currently shown view (falls back on decomp fail)
         self._hex_pending_ea: int | None = None
         self._cur: NavEntry | None = None
+        self._decomp_return: NavEntry | None = None  # listing to return to from F5
         self._search_ctx: tuple[object | None, int] = (None, 1)
         self._rename_ctx: tuple[object | None, str] = (None, "")
         self._rename_addr: int | None = None  # set for address-based (listing) naming
@@ -2479,12 +2480,51 @@ class IdaTui(App):
             self._show_active()
             return
         if self._active == "listing":
-            # A non-function region has no pseudocode to toggle to.
-            self._status(f"{self._cur.name} — flat listing (no function here); "
-                         "'p' to define one")
+            # F5/Tab in the continuous listing: decompile the function under the
+            # cursor (IDA-style), if the cursor is inside a defined routine.
+            ea = self.query_one(ListingView)._cursor_ea()
+            if ea is None:
+                self._status("no address here to decompile")
+                return
+            self._decomp_from_listing(ea)
+            return
+        if self._active == "decomp" and self._decomp_return is not None:
+            # F5/Tab in a decompiler view reached from the listing -> back to it.
+            ret = self._decomp_return
+            self._decomp_return = None
+            self._cur = ret
+            self._active = "listing"
+            self._open_entry(ret, push=False)
             return
         self._active = "decomp" if self._active == "disasm" else "disasm"
         self._pref = self._active  # an explicit toggle sets the preference
+        self._show_active()
+
+    @work(thread=True, group="nav")
+    def _decomp_from_listing(self, ea: int) -> None:
+        assert self.program is not None
+        fn = self.program.function_of(ea)
+        if fn is None:
+            self.app.call_from_thread(
+                self._status,
+                "F5 — cursor is not inside a defined function ('p' to make one)")
+            return
+        dec_idx = self._decomp_line_for(fn.addr, ea)
+        self.app.call_from_thread(self._enter_decomp, fn.addr, fn.name, dec_idx)
+
+    def _enter_decomp(self, fn_addr: int, fn_name: str, dec_idx: int) -> None:
+        # Snapshot the listing position so F5/Tab returns exactly here.
+        lst = self.query_one(ListingView)
+        ret = self._cur
+        if ret is not None:
+            ret.cursor = lst.cursor
+            ret.cursor_x = lst.cursor_x
+            ret.scroll_y = round(lst.scroll_offset.y)
+        self._decomp_return = ret
+        entry = NavEntry(ea=fn_addr, name=fn_name, is_region=False,
+                         dec_cursor=max(dec_idx, 0))
+        self._cur = entry
+        self._active = "decomp"
         self._show_active()
 
     def action_hex(self) -> None:
@@ -3302,6 +3342,7 @@ class IdaTui(App):
                  is_region: bool = False) -> None:
         if push:
             self._save_current_pos()
+        self._decomp_return = None  # a real navigation abandons the F5 return
         entry = NavEntry(ea=ea, name=name, cursor=cursor, is_region=is_region)
         if dec_cursor >= 0:
             entry.dec_cursor = dec_cursor
@@ -3651,11 +3692,19 @@ class IdaTui(App):
         view = self.query_one(DecompView)
         view.loading = False
         if dec.failed:
-            # No pseudocode for this function: fall back to the disassembly view
-            # rather than showing an error panel. Keep the pseudocode preference
-            # so the next (decompilable) function still opens as pseudocode.
+            # No pseudocode for this function: fall back to the code view rather
+            # than an error panel. If we came from the continuous listing (F5),
+            # return there; otherwise show the disassembly.
             if self._cur is None or self._cur.ea != ea:
                 return  # navigated away; stale result
+            if self._decomp_return is not None:
+                ret = self._decomp_return
+                self._decomp_return = None
+                self._cur = ret
+                self._active = "listing"
+                self._open_entry(ret, push=False)
+                self._status(f"{name} — decompile failed; back to the listing")
+                return
             self._active = "disasm"
             self._show_active()
             self._status(

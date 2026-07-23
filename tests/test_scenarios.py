@@ -1639,6 +1639,24 @@ async def s_continuous_view(c: Ctx):
             cidx is not None and c.lst.model.get(cidx).raw
             and c.lst._op_field(c.lst.model.get(cidx)).strip() != "",
             f"raw={c.lst.model.get(cidx).raw if cidx is not None else None!r}")
+    # F5 in the continuous listing (cursor at the origin function) -> decompiler
+    c.lst.focus()
+    await c.press("f5")
+    landed = await c.wait(
+        lambda: (app._active == "decomp" and c.dec.loaded_ea == fn_ea)
+        or (app._active == "listing" and "failed" in c.status().lower()), 25)
+    if app._active == "decomp":
+        c.check("F5 in the listing decompiles the function under the cursor",
+                c.dec.loaded_ea == fn_ea, f"loaded={c.dec.loaded_ea}")
+        await c.press("f5")
+        await c.wait(lambda: app._active == "listing" and app._cur.is_region, 25)
+        c.check("F5 in the decompiler returns to the continuous listing",
+                app._active == "listing" and app._cur.is_region
+                and c.lst._cursor_ea() == fn_ea,
+                f"active={app._active} cur_ea={c.lst._cursor_ea()}")
+    else:
+        c.check("F5 on an undecompilable function falls back to the listing",
+                app._active == "listing", f"active={app._active}")
 
 
 # --------------------------------------------------------------------------- #
