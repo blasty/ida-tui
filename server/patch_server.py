@@ -305,6 +305,39 @@ def _idatui_unknown_row(ea, size):
     return row
 
 
+def _idatui_struct_member_rows(ea):
+    """Indented member rows for a struct-typed data item at ``ea`` (expansion),
+    or [] if it isn't a struct. Top-level fields only."""
+    import ida_nalt
+    import ida_typeinf
+    import idaapi
+
+    tif = ida_typeinf.tinfo_t()
+    if not (ida_nalt.get_tinfo(tif, ea) and tif.is_udt()):
+        return []
+    udt = ida_typeinf.udt_type_data_t()
+    if not tif.get_udt_details(udt):
+        return []
+    rows = []
+    for m in udt:
+        off = m.begin() // 8
+        try:
+            mtype = m.type._print() or ""
+        except Exception:
+            mtype = ""
+        try:
+            sz = int(m.type.get_size())
+            if sz == idaapi.BADSIZE:
+                sz = 0
+        except Exception:
+            sz = 0
+        name = m.name or ""
+        text = f"+{off:X} {name}" + (f" {mtype}" if mtype else "")
+        rows.append({"ea": hex(ea + off), "kind": "member", "size": sz,
+                     "text": text})
+    return rows
+
+
 @tool
 @idasync
 def heads(
@@ -379,10 +412,14 @@ def heads(
         nxt = ida_bytes.get_item_end(e)
         return nxt if nxt > e else e + 1
 
-    def _row(e):
+    def _rows_for(e):
         if _is_unknown(e):
-            return _idatui_unknown_row(e, _run_end(e) - e)
-        return _idatui_head_row(e)
+            return [_idatui_unknown_row(e, _run_end(e) - e)]
+        row = _idatui_head_row(e)
+        out = [row]
+        if row.get("kind") == "data":
+            out.extend(_idatui_struct_member_rows(e))  # expand struct fields
+        return out
 
     ea = ida_bytes.get_item_head(start)
     for _ in range(offset):
@@ -394,7 +431,7 @@ def heads(
         if len(rows) >= count:
             more = True
             break
-        rows.append(_row(ea))
+        rows.extend(_rows_for(ea))  # a struct head expands into member rows
         ea = _advance(ea)
     cursor = {"next": hex(ea)} if more else {"done": True}
     return {"addr": str(addr), "heads": rows, "cursor": cursor}

@@ -1556,6 +1556,54 @@ async def s_listing_make_string(c: Ctx):
         c.prog.bump_items()
 
 
+@scenario("listing_struct_expand")
+async def s_listing_struct_expand(c: Ctx):
+    """A struct-typed global expands into indented member rows in the listing."""
+    app = c.app
+    # a writable data address: reuse a data segment's first data head
+    A = None
+    for start, end, name in c.prog.sections():
+        if start >= end:
+            continue
+        lm = c.prog.listing(start)
+        if lm is None:
+            continue
+        lm.ensure(60)
+        h = next((h for h in lm.window(0, 60) if h.kind == "data"), None)
+        if h is not None:
+            A = h.ea
+            break
+    if A is None:
+        c.check("found a data address for the struct test", False)
+        return
+    try:
+        c.prog.client.call(
+            "declare_type",
+            decls=["struct TuiExpandS { int a; char b[4]; short c; };"])
+        c.prog.make_data(A, "TuiExpandS")
+        c.prog.bump_items()
+        await c.goto_ui(hex(A))
+        await c.wait(lambda: app._active == "listing" and app._cur is not None
+                     and app._cur.ea == A and c.lst.total > 0, 25)
+        # the summary head, then member rows for a/b/c
+        si = c.lst.model.index_of_ea(A)
+        members = [c.lst.model.get(si + 1 + k) for k in range(3)]
+        names = [m.text for m in members if m is not None]
+        c.check("struct global expands into member rows",
+                all(m is not None and m.kind == "member" for m in members)
+                and any("a" in t for t in names) and any("b" in t for t in names),
+                f"members={names}")
+        c.check("member rows carry field addresses",
+                members[1] is not None and members[1].ea == A + 4,
+                f"ea={members[1].ea if members[1] else None:#x} want={A+4:#x}")
+    finally:
+        try:
+            c.prog.undefine(A, size=16)
+        except Exception:  # noqa: BLE001
+            pass
+        c.prog.bump_items()
+
+
 # --------------------------------------------------------------------------- #
 # Runner
 # --------------------------------------------------------------------------- #

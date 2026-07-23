@@ -53,6 +53,7 @@ _S_MNEM = Style(color="cyan")
 _S_OPBYTES = Style(color="grey50")  # raw opcode bytes column
 _S_DATA = Style(color="#c8a15a")   # data items in the flat listing (db/dw/strings)
 _S_UNK = Style(color="grey54", italic=True)  # undefined bytes in the flat listing
+_S_MEMBER = Style(color="#9a8a6a")  # struct field rows (expanded, indented)
 _S_CURSOR = Style(bgcolor="grey30")
 _S_DIM = Style(color="grey42", italic=True)
 _S_MATCH = Style(bgcolor="#7a5c00")  # all search matches
@@ -941,7 +942,8 @@ class ListingView(SearchMixin, NavMixin, ColumnCursor, ScrollView, can_focus=Tru
         h = self._head(idx)
         if h is None:
             return None
-        return f"{h.ea:08X}  " + self._name_prefix(h) + h.text
+        indent = "    " if h.kind == "member" else ""
+        return f"{h.ea:08X}  " + indent + self._name_prefix(h) + h.text
 
     # -- public API -------------------------------------------------------- #
     def load(self, model: ListingModel, name: str, cursor: int = 0,
@@ -1057,6 +1059,8 @@ class ListingView(SearchMixin, NavMixin, ColumnCursor, ScrollView, can_focus=Tru
                     segs.append(Segment(" " + rest, _S_INSN))
             elif h.kind == "data":
                 segs.append(Segment(h.text, _S_DATA))
+            elif h.kind == "member":
+                segs.append(Segment("    " + h.text, _S_MEMBER))
             else:
                 segs.append(Segment(h.text, _S_UNK))
             strip = Strip(segs)
