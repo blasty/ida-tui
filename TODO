@@ -28,9 +28,17 @@ hard:
     -> M3 done: `d` = typed make_data prompt in the listing (define data in
        .data with any C type: int, char[16], my_struct, ...); undefined byte
        runs coalesce into `db N dup(?)` rows so big .bss doesn't explode.
-    -> next (optional): M4 unify the function disasm view as a filtered listing;
-       struct-typed data expansion / string auto-detection; back-paging in the
-       ListingModel (currently loads a segment forward via load_all).
+    -> M4 (in progress):
+       [x] string auto-detect: 'a' = make_string in the listing (IDA's 'A').
+       [x] back-paging / streaming: listing primes the viewport instantly and
+           streams the rest in the background (was load_all -> blank pane for
+           seconds on a big .text). concurrency-safe page loads.
+       [ ] struct-typed data expansion (render a struct global as its fields).
+           deferred: model change (one head -> many lines); the data is already
+           functional via `d my_struct`, expansion is display polish.
+       [ ] unify the function disasm view as a filtered listing. deferred: a
+           maintainer refactor (no new capability) with real regression risk on
+           the battle-tested function-view path; not worth doing blind.
 
 crazy:
 [ ] multi/split view ala ghidra?
