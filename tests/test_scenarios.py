@@ -1634,13 +1634,13 @@ async def s_func_banners(c: Ctx):
             f"kind={c.lst.model.get(ci).kind if ci >= 0 else None}")
     c.check("a SUBROUTINE separator banner is present",
             any(h.kind == "sep" and "S U B R O U T I N E" in h.text for h in heads))
-    c.check("a 'name proc near' header is present",
-            any(h.kind == "funchdr" and h.text.endswith("proc near") for h in heads))
+    c.check("a 'name proc' header is present",
+            any(h.kind == "funchdr" and h.text.endswith(" proc") for h in heads))
     c.check("a 'name endp' footer is present",
             any(h.kind == "funchdr" and h.text.endswith("endp") for h in heads))
     # the proc header for the origin function carries its name
     hdr = next((h for h in heads if h.kind == "funchdr"
-                and h.text == f"{fn.name} proc near"), None)
+                and h.text == f"{fn.name} proc"), None)
     c.check("the proc header names the function", hdr is not None, f"fn={fn.name}")
 
 

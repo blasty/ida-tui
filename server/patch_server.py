@@ -348,7 +348,7 @@ def _idatui_func_header_rows(ea):
         {"ea": hex(ea), "kind": "sep", "size": 0, "text": ""},
         {"ea": hex(ea), "kind": "sep", "size": 0, "text": "; " + bar},
         {"ea": hex(ea), "kind": "funchdr", "size": 0,
-         "text": name + " proc near", "name": name},
+         "text": name + " proc", "name": name},
     ]
 
 

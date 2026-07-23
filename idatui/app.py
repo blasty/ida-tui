@@ -55,7 +55,10 @@ _S_DATA = Style(color="#c8a15a")   # data items in the flat listing (db/dw/strin
 _S_UNK = Style(color="grey54", italic=True)  # undefined bytes in the flat listing
 _S_MEMBER = Style(color="#9a8a6a")  # struct field rows (expanded, indented)
 _S_SEP = Style(color="grey42")      # function boundary separators / banners
-_S_FUNCHDR = Style(color="#d7a021", bold=True)  # 'name proc near'/'endp' headers
+_S_FUNCHDR = Style(color="#d7a021", bold=True)  # 'name proc'/'endp' headers
+
+_LST_INDENT = "    "   # one depth level: function names sit at level 0, code at 1
+_OP_LIMIT = 8         # opcode bytes shown in the 'limited' column mode
 
 # Tokens that look like identifiers but aren't renamable symbols (so 'n' on them
 # in the listing names the address instead of trying to rename the token).
@@ -911,7 +914,7 @@ class ListingView(SearchMixin, NavMixin, ColumnCursor, ScrollView, can_focus=Tru
         Binding("pageup", "page(-1)", "PgUp", show=False),
         Binding("home", "goto_top", "Top", show=False),
         Binding("G,end", "goto_bottom", "Bottom", show=False),
-        Binding("o", "toggle_opcodes", "Opcodes", show=False),
+        Binding("o", "toggle_opcodes", "Opcodes"),
         Binding("c", "define_code", "Code", show=False),
         Binding("d", "make_data", "Data", show=False),
         Binding("a", "make_string", "Str", show=False),
@@ -942,7 +945,7 @@ class ListingView(SearchMixin, NavMixin, ColumnCursor, ScrollView, can_focus=Tru
         self._term = ""
         self._matches: list[int] = []
         self._ranges: dict[int, list[tuple[int, int]]] = {}
-        self._show_ops = True   # opcode-bytes column (toggle 'o'), like disasm
+        self._op_mode = 1       # opcode column: 0=off, 1=limited, 2=full ('o' cycles)
         self._op_w = 0          # char width of the hex-bytes field (excl. gap)
 
     # -- text helpers ------------------------------------------------------ #
@@ -953,23 +956,34 @@ class ListingView(SearchMixin, NavMixin, ColumnCursor, ScrollView, can_focus=Tru
     def _name_prefix(h: Head) -> str:
         return f"{h.name}  " if h.name else ""
 
-    def _op_field(self, h: Head) -> str:
-        """The padded opcode-bytes column (empty when hidden / no bytes). Shared
-        format with the disasm view so cursor/search offsets line up."""
-        if not self._show_ops or self._op_w <= 0:
-            return ""
+    def _op_bytes_text(self, h: Head) -> str:
+        """Hex bytes for ``h``, truncated with an ellipsis in 'limited' mode so a
+        long x86-64 instruction doesn't blow out the column."""
         raw = h.raw or b""
-        return " ".join(f"{b:02X}" for b in raw).ljust(self._op_w) + "  "
+        if self._op_mode == 1 and len(raw) > _OP_LIMIT:
+            return " ".join(f"{b:02X}" for b in raw[:_OP_LIMIT]) + "\u2026"
+        return " ".join(f"{b:02X}" for b in raw)
+
+    def _op_field(self, h: Head) -> str:
+        """The padded opcode-bytes column (empty when hidden). Shared format so
+        cursor/search offsets line up."""
+        if self._op_mode == 0 or self._op_w <= 0:
+            return ""
+        return self._op_bytes_text(h).ljust(self._op_w) + "  "
 
     def _line_plain(self, idx: int) -> str | None:
         h = self._head(idx)
         if h is None:
             return None
-        if h.kind in ("sep", "funchdr"):
-            return h.text
-        indent = "    " if h.kind == "member" else ""
-        return (f"{h.ea:08X}  " + self._op_field(h) + indent
-                + self._name_prefix(h) + h.text)
+        # Function-name headers sit at depth 0 (with the address); everything
+        # else is indented one level, code/data opcode+text included.
+        if h.kind == "funchdr":
+            return f"{h.ea:08X}  {h.text}"
+        base = f"{h.ea:08X}  " + _LST_INDENT
+        if h.kind == "sep":
+            return base + h.text
+        extra = _LST_INDENT if h.kind == "member" else ""
+        return base + self._op_field(h) + extra + self._name_prefix(h) + h.text
 
     # -- public API -------------------------------------------------------- #
     def load(self, model: ListingModel, name: str, cursor: int = 0,
@@ -1015,24 +1029,31 @@ class ListingView(SearchMixin, NavMixin, ColumnCursor, ScrollView, can_focus=Tru
         self.post_message(ListingView.CursorMoved(self.cursor, self._cursor_ea()))
 
     def _update_op_w(self) -> bool:
-        """Recompute the opcode-column width from the widest code head seen.
-        Returns True if it changed (callers refresh + drop stale search index)."""
+        """Recompute the opcode-column width from the widest code head seen (capped
+        in 'limited' mode). Returns True if it changed."""
         w = 0
-        if self.model is not None and self._show_ops:
+        if self.model is not None and self._op_mode != 0:
             mx = self.model.max_raw_len()
-            w = max(mx * 3 - 1, 0) if mx > 0 else 0
+            if mx > 0:
+                if self._op_mode == 1:  # limited: cap bytes, +1 for the ellipsis
+                    shown = min(mx, _OP_LIMIT)
+                    w = shown * 3 - 1 + (1 if mx > _OP_LIMIT else 0)
+                else:  # full
+                    w = mx * 3 - 1
         if w != self._op_w:
             self._op_w = w
             return True
         return False
 
     def action_toggle_opcodes(self) -> None:
-        self._show_ops = not self._show_ops
+        # cycle: off -> limited -> full -> off
+        self._op_mode = (self._op_mode + 1) % 3
         self._update_op_w()
         self._ranges = {}  # column layout changed -> stale match offsets
         self._clamp_x()
         self.refresh()
-        self._app_status("opcodes " + ("on" if self._show_ops else "off"))
+        self._app_status("opcodes: " + {0: "off", 1: f"limited ({_OP_LIMIT} bytes)",
+                                        2: "full"}[self._op_mode])
 
     @work(thread=True, exclusive=True, group="listing-grow")
     def _grow(self) -> None:
@@ -1097,16 +1118,21 @@ class ListingView(SearchMixin, NavMixin, ColumnCursor, ScrollView, can_focus=Tru
         if h is None:
             strip = Strip([Segment(f"  {idx:>8}  …", _S_DIM)])
         elif h.kind == "sep":
-            strip = Strip([Segment(h.text, _S_SEP)])
+            strip = Strip([Segment(f"{h.ea:08X}  ", _S_ADDR),
+                           Segment(_LST_INDENT + h.text, _S_SEP)])
         elif h.kind == "funchdr":
-            strip = Strip([Segment(h.text, _S_FUNCHDR)])
+            # depth-0: address + 'name proc'/'endp' (no indent)
+            strip = Strip([Segment(f"{h.ea:08X}  ", _S_ADDR),
+                           Segment(h.text, _S_FUNCHDR)])
         else:
-            segs: list[Segment] = [Segment(f"{h.ea:08X}  ", _S_ADDR)]
+            # depth-1: address, one indent, then opcode+text
+            segs: list[Segment] = [Segment(f"{h.ea:08X}  ", _S_ADDR),
+                                   Segment(_LST_INDENT, _S_INSN)]
             op = self._op_field(h)
             if op:
                 segs.append(Segment(op, _S_OPBYTES))
             if h.kind == "member":
-                segs.append(Segment("    ", _S_MEMBER))
+                segs.append(Segment(_LST_INDENT, _S_MEMBER))
             if h.name:
                 segs.append(Segment(f"{h.name}  ", _S_LABEL))
             if h.kind == "code":
