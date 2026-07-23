@@ -3112,8 +3112,19 @@ class IdaTui(App):
             self.query_one(DecompView).loaded_ea = None  # force re-decompile
             self._show_active()
         else:
-            self._save_current_pos()
-            cur.view = "listing"  # we're in the listing; keep the entry consistent
+            # Capture the LIVE listing position straight from the widget (the
+            # source of truth) rather than trusting nav-entry tracking, which can
+            # go stale. bump_names() discards the segment model, so the reload
+            # rebuilds it; feeding the true cursor/scroll keeps the edited line on
+            # screen even on a huge segment (otherwise it primes/scrolls to a
+            # stale index and the renamed line lands off-screen — looking like the
+            # rename never applied).
+            lst = self.query_one(ListingView)
+            cur.view = "listing"
+            if lst.model is not None:
+                cur.cursor = lst.cursor
+                cur.cursor_x = lst.cursor_x
+                cur.scroll_y = round(lst.scroll_offset.y)
             self._open_entry(cur, push=False)
 
     def _after_comment(self, ea: int, text: str) -> None:
