@@ -1939,6 +1939,34 @@ class ConfirmScreen(ModalScreen):
         self.dismiss(False)
 
 
+class LoadingScreen(ModalScreen):
+    """Startup overlay shown while the binary is opened + analyzed, so a slow
+    load (big binary) isn't just empty panes and dead air. The app updates the
+    note line with progress and dismisses it once we land on a function."""
+
+    BINDINGS = [Binding("escape", "hide", "Hide")]
+
+    def __init__(self, title: str, note: str = "opening\u2026") -> None:
+        super().__init__()
+        self._title = title
+        self._note = note
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="loading-box"):
+            yield Static(f"\u23f3  loading  {self._title}", id="loading-title")
+            yield Static(self._note, id="loading-note")
+            yield Static("analyzing the binary\u2026 (Esc to hide)", id="loading-help")
+
+    def update_note(self, text: str) -> None:
+        try:
+            self.query_one("#loading-note", Static).update(text)
+        except Exception:  # noqa: BLE001 -- not mounted yet / already gone
+            pass
+
+    def action_hide(self) -> None:
+        self.dismiss()
+
+
 # --------------------------------------------------------------------------- #
 # Struct editor (C-style local type editor)
 # --------------------------------------------------------------------------- #
@@ -2239,6 +2267,12 @@ class IdaTui(App):
                    background: $panel; padding: 1 2; }
     #confirm-msg { height: auto; }
     #confirm-help { height: 1; color: $text-muted; margin-top: 1; }
+    LoadingScreen { align: center middle; }
+    #loading-box { width: 64; height: auto; border: thick $accent;
+                   background: $panel; padding: 1 2; }
+    #loading-title { height: 1; text-style: bold; }
+    #loading-note { height: 1; color: $text-muted; margin-top: 1; }
+    #loading-help { height: 1; color: $text-muted; }
     """
 
     BINDINGS = [
@@ -2255,16 +2289,19 @@ class IdaTui(App):
     ]
 
     def __init__(self, url: str, db: str | None, keepalive: bool = True,
-                 open_path: str | None = None, rpc_path: str | None = None) -> None:
+                 open_path: str | None = None, rpc_path: str | None = None,
+                 ttl: int = 1800) -> None:
         super().__init__()
         self._url = url
         self._db = db
         self._open_path = open_path
+        self._ttl = ttl
         self._do_keepalive = keepalive
         self._rpc_path = rpc_path
         self._rpc = None
         self.client: IDAClient | None = None
         self.program: Program | None = None
+        self._loading_screen: LoadingScreen | None = None
         self._ka = None
         self._nav: list[NavEntry] = []
         self._func_index = None  # the unfiltered FunctionIndex (source of truth)
@@ -2337,9 +2374,29 @@ class IdaTui(App):
         # The names pane is an overlay now (Ctrl+N); focus the default code view
         # (pseudocode) so app bindings work before anything is opened.
         self.query_one(ListingView).focus()
+        # Show a loading overlay immediately so a slow open/analysis (big binary)
+        # isn't just dead air behind empty panes; dismissed once we land.
+        self._loading_screen = LoadingScreen(self._loading_title())
+        self.push_screen(self._loading_screen)
         self._connect()
         if self._rpc_path:
             self._start_rpc()
+
+    def _loading_title(self) -> str:
+        if self._open_path:
+            return os.path.basename(self._open_path)
+        if self._db:
+            return str(self._db)
+        return "database"
+
+    def _dismiss_loading(self) -> None:
+        ls = self._loading_screen
+        self._loading_screen = None
+        if ls is not None:
+            try:
+                ls.dismiss()
+            except Exception:  # noqa: BLE001 -- already popped
+                pass
 
     def _start_rpc(self) -> None:
         from .rpc import RpcServer
@@ -2358,6 +2415,8 @@ class IdaTui(App):
     # -- status helper ----------------------------------------------------- #
     def _status(self, text: str) -> None:
         self.query_one("#status", Static).update(text)
+        if self._loading_screen is not None:  # mirror progress into the overlay
+            self._loading_screen.update_note(text)
 
     # -- clipboard --------------------------------------------------------- #
     def _copy(self, text: str) -> int:
@@ -2387,17 +2446,37 @@ class IdaTui(App):
             client = IDAClient(self._url, db=self._db)
             client.connect()
             if self._open_path is not None:
-                self.app.call_from_thread(self._status, f"opening {self._open_path}…")
-                import os
                 path = os.path.abspath(os.path.expanduser(self._open_path))
-                # Moderate idle TTL: the keepalive heartbeat (below) keeps the
-                # session alive while the TUI runs; once it exits the worker
-                # idles out and frees its slot (avoids piling up to max-workers).
-                res = client.call("idb_open", input_path=path,
-                                  idle_ttl_sec=1800, timeout=1800.0)
+                base = os.path.basename(path)
+                self.app.call_from_thread(
+                    self._status,
+                    f"opening {base} — analyzing (a first open can take a while)…")
+
+                def _do_open():
+                    # Moderate idle TTL: the keepalive heartbeat (below) keeps the
+                    # session alive while the TUI runs; once it exits the worker
+                    # idles out and frees its slot (avoids piling to max-workers).
+                    return client.call("idb_open", input_path=path,
+                                       idle_ttl_sec=self._ttl, timeout=1800.0)
+
+                res = _do_open()
+                if not (isinstance(res, dict) and res.get("success")):
+                    # A hard-killed worker can wedge the DB; sweep its stale
+                    # unpacked lock files (never the .i64) and retry once.
+                    try:
+                        from .launch import _sweep_locks
+                        swept = _sweep_locks(path)
+                    except Exception:  # noqa: BLE001
+                        swept = 0
+                    if swept:
+                        self.app.call_from_thread(
+                            self._status, f"recovering {base} (removed {swept} "
+                            f"stale lock file(s))…")
+                        res = _do_open()
                 if not (isinstance(res, dict) and res.get("success")):
                     err = res.get("error") if isinstance(res, dict) else res
                     self.app.call_from_thread(self._status, f"open failed: {err}")
+                    self.app.call_from_thread(self._dismiss_loading)
                     return
                 client.set_db(res["session"]["session_id"])
             elif self._db is None:
@@ -2411,6 +2490,7 @@ class IdaTui(App):
             program = Program(client)
         except Exception as e:  # noqa: BLE001
             self.app.call_from_thread(self._status, f"connect failed: {e}")
+            self.app.call_from_thread(self._dismiss_loading)
             return
         self.client = client
         self.program = program
@@ -2456,6 +2536,7 @@ class IdaTui(App):
         if self._cur is not None or self._did_auto_land or self._func_index is None:
             return
         self._did_auto_land = True
+        self._dismiss_loading()  # binary is up; hand the screen back to the views
         fn = self._entry_func()
         if fn is not None:
             self._open_function(fn.addr, fn.name)

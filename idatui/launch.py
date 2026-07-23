@@ -202,21 +202,28 @@ def main(argv: list[str] | None = None) -> int:
         _log("supervisor is down and --no-server was given")
         return 1
 
-    # 2) resolve the session (open/adopt the binary, or use --db / the sole one)
+    # 2) resolve the session. If a session is already open on this binary, adopt
+    #    it (instant). Otherwise DON'T open here — defer the (possibly long)
+    #    analysis to the TUI so its chrome + "loading…" overlay are on screen
+    #    during the wait, instead of a blank terminal before the TUI even starts.
     db = args.db
-    if binary is not None:
+    open_path = None
+    if binary is not None and db is None:
         try:
             client = IDAClient(args.url)
             client.connect()
-            db = _open_binary(client, binary, args.ttl)
-        except IDAError as e:
-            _log(f"could not open {binary}: {e}")
-            return 1
+            db = _existing_session(client, binary)
+        except Exception:  # noqa: BLE001 -- probe only; the TUI will open it
+            db = None
         finally:
             try:
                 client.close()
             except Exception:  # noqa: BLE001
                 pass
+        if db:
+            _log(f"adopting the open session for {os.path.basename(binary)} ({db})")
+        else:
+            open_path = binary  # TUI opens it with the loading overlay up
 
     # 3) hand off to the TUI (imported late so --help works without textual)
     try:
@@ -225,8 +232,8 @@ def main(argv: list[str] | None = None) -> int:
         _log(f"the TUI needs textual; run with ~/ida-venv/bin/python  ({e})")
         return 1
     rpc_path = os.path.abspath(os.path.expanduser(args.rpc)) if args.rpc else None
-    IdaTui(url=args.url, db=db, keepalive=not args.no_keepalive,
-           rpc_path=rpc_path).run()
+    IdaTui(url=args.url, db=db, open_path=open_path, ttl=args.ttl,
+           keepalive=not args.no_keepalive, rpc_path=rpc_path).run()
     return 0
 
 
