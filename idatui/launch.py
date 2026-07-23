@@ -97,8 +97,7 @@ def _ensure_server(url: str, target: str | None, timeout: float = 90.0,
         if proc is not None and proc.poll() is not None:
             note("analysis server exited during startup — check the log")
             return False
-        note(f"auto-analyzing {label}… ({int(time.time() - t0)}s)  "
-             f"first open of a big binary can take a while")
+        note(f"auto-analyzing {label}… ({int(time.time() - t0)}s)")
         time.sleep(0.5)
     note(f"analysis did not finish within {timeout:.0f}s")
     return False
