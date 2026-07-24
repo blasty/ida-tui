@@ -2452,6 +2452,9 @@ class IdaTui(App):
     #xref-title { dock: top; height: 1; background: $accent; color: $text; padding: 0 1; }
     #xref-list { height: auto; max-height: 100%; }
     SymbolPalette { align: center middle; }
+    /* Give the stock Ctrl+P command palette side padding instead of full width. */
+    CommandPalette > Vertical { width: 80%; max-width: 120; }
+    CommandPalette #--results, CommandPalette CommandList { width: 80%; max-width: 120; }
     #pal-box { width: 96; max-width: 92%; height: auto; max-height: 80%;
                border: thick $accent; background: $panel; }
     #pal-title { dock: top; height: 1; background: $accent; color: $text; padding: 0 1; }
