@@ -14,13 +14,13 @@ has been **removed**.
 This is a personal, actively-hacked-on project. It is **not** packaged, polished,
 or supported for general use. Expect sharp edges:
 
-- Hardcoded paths and assumptions (e.g. a venv at `~/ida-venv`, a supervisor on
-  `127.0.0.1:8745`).
+- Hardcoded paths and assumptions (e.g. a venv at `~/ida-venv`, a specific
+  IDA/idalib layout).
 - No stable API, no versioning promises, no changelog — things move and break.
 - Requires a working IDA Pro + idalib install, which you must license and set up
   yourself.
-- Known open bugs (see the backlog below), including wonky xref navigation and no
-  handling of PLT/import stubs.
+- Known open bugs (see the backlog below), including no handling of PLT/import
+  stubs.
 - Basically undocumented beyond this file and `docs/`.
 
 If you found this expecting a finished tool: it isn't one yet. Poke around, but
@@ -28,25 +28,36 @@ don't file expectations. **Use at your own risk.**
 
 ## What it does
 
-- Virtualized **disassembly** and **decompilation (pseudocode)** views that page
-  lazily over the MCP server.
-- Keyboard navigation: follow (`enter`), xrefs (`x`), rename (`n`), incremental
-  search (`/` `?`), history (`back`), view toggle.
-- A **functions panel**, **hex viewer**, **struct editor**, and **(re-)typing**.
+- A unified **IDA-style listing** (continuous disassembly interleaved with data /
+  undefined heads) as the default code view; `F5`/`Tab` drops into the
+  **decompiler (pseudocode)** for the function under the cursor. Both are
+  line-virtualized and page lazily over the worker.
+- Keyboard navigation: follow (`enter`), xrefs (`x`, tagged call/read/write/
+  offset), rename (`n`), retype (`y`), comment (`;`), incremental search (`/`
+  `?`), history (`back`), hex view (`\`), and `home`/`end`/`shift+home` line
+  motions.
+- A **functions panel** (fuzzy symbol palette on `Ctrl+N`), **hex viewer**,
+  **struct editor**, and inline **make code/data/function/string** edits.
 - An optional unix-socket **RPC layer** to puppeteer the live TUI from another
   process (agent-driven RE / livestreaming). See `docs/RPC.md`.
 
 ## Architecture (three layers, kept separate)
 
-- **`idatui/client.py`** — stdlib-only persistent MCP client (`http.client` pool,
-  warm handshake, session recovery, keep-alive). No third-party deps.
-- **`idatui/domain.py`** — paging/caching over the client (`FunctionIndex`,
-  `DisasmModel`, `decompile`, xrefs, resolve). Synchronous, thread-safe.
+- **`idatui/worker.py` + `idatui/worker_client.py`** — the backend. `worker.py`
+  opens one DB with idalib (on its main thread) and serves ida-pro-mcp's tool
+  functions over a unix socket; `WorkerClient` spawns it and is a stdlib-only
+  drop-in client (length-prefixed pickle, calls serialized under a lock). Shared
+  error types + the `Session` model live in `idatui/errors.py`.
+- **`idatui/domain.py`** — paging/caching over the worker client (`FunctionIndex`,
+  `DisasmModel`, `ListingModel`, `decompile`, xrefs, resolve). Synchronous,
+  thread-safe. Tools ida-pro-mcp lacks (`heads`, `read_raw`, `resolve_names`,
+  `xref_types`, …) are injected by `server/patch_server.py`, which the worker
+  runs itself on startup.
 - **`idatui/app.py`** — the Textual app (virtualized `ScrollView`s, shared cursor/
   search/nav mixins, modals).
 
-The client and domain layers are intentionally **stdlib-only**; only the TUI layer
-pulls in Textual + Pygments.
+The domain + worker-client layers are intentionally **stdlib-only** (the worker
+process links idalib); only the TUI layer pulls in Textual + Pygments.
 
 ## Requirements
 
@@ -113,6 +124,6 @@ python tests/test_scenarios.py --only hex,rename
 ## Docs
 
 - `docs/RPC.md` — the RPC protocol
-- `docs/PAGING_FINDINGS.md` — ida-pro-mcp/idalib paging quirks
+- `docs/PAGING_FINDINGS.md` — idalib tool paging/scale quirks
 - `docs/TEXTUAL_NOTES.md` — Textual pitfalls encountered
 - `docs/TUI_DRIVING_BLUEPRINT.md` — generalizing the driving layer
