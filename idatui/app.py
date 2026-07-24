@@ -956,6 +956,7 @@ class ListingView(SearchMixin, NavMixin, ColumnCursor, ScrollView, can_focus=Tru
         Binding("pagedown", "page(1)", "PgDn", show=False),
         Binding("pageup", "page(-1)", "PgUp", show=False),
         Binding("home", "col_home", "bol", show=False),
+        Binding("shift+home", "col_insn_home", "insn start", show=False),
         Binding("end", "col_end", "eol", show=False),
         Binding("G,ctrl+end", "goto_bottom", "Bottom", show=False),
         Binding("ctrl+home", "goto_top", "Top", show=False),
@@ -1032,6 +1033,29 @@ class ListingView(SearchMixin, NavMixin, ColumnCursor, ScrollView, can_focus=Tru
             return base + h.text
         extra = _LST_INDENT if h.kind == "member" else ""
         return base + self._op_field(h) + extra + self._name_prefix(h) + h.text
+
+    def _insn_col(self, idx: int) -> int:
+        """Column where the instruction/content text begins, past the address +
+        opcode-bytes gutter — the shift+home target. Mirrors ``_line_plain``'s
+        prefix so the column lines up with what's rendered."""
+        h = self._head(idx)
+        if h is None:
+            return 0
+        if h.kind in ("funchdr", "label"):
+            return len(f"{h.ea:08X}  ")
+        base = f"{h.ea:08X}  " + _LST_INDENT
+        if h.kind == "sep":
+            return len(base)
+        extra = _LST_INDENT if h.kind == "member" else ""
+        return len(base + self._op_field(h) + extra + self._name_prefix(h))
+
+    def action_col_insn_home(self) -> None:
+        """shift+home: jump to the start of the instruction text, skipping the
+        address + opcode-bytes gutter (home/0 still go to the true line start)."""
+        self.cursor_x = self._insn_col(self.cursor)
+        self._hscroll()
+        _refresh_lines(self, self.cursor)
+        self._refresh_hl()
 
     # -- public API -------------------------------------------------------- #
     def load(self, model: ListingModel, name: str, cursor: int = 0,
