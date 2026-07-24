@@ -2063,8 +2063,14 @@ class LoadingScreen(ModalScreen):
     def compose(self) -> ComposeResult:
         with Vertical(id="loading-box"):
             logo = _load_logo()
+            # Only show the splash art when the terminal can fit it plus the
+            # title/note/help + box chrome; otherwise fall back to a text-only
+            # overlay so nothing important is clipped off a small screen.
             if logo is not None:
-                yield Static(logo, id="loading-logo")
+                sz = self.app.size
+                n = len(logo.split("\n"))
+                if sz.height >= n + 9 and sz.width >= 64:
+                    yield Static(logo, id="loading-logo")
             yield Static(f"\u23f3  loading  {self._title}", id="loading-title")
             yield Static(self._note, id="loading-note")
             yield Static("first open of a big binary can take a while  \u00b7  "
