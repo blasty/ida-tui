@@ -1655,7 +1655,7 @@ async def run(db, only=None, binary=None, backend="mcp"):
     if backend == "worker":
         # Own idalib worker: opens the binary in-process over a unix socket, no
         # supervisor. Mirrors launch.py's worker branch.
-        app = IdaTui(open_path=binary, ensure_server=False,
+        app = IdaTui(url="", db=None, open_path=binary, ensure_server=False,
                      backend="worker", keepalive=False)
     else:
         url = os.environ.get("IDA_MCP_URL", "http://127.0.0.1:8745/mcp")
