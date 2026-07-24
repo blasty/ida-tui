@@ -62,6 +62,7 @@ _S_FUNCHDR = Style(color="#d7a021", bold=True)  # 'name proc'/'endp' headers
 _LST_INDENT = "    "   # one depth level: function names sit at level 0, code at 1
 _OP_LIMIT = 8         # opcode bytes shown in the 'limited' column mode
 _JUMP_CONTEXT = 4     # lines of context kept above a jump target (cursor stays on it)
+_SPLIT_MIN_WIDTH = 100  # need room for two usable code panes side by side
 
 # Tokens that look like identifiers but aren't renamable symbols (so 'n' on them
 # in the listing names the address instead of trying to rename the token).
@@ -3144,6 +3145,10 @@ class IdaTui(App):
         if self._cur is None or self.program is None:
             self._status("open a function first")
             return
+        if not self._split and self.size.width < _SPLIT_MIN_WIDTH:
+            self._status(f"terminal too narrow for split — need ≈{_SPLIT_MIN_WIDTH} "
+                         f"cols (have {self.size.width})")
+            return
         self._split = not self._split
         if self._active not in ("listing", "decomp"):
             self._active = "listing"
@@ -4564,10 +4569,13 @@ class IdaTui(App):
         sx = cur.dec_scroll_x if same else 0
         note = "  (truncated)" if dec.truncated else ""
         view.show(ea, dec.code or "", cursor=c, cursor_x=cx, scroll_y=sy, scroll_x=sx)
-        self._status(f"{name}  @ {ea:#x}   [pseudocode {len(dec.code or '')} chars]{note}")
         if self._split:
             self._sync_split(self._active)  # crude link now
             self._load_split_map(ea)        # then upgrade to the region map
+            self._split_status()
+        else:
+            self._status(
+                f"{name}  @ {ea:#x}   [pseudocode {len(dec.code or '')} chars]{note}")
 
     def _sync_split(self, source: str) -> None:
         """Split view: highlight (+ scroll into view) the companion pane's
@@ -4606,6 +4614,24 @@ class IdaTui(App):
             else:
                 dec.set_link(None)
 
+    def _split_status(self) -> None:
+        """A split-aware status line reflecting the focused pane + the link."""
+        if self._cur is None:
+            return
+        if self._active == "decomp":
+            dec = self.query_one(DecompView)
+            ea = dec._line_ea(dec.cursor)
+            n = (len(self._split_eamap[dec.cursor])
+                 if 0 <= dec.cursor < len(self._split_eamap) else 0)
+            at = f" @ {ea:#x}" if ea is not None else ""
+            rel = f" \u2194 {n} insn" if n else ""
+            self._status(f"{self._cur.name}{at}   "
+                         f"[split \u00b7 pseudocode line {dec.cursor + 1}{rel}]")
+        else:
+            ea = self.query_one(ListingView)._cursor_ea()
+            at = f" @ {ea:#x}" if ea is not None else ""
+            self._status(f"{self._cur.name}{at}   [split \u00b7 listing]")
+
     @work(thread=True, group="split-map")
     def _load_split_map(self, ea: int) -> None:
         # Fetch the rich per-line instruction map off the UI thread; sync stays
@@ -4628,8 +4654,11 @@ class IdaTui(App):
         if self._nav:
             self._nav[-1].dec_cursor = msg.index
             self._nav[-1].dec_cursor_x = self.query_one(DecompView).cursor_x
-        if self._split and self._active == "decomp":
-            self._sync_split("decomp")
+        if self._split:
+            if self._active == "decomp":
+                self._sync_split("decomp")
+            self._split_status()
+            return
         if self._cur is not None:
             loc = f" @ {msg.ea:#x}" if msg.ea is not None else ""
             self._status(f"{self._cur.name}{loc}   [pseudocode line {msg.index}]")
@@ -4640,8 +4669,11 @@ class IdaTui(App):
             self._nav[-1].cursor_x = self.query_one(ListingView).cursor_x
             if msg.index >= 0:
                 self._nav[-1].scroll_y = round(self.query_one(ListingView).scroll_offset.y)
-        if self._split and self._active == "listing":
-            self._sync_split("listing")
+        if self._split:
+            if self._active == "listing":
+                self._sync_split("listing")
+            self._split_status()
+            return
         ea = msg.ea
         if ea is not None:
             sec = self.program.section_of(ea) if self.program else None

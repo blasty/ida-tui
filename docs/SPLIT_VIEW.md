@@ -88,9 +88,18 @@ region of a C line (and uses the exact ea→line inverse for the reverse). Falls
 back to the single marker until the map lands. Verified on the pilot's real worker
 (alignment + multi-instruction region band).
 
-**Phase 4 — polish.** Navigation keeps both panes on the same function; loop/goto
-edge cases; decompile-failed fallback; min-width gate + resize; split state in
-nav history; per-pane vs shared search.
+**Phase 4 — polish. DONE.**
+- Split-aware status: `_split_status()` shows `name @ ea [split · pseudocode line
+  N ↔ K insn]` / `[split · listing]` instead of the single-view labels.
+- Min-width gate: `action_toggle_split` refuses to enter split below
+  `_SPLIT_MIN_WIDTH` (100 cols) — two usable panes need the room.
+- Navigation keeps both panes on the same function: verified — a goto/follow in
+  split routes through `_open_entry` (listing) → `_show_active` split branch
+  (decomp + `_load_split_map`), so both panes reload for the new function and
+  split stays on.
+- Non-issues after review: split is a persistent *mode* orthogonal to nav
+  entries, so back/forward simply navigate within split (no per-entry state
+  needed); search is already per-focused-pane.
 
 ## Open questions
 

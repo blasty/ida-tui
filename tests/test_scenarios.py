@@ -350,6 +350,9 @@ async def s_split_view(c: Ctx):
     loaded = await c.wait(lambda: dec.loaded_ea == app._cur.ea, 25)
     c.check("split loads the pseudocode alongside the listing", loaded,
             f"loaded={dec.loaded_ea} cur={app._cur.ea if app._cur else None}")
+    await c.wait(lambda: "[split" in c.status(), 5)
+    c.check("split view shows a split-aware status", "[split" in c.status(),
+            f"status={c.status()!r}")
     # phase 3: the rich per-line instruction map (decomp_map tool, run on the
     # pilot's real worker) — verify it returns, aligns with the markers, and
     # bands a whole region for a multi-instruction C line.
@@ -412,6 +415,19 @@ async def s_split_view(c: Ctx):
     await c.pause(0.1)
     c.check("Tab again focuses the listing pane", app._active == "listing",
             f"active={app._active}")
+    # navigation in split keeps BOTH panes on the (new) function
+    nf = c.find_func(lambda f: f.addr != app._cur.ea and f.size > 80)
+    if nf is not None:
+        await c.press("g")
+        await c.type(hex(nf.addr))
+        await c.press("enter")
+        nav = await c.wait(lambda: app._cur and app._cur.ea == nf.addr, 15)
+        c.check("goto in split navigates", nav,
+                f"cur={app._cur.ea if app._cur else None} want={nf.addr}")
+        both = await c.wait(lambda: dec.loaded_ea == nf.addr and app._split
+                            and lst.display and dec.display, 25)
+        c.check("split reloads both panes on navigation", both,
+                f"dec={dec.loaded_ea} split={app._split}")
     await c.press("s")
     gone = await c.wait(lambda: not app._split and lst.display
                         and not dec.display, 10)
