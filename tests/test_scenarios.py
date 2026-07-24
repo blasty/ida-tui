@@ -506,6 +506,28 @@ async def s_hex(c: Ctx):
     await c.wait(lambda: hx.cursor_va() == target_va, 15)
     c.check("'g' in the hex view jumps the cursor to an address",
             hx.cursor_va() == target_va, f"va={hx.cursor_va():#x} want={target_va:#x}")
+    # -- scroll the viewport, then click to move the byte cursor into it ----
+    await c.press("g")
+    await c.type(hex(rng[0]))
+    await c.press("enter")
+    await c.wait(lambda: hx.cursor_va() == rng[0], 10)
+    hx.scroll_to(y=40, animate=False)  # wheel-style scroll: viewport only
+    await c.pause(0.15)
+    top = round(hx.scroll_offset.y)
+    c.check("hex viewport scrolls without dragging the cursor along",
+            top >= 20 and (hx.cursor // 16) < top,
+            f"top={top} cursor_row={hx.cursor // 16}")
+    PAD = 1  # HexView { padding: 0 1 } -> content is inset one col
+    await c.pilot.click(HexView, offset=(PAD + 19 + 3 * 3, 5))  # hex byte 3, row 5
+    await c.pause(0.1)
+    c.check("clicking the hex pane moves the cursor into the scrolled region",
+            hx.cursor == (top + 5) * 16 + 3,
+            f"cursor={hx.cursor} want={(top + 5) * 16 + 3} top={top}")
+    await c.pilot.click(HexView, offset=(PAD + 70 + 10, 7))  # ascii byte 10, row 7
+    await c.pause(0.1)
+    c.check("clicking the ascii pane maps to the right byte",
+            hx.cursor == (top + 7) * 16 + 10,
+            f"cursor={hx.cursor} want={(top + 7) * 16 + 10}")
     await c.press("backslash")
     await c.wait(lambda: app._active != "hex", 10)
     c.check("backslash returns from hex to the code view",

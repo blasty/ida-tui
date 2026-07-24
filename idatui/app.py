@@ -1712,6 +1712,39 @@ class HexView(ScrollView, can_focus=True):
     def action_leave(self) -> None:
         self.post_message(HexView.Leave())
 
+    # -- mouse ------------------------------------------------------------- #
+    def _byte_at_x(self, x: int) -> int:
+        """Map a content column to a byte index 0..15, across the hex and ASCII
+        panes. Matches ``render_line``'s layout: addr(9) + file-offset(10) + 16
+        hex cells of 3 cols (with a 1-col gap before byte 8), then ' |' + ASCII."""
+        HEX, ASCII = 19, 70
+        if x < HEX:                 # clicked the address/offset gutter -> row start
+            return 0
+        if x < HEX + 49:            # hex byte region
+            rel = x - HEX
+            if rel >= 24:           # collapse the 1-col gap between the two halves
+                rel -= 1
+            return min(rel // 3, 15)
+        if x < ASCII:               # the ' |' separator -> last byte of the row
+            return 15
+        return min(x - ASCII, 15)   # ASCII pane (and anything past it)
+
+    def on_click(self, event) -> None:  # type: ignore[no-untyped-def]
+        if self.model is None or self.model.size == 0:
+            return
+        off = event.get_content_offset(self)
+        if off is None:
+            return
+        self.focus()
+        row = round(self.scroll_offset.y) + off.y
+        x = round(self.scroll_offset.x) + off.x
+        new = row * 16 + self._byte_at_x(x)
+        self.cursor = max(0, min(self.model.size - 1, new))
+        self.refresh()  # cursor is reactive(repaint=False); repaint the highlight
+        self.post_message(HexView.Moved(self.cursor_va()))
+        if event.chain >= 2:  # double-click == place cursor + jump to code
+            self.post_message(HexView.ToCode(self.cursor_va()))
+
     # -- rendering --------------------------------------------------------- #
     def _ensure_window(self, top: int) -> None:
         if self.model is None:
