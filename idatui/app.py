@@ -2079,6 +2079,107 @@ class SymbolPalette(ModalScreen):
         self.dismiss(None)
 
 
+def _str_display(text: str, limit: int = 200) -> str:
+    """One-line, printable rendering of a string literal for the browser: escape
+    the common control chars, drop the rest, and clip long bodies."""
+    out = (text.replace("\\", "\\\\").replace("\n", "\\n")
+               .replace("\r", "\\r").replace("\t", "\\t"))
+    out = "".join(ch if ch.isprintable() else "." for ch in out)
+    return out[:limit] + ("\u2026" if len(out) > limit else "")
+
+
+class StringsPalette(ModalScreen):
+    """Every string in the binary (IDA's Shift+F12), filterable; Enter jumps to
+    it in the unified listing."""
+
+    BINDINGS = [
+        Binding("escape", "close", "Close"),
+        Binding("down,ctrl+n", "cursor_down", show=False),
+        Binding("up,ctrl+p", "cursor_up", show=False),
+    ]
+    LIMIT = 500
+
+    def __init__(self, strings: list) -> None:
+        super().__init__()
+        # Pre-render + pre-lower once: filtering runs on every keystroke and a
+        # big binary has tens of thousands of strings.
+        self._rows = [(s, d, d.lower())
+                      for s in strings for d in (_str_display(s.text),)]
+        self._results: list = []
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="pal-box"):
+            yield Static(" strings", id="pal-title")
+            yield Input(placeholder="filter strings\u2026  \u2191\u2193 select \u00b7 "
+                                    "Enter jump \u00b7 Esc close", id="pal-input")
+            yield OptionList(id="pal-list")
+
+    def on_mount(self) -> None:
+        self._apply("")
+        self.query_one("#pal-input", Input).focus()
+
+    def on_input_changed(self, event: Input.Changed) -> None:
+        event.stop()  # don't leak to the app's #search/#filter handlers
+        self._apply(event.value.strip())
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        event.stop()
+        self.action_choose()
+
+    def _apply(self, query: str) -> None:
+        q = query.lower()
+        rows = []
+        for s, disp, low in self._rows:
+            hit = low.find(q) if q else -1
+            if q and hit < 0:
+                continue
+            rows.append((s, disp, hit))
+            if len(rows) >= self.LIMIT:
+                break
+        self._results = [s for s, _, _ in rows]
+        ol = self.query_one(OptionList)
+        ol.clear_options()
+        opts = []
+        for s, disp, hit in rows:
+            label = Text()
+            label.append(f"{s.addr:08X}  ", _S_ADDR)
+            label.append(f"{s.length:>5}  ", _S_DIM)
+            body = Text(disp)
+            if hit >= 0:
+                body.stylize(_S_NAME_MATCH, hit, hit + len(q))
+            label.append_text(body)
+            opts.append(Option(label))
+        ol.add_options(opts)
+        if self._results:
+            ol.highlighted = 0
+        more = "+" if len(rows) == self.LIMIT else ""
+        self.query_one("#pal-title", Static).update(
+            f" strings: {len(self._results)}{more}  of {len(self._rows)}")
+
+    def action_cursor_down(self) -> None:
+        ol = self.query_one(OptionList)
+        if ol.option_count:
+            ol.highlighted = min((ol.highlighted or 0) + 1, ol.option_count - 1)
+
+    def action_cursor_up(self) -> None:
+        ol = self.query_one(OptionList)
+        if ol.option_count:
+            ol.highlighted = max((ol.highlighted or 0) - 1, 0)
+
+    def action_choose(self) -> None:
+        ol = self.query_one(OptionList)
+        i = ol.highlighted
+        if i is not None and 0 <= i < len(self._results):
+            self.dismiss(self._results[i].addr)
+
+    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+        if 0 <= event.option_index < len(self._results):
+            self.dismiss(self._results[event.option_index].addr)
+
+    def action_close(self) -> None:
+        self.dismiss(None)
+
+
 # --------------------------------------------------------------------------- #
 # Confirmation dialog
 # --------------------------------------------------------------------------- #
@@ -2435,6 +2536,8 @@ class IdaCommands(Provider):
             ("Goto address / symbol…", "jump to an address or name (g)",
              app.action_goto),
             ("Find symbol…", "fuzzy function finder (Ctrl+N)", app.action_symbols),
+            ("Strings…", "browse every string in the binary (\")",
+             app.action_strings),
             ("Follow symbol under cursor", "jump to the referenced symbol (Enter)",
              lambda: va("follow")),
             ("Show xrefs to symbol", "cross-references to the cursor symbol (x)",
@@ -2576,6 +2679,7 @@ class IdaTui(App):
         Binding("ctrl+t", "structs", "Structs"),
         Binding("backslash", "hex", "Hex"),
         Binding("s", "toggle_split", "Split", show=False),
+        Binding("quotation_mark,shift+f12", "strings", "Strings", show=False),
         Binding("g", "goto", "Goto"),
         Binding("slash", "filter", "Filter", show=False),
         Binding("ctrl+b", "toggle_functions", "Names", show=False),
@@ -3027,6 +3131,40 @@ class IdaTui(App):
             return
         f = self._func_index.by_addr(addr) if self._func_index else None
         self._open_function(addr, f.name if f else hex(addr))
+
+    def action_strings(self) -> None:
+        """'\"' / Shift+F12: browse every string in the binary (filterable);
+        Enter jumps to it in the unified listing."""
+        if self.program is None:
+            self._status("not connected yet")
+            return
+        if self._prompt_active():
+            return
+        self._status("collecting strings\u2026")
+        self._load_strings()
+
+    @work(thread=True, exclusive=True, group="strings")
+    def _load_strings(self) -> None:
+        assert self.program is not None
+        try:
+            items, err = self.program.strings(), None
+        except Exception as e:  # noqa: BLE001 -- report, never kill the app
+            items, err = [], str(e)
+        self.app.call_from_thread(self._present_strings, items, err)
+
+    def _present_strings(self, items: list, err: str | None) -> None:
+        if err:
+            self._status(f"strings failed: {err}")
+            return
+        if not items:
+            self._status("no strings found (needs the list_strings tool)")
+            return
+        self._status(f"strings: {len(items)}")
+        self.push_screen(StringsPalette(items), self._on_string_chosen)
+
+    def _on_string_chosen(self, addr: int | None) -> None:
+        if addr is not None:  # land on the literal in the unified listing
+            self._goto_ea(addr, push=True)
 
     def action_toggle_view(self) -> None:
         """Tab: switch the code pane between disassembly and pseudocode (or leave

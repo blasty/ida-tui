@@ -635,6 +635,75 @@ def decomp_map(
                 eas.append(hex(e))
         lines.append({"ea": eas[0] if eas else None, "eas": eas})
     return {"addr": hex(func.start_ea), "lines": lines}
+
+
+_idatui_strings_cache = {}
+
+
+def _idatui_build_strings(min_len):
+    """[(ea, text, length, typename)] for every string IDA found, cached by
+    min_len (rebuilding the list is O(n) and the browser pages through it)."""
+    import idautils
+    import ida_nalt
+    hit = _idatui_strings_cache.get(min_len)
+    if hit is not None:
+        return hit
+    tnames = {}
+    for nm, lbl in (("STRTYPE_C", "C"), ("STRTYPE_C_16", "utf16"),
+                    ("STRTYPE_C_32", "utf32"), ("STRTYPE_PASCAL", "pascal")):
+        v = getattr(ida_nalt, nm, None)
+        if v is not None:
+            tnames[v & 0xFF] = lbl
+    items = []
+    for s in idautils.Strings():
+        if s is None:
+            continue
+        try:
+            text = str(s)
+        except Exception:  # noqa: BLE001 -- undecodable literal
+            continue
+        if len(text) < min_len:
+            continue
+        st = getattr(s, "strtype", 0) & 0xFF
+        items.append((s.ea, text, getattr(s, "length", len(text)),
+                      tnames.get(st, "t%d" % st)))
+    _idatui_strings_cache[min_len] = items
+    return items
+
+
+@tool
+@idasync
+def list_strings(
+    offset: Annotated[int, "Start index into the strings list"] = 0,
+    count: Annotated[int, "Max strings to return (page size)"] = 2000,
+    min_len: Annotated[int, "Minimum string length to include"] = 4,
+    refresh: Annotated[bool, "Rebuild the cached strings list"] = False,
+) -> dict:
+    """Every string literal IDA found in the binary (IDA's Shift+F12 window),
+    paginated: {strings:[{addr,text,len,type}], total, next_offset}. Feeds the
+    TUI's strings browser."""
+    try:
+        min_len = max(int(min_len), 1)
+    except (TypeError, ValueError):
+        min_len = 4
+    try:
+        offset = max(int(offset), 0)
+    except (TypeError, ValueError):
+        offset = 0
+    try:
+        count = max(int(count), 1)
+    except (TypeError, ValueError):
+        count = 2000
+    if refresh:
+        _idatui_strings_cache.pop(min_len, None)
+    items = _idatui_build_strings(min_len)
+    page = items[offset:offset + count]
+    return {
+        "strings": [{"addr": hex(ea), "text": text, "len": ln, "type": ty}
+                    for (ea, text, ln, ty) in page],
+        "total": len(items),
+        "next_offset": offset + len(page),
+    }
 '''
 
 SNIPPET = f"{BEGIN}\n{BODY.strip()}\n{END}\n"

@@ -167,6 +167,15 @@ class Struct:
         )
 
 
+@dataclass(frozen=True)
+class StrLit:
+    """A string literal IDA found in the binary (the Shift+F12 list)."""
+    addr: int
+    text: str
+    length: int
+    type: str = ""
+
+
 @dataclass
 class Decompilation:
     ea: int
@@ -808,6 +817,7 @@ class Program:
         self._listings: dict[int, ListingModel] = {}  # keyed by segment start
         self._decomp: dict[int, tuple[Decompilation, int]] = {}
         self._decomp_maps: dict[int, tuple[list[list[int]], int]] = {}  # line->ea sets
+        self._strings: list["StrLit"] | None = None  # whole-binary string literals
         self._name_gen = 0  # bumped on rename; invalidates stale name caches
         self._segments_cache: list[tuple[int, int, int, str]] | None = None
         self._sections: list[tuple[int, int, str]] | None = None
@@ -1245,6 +1255,41 @@ class Program:
                 return json.loads(r.read().decode("utf-8", "replace"))
         except Exception:  # noqa: BLE001 -- fall back to the truncated preview
             return None
+
+    def strings(self, min_len: int = 4, refresh: bool = False) -> list[StrLit]:
+        """Every string literal in the binary (IDA's Shift+F12 list), paged in
+        full and cached. ``[]`` if the tool is unavailable."""
+        if not refresh:
+            with self._lock:
+                hit = self._strings
+            if hit is not None:
+                return hit
+        out: list[StrLit] = []
+        offset, page = 0, 2000
+        while True:
+            try:
+                payload = self.client.call(
+                    "list_strings", offset=offset, count=page, min_len=min_len,
+                    refresh=(refresh and offset == 0))
+            except IDAToolError:
+                return []
+            rows = payload.get("strings", []) if isinstance(payload, dict) else []
+            for r in rows:
+                if not isinstance(r, dict):
+                    continue
+                out.append(StrLit(
+                    addr=_as_int(r.get("addr", 0)),
+                    text=r.get("text", ""),
+                    length=int(r.get("len", 0) or 0),
+                    type=r.get("type", "") or "",
+                ))
+            total = int(payload.get("total", 0) or 0) if isinstance(payload, dict) else 0
+            if len(rows) < page or len(out) >= total:
+                break
+            offset += len(rows)
+        with self._lock:
+            self._strings = out
+        return out
 
     def decomp_map(self, ea: int) -> list[list[int]]:
         """Per-pseudocode-line instruction coverage for the split-view region

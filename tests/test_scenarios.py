@@ -25,7 +25,8 @@ import traceback
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from idatui.app import (  # noqa: E402
     ConfirmScreen, DecompView, DisasmView, FunctionsPanel, HexView, IdaTui,
-    ListingView, StructEditor, SymbolPalette, XrefsScreen,
+    ListingView, StringsPalette, StructEditor, SymbolPalette, XrefsScreen,
+    _str_display,
 )
 from textual.widgets import (  # noqa: E402
     DataTable, Footer, Input, OptionList, Static, TextArea,
@@ -337,6 +338,48 @@ async def s_command_palette(c: Ctx):
     if landed:
         await c.press("backslash")  # leave hex
         await c.wait(lambda: app._active != "hex", 5)
+
+
+@scenario("strings")
+async def s_strings(c: Ctx):
+    app = c.app
+    await c.open_biggest("listing")
+    items = app.program.strings()
+    c.check("program.strings() lists the binary's literals", len(items) > 3,
+            f"n={len(items)}")
+    if not items:
+        return
+    c.check("strings carry addr/text/length",
+            all(s.addr > 0 and s.text and s.length > 0 for s in items[:5]),
+            f"first={items[0]}")
+    await c.press("quotation_mark")
+    opened = await c.wait(lambda: isinstance(app.screen, StringsPalette), 25)
+    c.check('\'"\' opens the strings browser', opened,
+            f"screen={type(app.screen).__name__}")
+    if not opened:
+        return
+    pal = app.screen
+    c.check("the browser lists strings", len(pal._results) > 0,
+            f"results={len(pal._results)}")
+    # filter on a fragment of a real (unescaped) literal
+    target = next((s for s in items
+                   if len(s.text) >= 6 and _str_display(s.text) == s.text), None)
+    if target is not None:
+        frag = target.text[:6]
+        pal.query_one(Input).value = frag
+        await c.pause(0.2)
+        ok = (pal._results
+              and all(frag.lower() in s.text.lower() for s in pal._results))
+        c.check("filtering narrows to matching strings", bool(ok),
+                f"frag={frag!r} n={len(pal._results)}")
+        want = pal._results[0].addr
+        await c.press("enter")
+        await c.wait(lambda: not isinstance(app.screen, StringsPalette), 10)
+        landed = await c.wait(lambda: c.lst._cursor_ea() == want, 20)
+        c.check("Enter jumps to the string in the unified listing", landed,
+                f"cursor={c.lst._cursor_ea()} want={want:#x}")
+    else:
+        await c.press("escape")
 
 
 @scenario("split_view")
