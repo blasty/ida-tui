@@ -227,6 +227,7 @@ class Ctx:
         app._pref = "decomp"
         if app._active == "hex":
             app._active = "decomp"
+        app._split = False
         await self.pause(0.02)
 
 

@@ -3088,6 +3088,8 @@ class IdaTui(App):
 
     def action_toggle_split(self) -> None:
         """Toggle the side-by-side listing ⇄ pseudocode view (Ghidra-style)."""
+        if self._prompt_active():
+            return  # a search/rename/… prompt owns the keyboard
         if self._cur is None or self.program is None:
             self._status("open a function first")
             return
