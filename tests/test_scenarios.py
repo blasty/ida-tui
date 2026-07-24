@@ -422,6 +422,19 @@ async def s_split_view(c: Ctx):
             app._active == "decomp", f"active={app._active}")
     await c.press("tab")  # restore listing as the driver
     await c.pause(0.1)
+    # cross-function follow: the listing cursor leaving the decompiled function
+    # re-points the decomp pane to whatever function it's now in.
+    await c.wait(lambda: app._split_range is not None, 10)
+    other = c.find_func(lambda f: f.addr != app._cur.ea and f.size > 40)
+    row = lst.model.ensure_ea(other.addr) if other is not None else None
+    if other is not None and row is not None and row >= 0:
+        lst.focus()
+        app._active = "listing"
+        lst.cursor = row
+        app._sync_split("listing")  # cursor now outside the decompiled fn
+        followed = await c.wait(lambda: dec.loaded_ea == other.addr, 25)
+        c.check("listing cursor crossing into another function re-syncs the decomp",
+                followed, f"dec={dec.loaded_ea} want={other.addr}")
     # navigation in split keeps BOTH panes on the (new) function
     nf = c.find_func(lambda f: f.addr != app._cur.ea and f.size > 80)
     if nf is not None:

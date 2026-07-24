@@ -97,6 +97,11 @@ back to the single marker until the map lands. Verified on the pilot's real work
   split routes through `_open_entry` (listing) → `_show_active` split branch
   (decomp + `_load_split_map`), so both panes reload for the new function and
   split stays on.
+- Cross-function follow: the unified listing spans many functions, so when the
+  listing cursor leaves the decompiled function's ea span (`_split_range`),
+  `_sync_split` re-points the decomp pane to the function under the cursor
+  (`_resync_decomp` → `function_of` → re-decompile + reload the map). Over
+  data/undefined it just drops the band and keeps the last function.
 - Non-issues after review: split is a persistent *mode* orthogonal to nav
   entries, so back/forward simply navigate within split (no per-entry state
   needed); search is already per-focused-pane.

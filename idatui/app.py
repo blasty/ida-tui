@@ -2609,6 +2609,7 @@ class IdaTui(App):
         self._split = False       # side-by-side listing + pseudocode
         self._split_eamap: list[list[int]] = []  # split: decomp line -> instr EAs
         self._split_ea2line: dict[int, int] = {}  # split: instr EA -> decomp line
+        self._split_range: tuple[int, int] | None = None  # decomp'd fn ea span
         self._hex_pending_ea: int | None = None
         self._cur: NavEntry | None = None
         self._pending_focus_name: str | None = None  # token to land the cursor on
@@ -4458,6 +4459,7 @@ class IdaTui(App):
         dec.set_link(None)
         self._split_eamap = []
         self._split_ea2line = {}
+        self._split_range = None
         dec.display = lst.display = hx.display = False
         if self._active in ("listing", "disasm"):
             lst.display = True
@@ -4605,14 +4607,45 @@ class IdaTui(App):
         else:  # the listing drives
             lst.set_link(set())
             ea = lst._cursor_ea()
-            line = self._split_ea2line.get(ea) if ea is not None else None
-            if line is None and ea is not None:  # fallback: nearest marker
+            if ea is None:
+                dec.set_link(None)
+                return
+            rng = self._split_range
+            if rng is not None and not (rng[0] <= ea <= rng[1]):
+                # cursor left the decompiled function — follow it to whatever
+                # function it's now in (the unified view spans many functions).
+                self._resync_decomp(ea)
+                return
+            line = self._split_ea2line.get(ea)
+            if line is None:  # fallback: nearest marker
                 line = dec.line_for_ea(ea)
             if line is not None:
                 dec.set_link(line)
                 dec.reveal(line)
             else:
                 dec.set_link(None)
+
+    @work(thread=True, group="split-resync", exclusive=True)
+    def _resync_decomp(self, ea: int) -> None:
+        # The listing cursor crossed out of the decompiled function; find the
+        # function it's in now (off the UI thread) and re-point the decomp pane.
+        assert self.program is not None
+        fn = self.program.function_of(ea)
+        self.app.call_from_thread(self._apply_resync, fn)
+
+    def _apply_resync(self, fn) -> None:  # type: ignore[no-untyped-def]
+        if not self._split or self._cur is None:
+            return
+        dec = self.query_one(DecompView)
+        if fn is None:
+            dec.set_link(None)  # over data/undefined: keep the decomp, drop the band
+            return
+        self._cur.ea, self._cur.name = fn.addr, fn.name
+        if dec.loaded_ea == fn.addr:  # already decompiled (scrolled back): just relink
+            self._sync_split("listing")
+            return
+        dec.loading = True
+        self._load_decomp(fn.addr, fn.name)  # -> _apply_decomp -> map -> re-sync
 
     def _split_status(self) -> None:
         """A split-aware status line reflecting the focused pane + the link."""
@@ -4660,9 +4693,14 @@ class IdaTui(App):
             return  # left split / navigated away
         self._split_eamap = m
         self._split_ea2line = {}
+        alleas = []
         for line, eas in enumerate(m):
             for e in eas:
                 self._split_ea2line.setdefault(e, line)
+                alleas.append(e)
+        # ea span of the decompiled function: when the listing cursor leaves it,
+        # _sync_split re-points the decomp to the function under the cursor.
+        self._split_range = (min(alleas), max(alleas)) if alleas else None
         self._sync_split(self._active)  # re-link with the region map
 
     def on_decomp_view_cursor_moved(self, msg: DecompView.CursorMoved) -> None:
