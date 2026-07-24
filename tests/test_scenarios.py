@@ -617,17 +617,18 @@ async def s_view_toggle(c: Ctx):
     c.check("tab switches to disassembly",
             app._active == "listing" and dis.display and not dec.display,
             f"active={app._active}")
-    await c.press("tab")
-    await c.wait(lambda: app._active == "decomp", 10)
-    # a (re)decompile shows the grayed overlay
+    # F5/Tab from the listing must raise the 'decompiling…' overlay synchronously,
+    # BEFORE the background decompile runs (regression: it used to decompile first
+    # in _decomp_from_listing, so the overlay only flashed once cached).
     dec.loaded_ea = None
-    app._show_active()
+    app.action_toggle_view()
     cover = dec._cover_widget
-    c.check("decompile shows a 'decompiling…' overlay",
+    c.check("F5 from the listing raises the 'decompiling…' overlay",
             dec.loading and cover is not None and "decomp-loading" in cover.classes
             and "decompiling" in str(cover.render()),
             f"loading={dec.loading} cover={cover!r}")
-    await c.wait(lambda: not dec.loading and dec._cover_widget is None, 25)
+    await c.wait(lambda: app._active == "decomp" and not dec.loading
+                 and dec._cover_widget is None, 25)
     c.check("overlay clears when the decompile finishes",
             not dec.loading and dec._cover_widget is None)
     # line-number gutter

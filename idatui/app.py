@@ -2958,6 +2958,17 @@ class IdaTui(App):
             if ea is None:
                 self._status("no address here to decompile")
                 return
+            # Raise the pseudocode pane + 'decompiling…' overlay NOW, before the
+            # background decompile runs — otherwise the (cold) decompile happens in
+            # _decomp_from_listing first and _show_active's re-decompile is cached,
+            # so the overlay only flashes for an instant.
+            dec = self.query_one(DecompView)
+            self.query_one(ListingView).display = False
+            self.query_one(HexView).display = False
+            dec.display = True
+            dec.loading = True
+            dec.focus()
+            self._status("decompiling\u2026")
             self._decomp_from_listing(ea)
             return
         # active == "decomp": F5/Tab returns to the linear listing.
@@ -3005,11 +3016,19 @@ class IdaTui(App):
         fn = self.program.function_of(ea)
         if fn is None:
             self.app.call_from_thread(
-                self._status,
+                self._decomp_from_listing_failed,
                 "F5 — cursor is not inside a defined function ('p' to make one)")
             return
         dec_idx = self._decomp_line_for(fn.addr, ea)
         self.app.call_from_thread(self._enter_decomp, fn.addr, fn.name, dec_idx)
+
+    def _decomp_from_listing_failed(self, msg: str) -> None:
+        # We optimistically raised the pseudocode overlay; drop back to the
+        # listing since there's nothing to decompile here.
+        self.query_one(DecompView).loading = False
+        self._active = "listing"
+        self._show_active()
+        self._status(msg)
 
     def _enter_decomp(self, fn_addr: int, fn_name: str, dec_idx: int) -> None:
         # Snapshot the listing position so F5/Tab returns exactly here.
