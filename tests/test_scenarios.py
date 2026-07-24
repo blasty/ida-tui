@@ -506,29 +506,34 @@ async def s_hex(c: Ctx):
     await c.wait(lambda: hx.cursor_va() == target_va, 15)
     c.check("'g' in the hex view jumps the cursor to an address",
             hx.cursor_va() == target_va, f"va={hx.cursor_va():#x} want={target_va:#x}")
-    # -- scroll the viewport, then click to move the byte cursor into it ----
+    # -- a user scroll freezes the cursor's screen row (points at a new byte) --
     await c.press("g")
     await c.type(hex(rng[0]))
     await c.press("enter")
     await c.wait(lambda: hx.cursor_va() == rng[0], 10)
-    hx.scroll_to(y=40, animate=False)  # wheel-style scroll
+    for _ in range(8):        # cursor to viewport row 8 (top still 0)
+        await c.press("j")
+    await c.pause(0.1)
+    top0 = round(hx.scroll_offset.y)
+    screen_row = hx.cursor // 16 - top0
+    hx.scroll_to(y=top0 + 30, animate=False)  # user scroll down 30 rows
     await c.pause(0.15)
-    top = round(hx.scroll_offset.y)
-    height = hx._visible_height()
-    c.check("hex cursor follows the scroll (stays visible)",
-            top >= 20 and top <= (hx.cursor // 16) < top + height,
-            f"top={top} cursor_row={hx.cursor // 16} height={height}")
+    top1 = round(hx.scroll_offset.y)
+    c.check("hex viewport scrolled", top1 >= top0 + 20, f"top0={top0} top1={top1}")
+    c.check("hex cursor's screen row stays frozen on scroll",
+            hx.cursor // 16 - top1 == screen_row,
+            f"screen_row={screen_row} now={hx.cursor // 16 - top1} top1={top1}")
     PAD = 1  # HexView { padding: 0 1 } -> content is inset one col
     await c.pilot.click(HexView, offset=(PAD + 19 + 3 * 3, 5))  # hex byte 3, row 5
     await c.pause(0.1)
-    c.check("clicking the hex pane moves the cursor into the scrolled region",
-            hx.cursor == (top + 5) * 16 + 3,
-            f"cursor={hx.cursor} want={(top + 5) * 16 + 3} top={top}")
+    c.check("clicking the hex pane moves the cursor to the clicked byte",
+            hx.cursor == (top1 + 5) * 16 + 3,
+            f"cursor={hx.cursor} want={(top1 + 5) * 16 + 3} top1={top1}")
     await c.pilot.click(HexView, offset=(PAD + 70 + 10, 7))  # ascii byte 10, row 7
     await c.pause(0.1)
     c.check("clicking the ascii pane maps to the right byte",
-            hx.cursor == (top + 7) * 16 + 10,
-            f"cursor={hx.cursor} want={(top + 7) * 16 + 10}")
+            hx.cursor == (top1 + 7) * 16 + 10,
+            f"cursor={hx.cursor} want={(top1 + 7) * 16 + 10}")
     await c.press("backslash")
     await c.wait(lambda: app._active != "hex", 10)
     c.check("backslash returns from hex to the code view",

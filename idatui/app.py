@@ -1617,6 +1617,7 @@ class HexView(ScrollView, can_focus=True):
         super().__init__(id="hex")
         self.model = None
         self.total = 0
+        self._internal_top: int | None = None  # scroll target we set ourselves
 
     # -- public API -------------------------------------------------------- #
     def load(self, model, va: int | None = None) -> None:  # type: ignore[no-untyped-def]
@@ -1658,12 +1659,16 @@ class HexView(ScrollView, can_focus=True):
 
     def _apply_scroll(self, y: int) -> None:
         y = max(0, y)
-        self.scroll_to(y=y, animate=False)
+        if round(self.scroll_offset.y) != y:
+            self._internal_top = y  # cursor-driven scroll incoming; don't follow it
 
         def _fix(yy: int = y) -> None:
+            if round(self.scroll_offset.y) != yy:
+                self._internal_top = yy
             self.scroll_to(y=yy, animate=False)
             self.refresh(layout=True)
 
+        self.scroll_to(y=y, animate=False)
         self.call_after_refresh(_fix)
 
     def _scroll_to_cursor(self, center: bool = False) -> None:
@@ -1682,21 +1687,23 @@ class HexView(ScrollView, can_focus=True):
 
     def watch_scroll_y(self, old_value: float, new_value: float) -> None:
         super().watch_scroll_y(old_value, new_value)
-        # Follow the scroll: a wheel-scroll / scrollbar drag drags the byte cursor
-        # along so it stays visible (pinned to the nearest edge row, same column).
-        if round(old_value) != round(new_value):
-            self._follow_scroll(round(new_value))
-
-    def _follow_scroll(self, top: int) -> None:
-        if self.model is None or self.model.size == 0:
+        if round(old_value) == round(new_value):
             return
-        height = self._visible_height()
-        row, col = self.cursor // 16, self.cursor % 16
-        new_row = min(max(row, top), top + max(height - 1, 0))
-        new_row = max(0, min(new_row, max(self.total - 1, 0)))
-        new_cursor = max(0, min(new_row * 16 + col, self.model.size - 1))
-        if new_cursor != self.cursor:
-            self.cursor = new_cursor
+        nt = round(new_value)
+        if self._internal_top is not None and nt == self._internal_top:
+            self._internal_top = None  # our cursor-driven scroll: cursor already placed
+            return
+        # A user scroll (wheel / scrollbar): drag the cursor by the same row delta
+        # so its screen position stays frozen (it points at a new byte in place).
+        self._internal_top = None
+        self._shift_cursor(nt - round(old_value))
+
+    def _shift_cursor(self, rows: int) -> None:
+        if not rows or self.model is None or self.model.size == 0:
+            return
+        new = max(0, min(self.cursor + rows * 16, self.model.size - 1))
+        if new != self.cursor:
+            self.cursor = new
             self.refresh()  # cursor is reactive(repaint=False)
             self.post_message(HexView.Moved(self.cursor_va()))
 
