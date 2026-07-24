@@ -32,8 +32,8 @@ from typing import Callable, TYPE_CHECKING
 
 from .errors import IDAToolError
 
-if TYPE_CHECKING:  # type hint only; the runtime client is mcp IDAClient or worker
-    from .client import IDAClient  # noqa: F401
+if TYPE_CHECKING:  # type hint only
+    from .worker_client import WorkerClient  # noqa: F401
 
 # Clamps derived from measured caps (list ~700, disasm ~500). Margin included.
 LIST_PAGE = 500
@@ -797,7 +797,7 @@ class HexModel:
 class Program:
     """The bound analysis session: models, caches, and a small prefetch pool."""
 
-    def __init__(self, client: IDAClient, prefetch_workers: int = 2):
+    def __init__(self, client: "WorkerClient", prefetch_workers: int = 2):
         self.client = client
         self._pool = ThreadPoolExecutor(
             max_workers=prefetch_workers, thread_name_prefix="idatui-prefetch"

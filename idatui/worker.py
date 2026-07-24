@@ -62,7 +62,7 @@ def recv(sock: socket.socket):
 def _ensure_tools_injected() -> None:
     """Inject idatui's custom tools (heads/read_raw/resolve_names/func_types/...)
     into the installed ida_pro_mcp, idempotently, so the worker is self-sufficient
-    without spawn.sh having run server/patch_server.py first. Must run BEFORE
+    (nothing else has to inject these tools first). Must run BEFORE
     ida_pro_mcp.ida_mcp is imported (the injected code lives in api_types.py)."""
     import importlib.util
     repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))

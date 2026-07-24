@@ -8,9 +8,6 @@ then close it — all without a human touching the keyboard.
     python -m idatui.pane spawn --open /abs/path/to/bin
     # -> {"sock": "/run/user/1000/idatui-3f2a.sock", "pane": "%7", "ready": true, ...}
 
-    # or attach to an existing session id
-    python -m idatui.pane spawn --db 80d83396
-
     # drive it (see docs/RPC.md / the idatui-rpc skill)
     python -m idatui.rpcclient --sock <sock> pseudocode target=main
 
@@ -18,9 +15,9 @@ then close it — all without a human touching the keyboard.
     python -m idatui.pane list
     python -m idatui.pane stop --sock <sock>        # graceful quit + kill pane
 
-Requires: running inside tmux, and the ida-pro-mcp supervisor already up
-(./spawn.sh). Uses ~/ida-venv/bin/python for the TUI (needs textual) unless
---python / IDATUI_PYTHON says otherwise.
+Requires: running inside tmux. Each pane spawns its own private idalib worker
+(no shared supervisor). Uses ~/ida-venv/bin/python for the TUI (needs textual)
+unless --python / IDATUI_PYTHON says otherwise.
 """
 from __future__ import annotations
 
@@ -29,14 +26,11 @@ import json
 import os
 import secrets
 import signal
-import socket
 import subprocess
 import sys
 import time
 from typing import Any
-from urllib.parse import urlparse
 
-from .client import DEFAULT_URL
 from .rpcclient import RpcClient, RpcError
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -81,24 +75,17 @@ def _tmux(*args: str) -> str:
 # --------------------------------------------------------------------------- #
 # idalib worker reaping
 #
-# ``pane stop`` kills the TUI pane, but the ida-pro-mcp supervisor does not
-# reliably reap the ``ida_pro_mcp.idalib_server`` worker it forked for that
-# session. Leaked workers accumulate against IDA_MCP_MAX_WORKERS until the next
-# ``spawn`` blocks forever waiting for a free slot (the TUI comes up but never
-# becomes ready). A worker is only *safe* to reap when no idatui pane is live
-# (then every worker is orphaned) — that mirrors the hand workaround
-# `pkill -f ida_pro_mcp.idalib_server` and avoids killing an in-use analyser.
+# ``pane stop`` kills the TUI pane, but a hard-killed pane can leave its private
+# idalib worker (idatui/worker.py) running. A worker is only *safe* to reap when
+# no idatui pane is live (then every worker is orphaned), which avoids killing an
+# in-use analyser.
 # --------------------------------------------------------------------------- #
-_WORKER_PATTERN = r"ida_pro_mcp\.idalib_server"
+_WORKER_PATTERN = r"idatui/worker\.py"
 
 
 def _worker_pids() -> list[int]:
-    """PIDs of the supervisor's per-binary idalib worker processes.
-
-    Matches the worker module invocation only (not the ``idalib-mcp``
-    supervisor, whose command line does not contain the module path), and
-    never our own PID.
-    """
+    """PIDs of our private per-pane idalib worker processes (idatui/worker.py),
+    never our own PID."""
     try:
         out = subprocess.run(["pgrep", "-f", _WORKER_PATTERN],
                              capture_output=True, text=True)
@@ -138,73 +125,19 @@ def _reap_orphan_workers(force: bool = False) -> int:
 
 
 # --------------------------------------------------------------------------- #
-# supervisor (ida-pro-mcp server) — auto-start if down
-# --------------------------------------------------------------------------- #
-def _server_addr(url: str) -> tuple[str, int]:
-    u = urlparse(url)
-    return (u.hostname or "127.0.0.1", u.port or 8745)
-
-
-def _server_up(host: str, port: int, timeout: float = 0.75) -> bool:
-    """Is something listening on host:port? (Cheap TCP probe; the readiness poll
-    that follows catches a half-up server.)"""
-    try:
-        with socket.create_connection((host, port), timeout=timeout):
-            return True
-    except OSError:
-        return False
-
-
-def _ensure_server(host: str, port: int, timeout: float,
-                   detached: bool = True) -> dict[str, Any]:
-    """Make sure the supervisor is up; start ./spawn.sh in a tmux pane if not.
-
-    Only auto-starts a *local* server (can't launch a remote one). spawn.sh binds
-    the port, so starting a duplicate is impossible — the probe guards that.
-    ``IDATUI_SERVER_CMD`` overrides the launch command (used by the tests).
-    """
-    if _server_up(host, port):
-        return {"server_started": False, "server_up": True}
-    if host not in ("127.0.0.1", "localhost", "::1"):
-        return {"server_started": False, "server_up": False,
-                "error": f"server at {host}:{port} is down and not local; "
-                         "cannot auto-start"}
-    cmd_str = os.environ.get("IDATUI_SERVER_CMD", "./spawn.sh")
-    cmd = f"cd {_q(REPO)} && exec {cmd_str}"
-    split = ["split-window", "-v", "-P", "-F", "#{pane_id}"]
-    if detached:
-        split += ["-d"]
-    anchor = os.environ.get("TMUX_PANE")
-    if anchor:
-        split += ["-t", anchor]
-    split.append(cmd)
-    pane = _tmux(*split)
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        if not _pane_alive(pane):
-            return {"server_started": True, "server_up": False, "server_pane": pane,
-                    "error": "supervisor pane exited during startup (check it)"}
-        if _server_up(host, port):
-            return {"server_started": True, "server_up": True, "server_pane": pane}
-        time.sleep(0.5)
-    return {"server_started": True, "server_up": False, "server_pane": pane,
-            "error": "supervisor did not come up in time"}
-
-
-# --------------------------------------------------------------------------- #
 # spawn
 # --------------------------------------------------------------------------- #
 def spawn(args) -> int:
     if not os.environ.get("TMUX"):
         print("error: not inside tmux (spawn creates a tmux pane)", file=sys.stderr)
         return 2
-    if not args.open and not args.db:
-        print("error: pass --open <binary> or --db <session>", file=sys.stderr)
+    if not args.open:
+        print("error: pass --open <binary>", file=sys.stderr)
         return 2
 
     sock = args.sock or os.path.join(_sockdir(), f"idatui-{secrets.token_hex(3)}.sock")
-    target = os.path.abspath(os.path.expanduser(args.open)) if args.open else args.db
-    if args.open and not os.path.exists(target):
+    target = os.path.abspath(os.path.expanduser(args.open))
+    if not os.path.exists(target):
         print(f"error: no such binary: {target}", file=sys.stderr)
         return 2
 
@@ -216,26 +149,9 @@ def spawn(args) -> int:
         print(f"reaped {reaped} orphaned idalib worker(s) before spawn",
               file=sys.stderr)
 
-    # make sure the ida-pro-mcp supervisor is up (auto-start it if not)
-    srv: dict[str, Any] = {"server_started": False, "server_up": True}
-    if not args.no_ensure_server:
-        host, port = _server_addr(args.url or DEFAULT_URL)
-        srv = _ensure_server(host, port, args.server_timeout)
-        if srv.get("server_started"):
-            print(f"supervisor was down — started it ({srv.get('server_pane')})",
-                  file=sys.stderr)
-        if not srv.get("server_up"):
-            print(json.dumps({"ready": False, **srv}), file=sys.stderr)
-            return 3
-
-    # the command the pane runs: become the TUI so kill-pane kills it cleanly
-    inner = [args.python, "-m", "idatui.tui", "--rpc", sock]
-    if args.open:
-        inner += ["--open", target]
-    else:
-        inner += ["--db", target]
-    if args.url:
-        inner += ["--url", args.url]
+    # the command the pane runs: the launcher spawns a private idalib worker for
+    # this binary and becomes the TUI, so kill-pane tears the whole thing down.
+    inner = [args.python, "-m", "idatui.launch", target, "--rpc", sock]
     cmd = f"cd {REPO!r} && exec " + " ".join(_q(a) for a in inner)
 
     split = ["split-window", "-v" if args.vertical else "-h",
@@ -251,10 +167,7 @@ def spawn(args) -> int:
     pane = _tmux(*split)
 
     row = {"sock": sock, "pane": pane, "target": target,
-           "kind": "open" if args.open else "db", "started": time.time(),
-           "server_started": srv.get("server_started", False)}
-    if srv.get("server_pane"):
-        row["server_pane"] = srv["server_pane"]
+           "kind": "open", "started": time.time()}
     reg = [r for r in _load_registry() if r.get("sock") != sock]
     reg.append(row)
     _save_registry(reg)
@@ -298,8 +211,8 @@ def _wait_ready(sock: str, timeout: float, pane: str,
             why = ("RPC socket not created yet" if not os.path.exists(sock)
                    else "TUI up but analysis not ready")
             print(f"still waiting ({int(time.time() - start)}s): {why}. If this "
-                  f"hangs, the idalib worker may be stuck or IDA_MCP_MAX_WORKERS "
-                  f"is full — try `python -m idatui.pane reap`.", file=sys.stderr)
+                  f"hangs, the idalib worker may be stuck — try "
+                  f"`python -m idatui.pane reap`.", file=sys.stderr)
         time.sleep(0.4)
     last = dict(last)
     last["ready"] = False
@@ -388,15 +301,10 @@ def main(argv: list[str]) -> int:
     sub = p.add_subparsers(dest="cmd", required=True)
 
     sp = sub.add_parser("spawn", help="open a TUI pane and wait until ready")
-    sp.add_argument("--open", metavar="PATH", help="binary to open (dir must be writable)")
-    sp.add_argument("--db", metavar="SESSION", help="attach to an existing session id")
+    sp.add_argument("--open", metavar="PATH", required=True,
+                    help="binary to open (its dir must be writable)")
     sp.add_argument("--sock", help="RPC socket path (default: auto in $XDG_RUNTIME_DIR)")
     sp.add_argument("--python", default=DEFAULT_PY, help=f"python for the TUI ({DEFAULT_PY})")
-    sp.add_argument("--url", help="MCP server URL (default: idatui's default)")
-    sp.add_argument("--no-ensure-server", action="store_true",
-                    help="don't auto-start ./spawn.sh if the supervisor is down")
-    sp.add_argument("--server-timeout", type=float, default=90.0,
-                    help="seconds to wait for an auto-started supervisor")
     sp.add_argument("--vertical", action="store_true", help="split vertically (stacked)")
     sp.add_argument("--size", help="new pane size (tmux -l value, e.g. 60%% or 120)")
     sp.add_argument("--detached", action="store_true", help="don't focus the new pane")

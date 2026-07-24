@@ -2,14 +2,11 @@
 # Caveman launcher for the IDA TUI:
 #
 #     ./ida-tui foo.elf        # open a binary and drive it — that's it
-#     ./ida-tui                # attach to the sole open session (mcp)
-#     ./ida-tui --db <id>      # attach to a specific session (mcp)
 #
-# Opening a binary now spins up our own idalib worker (a unix-socket subprocess;
-# no HTTP, no supervisor). --db/attach still use the deprecated ida-pro-mcp
-# path; pass --backend mcp to force it. Uses the venv python that has textual
-# (override with $IDATUI_PYTHON); the worker auto-picks the python that has
-# ida_pro_mcp (override with $IDATUI_WORKER_PYTHON).
+# Opening a binary spins up our own idalib worker (a unix-socket subprocess;
+# no HTTP, no supervisor). Uses the venv python that has textual (override with
+# $IDATUI_PYTHON); the worker auto-picks the python that has ida_pro_mcp
+# (override with $IDATUI_WORKER_PYTHON).
 set -eu
 
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)

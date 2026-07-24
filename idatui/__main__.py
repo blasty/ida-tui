@@ -1,6 +1,6 @@
-"""``python -m idatui`` -> client self-check (until the TUI app lands)."""
+"""``python -m idatui`` -> the one-shot launcher (open a binary in the TUI)."""
 import sys
 
-from .client import _main
+from .launch import main
 
-raise SystemExit(_main(sys.argv[1:]))
+raise SystemExit(main(sys.argv[1:]))

@@ -13,7 +13,7 @@ tui = ["textual>=8", "pygments>=2"]  # pygments ships with rich; explicit for th
 dev = ["pytest>=8"]
 
 [project.scripts]
-idatui = "idatui.tui:main"
+idatui = "idatui.launch:main"
 ida-tui = "idatui.launch:main"  # caveman one-shot: `ida-tui foo.elf`
 
 [build-system]

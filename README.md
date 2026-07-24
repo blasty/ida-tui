@@ -3,11 +3,11 @@
 A minimal, keyboard-first (mouse-capable) **TUI frontend for IDA Pro**, built with
 [Textual](https://textual.textualize.io/) and driving **idalib** (IDA headless).
 
-Opening a binary now spawns our own **idalib worker** — a private subprocess
-talking a unix socket (`idatui/worker.py` + `WorkerClient`), ~50–100× cheaper per
-call than the old transport. The
-[ida-pro-mcp](https://github.com/mrexodia/ida-pro-mcp) HTTP path is **deprecated**
-(kept behind `--backend mcp` / `--db` attach) and slated for removal.
+Opening a binary spawns our own **idalib worker** — a private subprocess talking a
+unix socket (`idatui/worker.py` + `WorkerClient`), ~50–100× cheaper per call than
+an HTTP transport. It reuses [ida-pro-mcp](https://github.com/mrexodia/ida-pro-mcp)'s
+tool implementations in-process; the old ida-pro-mcp HTTP server/supervisor path
+has been **removed**.
 
 ## ⚠️ Status: not ready for public consumption
 
@@ -51,45 +51,32 @@ pulls in Textual + Pygments.
 ## Requirements
 
 - Python ≥ 3.11
-- A working **IDA Pro** with **idalib** and **ida-pro-mcp** installed.
+- A working **IDA Pro** with **idalib** and **ida-pro-mcp** installed (the worker
+  reuses ida-pro-mcp's tool implementations in-process — no server runs).
 - Textual ≥ 8 and Pygments ≥ 2 for the TUI (`pip install -e '.[tui]'`).
+
+Two python environments are expected: one with **textual + idapro** for the TUI
+(`~/ida-venv`, override `$IDATUI_PYTHON`) and one with **idapro + ida_pro_mcp**
+for the worker (auto-detected, override `$IDATUI_WORKER_PYTHON`).
 
 ## Running
 
-The caveman way — one command does all the plumbing (starts the supervisor if
-it's down, recovers a binary wedged by a crashed worker, opens/adopts the
-session, launches the TUI):
+One command — it spawns a private idalib worker for the binary (which opens +
+auto-analyzes it in its own process over a unix socket) and drops you into the
+TUI behind a loading overlay:
 
 ```sh
 ./ida-tui /path/to/binary        # open a binary and drive it — that's it
-./ida-tui                        # attach to the sole open session
-./ida-tui --db <session>         # attach to a specific session
 ```
 
 It uses `~/ida-venv/bin/python` for the TUI (override with `$IDATUI_PYTHON`) and
 resolves binary paths against your real cwd. The binary's directory must be
 writable (idalib writes a `.i64` there).
 
-The manual way (if you want the pieces separate):
-
-```sh
-# 1. Start the ida-pro-mcp supervisor (opens bin/ls by default).
-./spawn.sh                       # supervisor on 127.0.0.1:8745
-
-# 2. Launch the TUI (use a python that has textual + idapro).
-python -m idatui.tui                       # auto-resolve the sole session
-python -m idatui.tui --db <session>
-python -m idatui.tui --open /abs/path/bin  # dir must be WRITABLE (.i64)
-```
-
-> Recovering a wedged database by hand: if a worker was hard-killed it leaves
-> unpacked `foo.id0/.id1/.id2/.nam/.til` next to `foo.i64`, and the `.i64` then
-> refuses to reopen. Delete those stale files (never the `.i64`) and retry —
-> `ida-tui` does this automatically.
-
-The `spawn.sh` host/port/target are overridable via `IDA_MCP_HOST`,
-`IDA_MCP_PORT`, `IDA_MCP_TARGET`, `IDA_MCP_MAX_WORKERS`. A systemd unit is in
-`systemd/`.
+> Recovering a wedged database: if a worker was hard-killed it leaves unpacked
+> `foo.id0/.id1/.id2/.nam/.til` next to `foo.i64`, and the `.i64` then refuses to
+> reopen. Delete those stale files (never the `.i64`) and retry — `ida-tui` does
+> this automatically.
 
 ## RPC / driving the TUI
 
@@ -97,22 +84,30 @@ Give the TUI `--rpc <sock>` to expose a unix-socket control channel, then drive
 it from another pane:
 
 ```sh
-python -m idatui.tui --db <s> --rpc /tmp/ida.sock
+./ida-tui /abs/path/bin --rpc /tmp/ida.sock
 python -m idatui.drive where                 # ergonomic terse-text helper
 python -m idatui.drive pc main               # pseudocode of main
 python -m idatui.drive rename sub_5BE0 foo   # goto + rename
+```
+
+Or let `idatui.pane` spawn + manage TUI panes in tmux (see the idatui-rpc skill):
+
+```sh
+python -m idatui.pane spawn --open /abs/path/bin   # -> {sock, pane, ready}
+python -m idatui.pane list
+python -m idatui.pane stop --sock <sock>
 ```
 
 See `docs/RPC.md` for the full protocol.
 
 ## Tests
 
-Headless Textual `Pilot` suites live in `tests/` and need a live session id:
+A headless Textual `Pilot` suite lives in `tests/`; it spawns a worker on the
+given binary (default `targets/echo`):
 
 ```sh
-python tests/test_scenarios.py --db <session>            # UI suite
-python tests/test_scenarios.py --db <s> --only hex,rename
-python tests/test_domain.py --db <session>               # domain/paging (stdlib)
+python tests/test_scenarios.py targets/echo              # full UI suite
+python tests/test_scenarios.py --only hex,rename
 ```
 
 ## Docs

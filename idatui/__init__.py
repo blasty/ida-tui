@@ -1,4 +1,5 @@
-"""idatui — a minimal keyboard-first TUI for IDA Pro over ida-pro-mcp (idalib)."""
+"""idatui — a minimal keyboard-first TUI for IDA Pro, driving idalib via a
+private unix-socket worker (idatui.worker / WorkerClient)."""
 
 from .errors import (
     IDAError,
@@ -10,7 +11,6 @@ from .errors import (
     IDASessionError,
     Session,
 )
-from .client import IDAClient, KeepAlive  # deprecated mcp transport
 from .domain import (
     Program,
     FunctionIndex,
@@ -35,7 +35,6 @@ __all__ = [
     "Decompilation",
     "LIST_PAGE",
     "DISASM_BLOCK",
-    "IDAClient",
     "IDAError",
     "IDAConnectionError",
     "IDATimeoutError",
@@ -44,5 +43,4 @@ __all__ = [
     "IDAToolError",
     "IDASessionError",
     "Session",
-    "KeepAlive",
 ]
