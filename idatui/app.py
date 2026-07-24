@@ -4365,6 +4365,10 @@ class IdaTui(App):
                 dec.loading = True  # gray out + 'decompiling…' overlay
                 self._load_decomp(self._cur.ea, self._cur.name)
             else:
+                # Already showing this function: clear any overlay raised by the
+                # F5-from-listing path (no re-decompile happens here, so nothing
+                # else would).
+                dec.loading = False
                 self._status_for_cur("pseudocode")
 
     # -- hex view ---------------------------------------------------------- #

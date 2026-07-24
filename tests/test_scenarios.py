@@ -631,6 +631,16 @@ async def s_view_toggle(c: Ctx):
                  and dec._cover_widget is None, 25)
     c.check("overlay clears when the decompile finishes",
             not dec.loading and dec._cover_widget is None)
+    # F5 on an ALREADY-loaded function must still clear the overlay (regression:
+    # the F5-raised overlay had nothing to clear it in the 'already loaded' branch
+    # -> spinner stuck forever).
+    await c.press("tab")  # -> listing
+    await c.wait(lambda: app._active == "listing", 10)
+    app.action_toggle_view()  # F5 the same, cached function again
+    cleared = await c.wait(lambda: app._active == "decomp" and not dec.loading
+                           and dec._cover_widget is None, 15)
+    c.check("re-decompiling an already-loaded function clears the overlay", cleared,
+            f"loading={dec.loading} cover={dec._cover_widget!r}")
     # line-number gutter
     dec.scroll_to(0, 0, animate=False)
     await c.pause(0.025)
