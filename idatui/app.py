@@ -79,6 +79,9 @@ _S_WORD = Style(bgcolor="#264f78")  # identifier under the cursor
 _S_CELL = Style(reverse=True)      # the block cursor cell
 _S_LINENO = Style(color="grey37")             # pseudocode line-number gutter
 _S_LINENO_CUR = Style(color="grey66", bold=True)  # gutter on the cursor line
+_S_DECOMP_SPIN = Style(color="#b58900", bold=True)   # 'decompiling' spinner glyph
+_S_DECOMP_WAIT = Style(color="grey58", italic=True)  # 'decompiling' label
+_S_DECOMP_DOTS = Style(color="grey37")               # trailing ellipsis
 
 # Hex-Rays appends a `/*0xEA*/` address marker to each pseudocode line (we fetch
 # with include_addresses so we have a per-line anchor). Matched here to extract
@@ -1348,6 +1351,32 @@ def _refresh_lines(view, *indices: int) -> None:
 # --------------------------------------------------------------------------- #
 # Decompiler (pseudocode) view
 # --------------------------------------------------------------------------- #
+class _DecompLoading(Static):
+    """Animated cover shown over the pseudocode pane while a (re)decompile runs.
+    A braille spinner + label, dim over the grayed-out code — fits the muted TUI
+    palette (no ASCII-bar noise)."""
+
+    _FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+
+    def __init__(self, **kwargs) -> None:
+        self._i = 0
+        super().__init__(self._label(), **kwargs)
+
+    def _label(self) -> Text:
+        t = Text(justify="center")
+        t.append(self._FRAMES[self._i], _S_DECOMP_SPIN)
+        t.append("  decompiling", _S_DECOMP_WAIT)
+        t.append("…", _S_DECOMP_DOTS)
+        return t
+
+    def on_mount(self) -> None:
+        self.set_interval(1 / 12, self._tick)
+
+    def _tick(self) -> None:
+        self._i = (self._i + 1) % len(self._FRAMES)
+        self.update(self._label())
+
+
 class DecompView(SearchMixin, NavMixin, ColumnCursor, ScrollView, can_focus=True):
     """Read-only, line-virtualized Hex-Rays pseudocode with Pygments C
     highlighting. Lines are highlighted once at load and cached as Strips, so
@@ -1482,7 +1511,7 @@ class DecompView(SearchMixin, NavMixin, ColumnCursor, ScrollView, can_focus=True
 
     def get_loading_widget(self):  # type: ignore[override]
         # Shown (grayed, centered) while a (re)decompile is in flight.
-        return Static("― decompiling… ―", classes="decomp-loading")
+        return _DecompLoading(classes="decomp-loading")
 
     def _line_ea(self, idx: int) -> int | None:
         return self._line_eas[idx] if 0 <= idx < len(self._line_eas) else None
@@ -2445,7 +2474,7 @@ class IdaTui(App):
     #status { height: 1; background: $panel; color: $text; padding: 0 1; }
     .decomp-loading {
         width: 100%; height: 100%; content-align: center middle;
-        background: $panel-darken-1; color: $text-muted; text-style: italic bold;
+        background: $panel-darken-1;
     }
     XrefsScreen { align: center middle; }
     #xref-box { width: 84; max-height: 70%; height: auto; border: thick $accent; background: $panel; }
