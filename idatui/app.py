@@ -2020,6 +2020,27 @@ class ConfirmScreen(ModalScreen):
         self.dismiss(False)
 
 
+_LOGO_PATH = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "logo.ans")
+_logo_cache: object = False  # False == not yet loaded (None == absent/unreadable)
+
+
+def _load_logo() -> "Text | None":
+    """The ANSI-art splash logo (logo.ans) as a Rich Text, or None if missing.
+    Loaded once; cursor show/hide escapes are stripped so Rich sees only SGR."""
+    global _logo_cache
+    if _logo_cache is not False:
+        return _logo_cache  # type: ignore[return-value]
+    try:
+        with open(_LOGO_PATH, encoding="utf-8", errors="replace") as f:
+            data = f.read()
+        data = re.sub(r"\x1b\[\?25[lh]", "", data)  # drop cursor hide/show
+        _logo_cache = Text.from_ansi(data.strip("\n"), no_wrap=True)
+    except OSError:
+        _logo_cache = None
+    return _logo_cache  # type: ignore[return-value]
+
+
 class LoadingScreen(ModalScreen):
     """Startup overlay shown while the binary is opened + analyzed, so a slow
     load (big binary) isn't just empty panes and dead air. The app updates the
@@ -2034,6 +2055,9 @@ class LoadingScreen(ModalScreen):
 
     def compose(self) -> ComposeResult:
         with Vertical(id="loading-box"):
+            logo = _load_logo()
+            if logo is not None:
+                yield Static(logo, id="loading-logo")
             yield Static(f"\u23f3  loading  {self._title}", id="loading-title")
             yield Static(self._note, id="loading-note")
             yield Static("first open of a big binary can take a while  \u00b7  "
@@ -2371,8 +2395,9 @@ class IdaTui(App):
     #confirm-help { height: 1; color: $text-muted; margin-top: 1; }
     LoadingScreen { align: center middle; }
     #loading-box { width: 72; height: auto; border: thick $accent;
-                   background: $panel; padding: 1 2; }
-    #loading-title { height: 1; text-style: bold; }
+                   background: $panel; padding: 1 2; align-horizontal: center; }
+    #loading-logo { width: auto; height: auto; margin-bottom: 1; }
+    #loading-title { width: 1fr; height: 1; text-style: bold; }
     #loading-note { height: auto; color: $text-muted; margin-top: 1; }
     #loading-help { height: auto; color: $text-muted; margin-top: 1; }
     BusyScreen { align: center middle; }
