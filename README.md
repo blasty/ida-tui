@@ -32,12 +32,18 @@ don't file expectations. **Use at your own risk.**
   undefined heads) as the default code view; `F5`/`Tab` drops into the
   **decompiler (pseudocode)** for the function under the cursor. Both are
   line-virtualized and page lazily over the worker.
+- A **Ghidra-style split view** (`s`): listing and pseudocode side by side, kept
+  in cursor sync — the focused pane drives and the other highlights the linked
+  region (every instruction a C line owns), following you across functions.
+  `Tab` or a click switches which pane leads.
 - Keyboard navigation: follow (`enter`), xrefs (`x`, tagged call/read/write/
   offset), rename (`n`), retype (`y`), comment (`;`), incremental search (`/`
   `?`), history (`back`), hex view (`\`), and `home`/`end`/`shift+home` line
   motions.
-- A **functions panel** (fuzzy symbol palette on `Ctrl+N`), **hex viewer**,
-  **struct editor**, and inline **make code/data/function/string** edits.
+- A **functions panel** (fuzzy symbol palette on `Ctrl+N`), a **strings browser**
+  (`"`, filterable, Enter jumps to the literal), **hex viewer**, **struct
+  editor**, and inline **make code/data/function/string** edits.
+- A **command palette** (`Ctrl+P`) with the real ida-tui actions.
 - An optional unix-socket **RPC layer** to puppeteer the live TUI from another
   process (agent-driven RE / livestreaming). See `docs/RPC.md`.
 
