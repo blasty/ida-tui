@@ -2606,6 +2606,8 @@ class IdaTui(App):
         self._pref = "listing"   # unified: the linear listing is the code view
         self._active = "listing"  # currently shown view (in split: the focused pane)
         self._split = False       # side-by-side listing + pseudocode
+        self._split_eamap: list[list[int]] = []  # split: decomp line -> instr EAs
+        self._split_ea2line: dict[int, int] = {}  # split: instr EA -> decomp line
         self._hex_pending_ea: int | None = None
         self._cur: NavEntry | None = None
         self._pending_focus_name: str | None = None  # token to land the cursor on
@@ -3165,7 +3167,8 @@ class IdaTui(App):
         if lm is not None:
             lst.load(lm, name, cursor=idx, scroll_y=max(idx - _JUMP_CONTEXT, 0))
         self._show_active()  # split branch shows both + loads the decomp
-        self._sync_split(self._active)  # link now if the decomp was already loaded
+        self._sync_split(self._active)  # crude link now
+        self._load_split_map(ea)         # region map (async) if decomp is loaded
 
     def action_hex(self) -> None:
         """Backslash: show the raw bytes of the loaded image, synced to the code
@@ -4448,6 +4451,8 @@ class IdaTui(App):
         self.query_one("#panes").set_class(False, "split")
         lst.set_link(set())
         dec.set_link(None)
+        self._split_eamap = []
+        self._split_ea2line = {}
         dec.display = lst.display = hx.display = False
         if self._active in ("listing", "disasm"):
             lst.display = True
@@ -4561,35 +4566,63 @@ class IdaTui(App):
         view.show(ea, dec.code or "", cursor=c, cursor_x=cx, scroll_y=sy, scroll_x=sx)
         self._status(f"{name}  @ {ea:#x}   [pseudocode {len(dec.code or '')} chars]{note}")
         if self._split:
-            self._sync_split(self._active)  # decomp just loaded: establish the link
+            self._sync_split(self._active)  # crude link now
+            self._load_split_map(ea)        # then upgrade to the region map
 
     def _sync_split(self, source: str) -> None:
         """Split view: highlight (+ scroll into view) the companion pane's
         location for the focused pane's cursor. The companion only gets a band +
-        scroll (its cursor never moves), so there is no echo/ping-pong. Crude
-        single-ea mapping for now; phase 3 upgrades to full ea sets."""
+        scroll (its cursor never moves), so there is no echo/ping-pong. Uses the
+        rich per-line ea map (decomp_map) when loaded, else the single marker."""
         if not self._split or self.program is None:
             return
         lst = self.query_one(ListingView)
         dec = self.query_one(DecompView)
         if source == "decomp":
             dec.set_link(None)  # the driver shows its own cursor, no band
-            ea = dec._line_ea(dec.cursor)
-            row = lst.model.ensure_ea(ea) if (ea is not None and lst.model) else None
-            if row is not None and row >= 0:
-                lst.set_link({row})
-                lst.reveal(row)
-            else:
-                lst.set_link(set())
+            eas = (self._split_eamap[dec.cursor]
+                   if 0 <= dec.cursor < len(self._split_eamap) else [])
+            if not eas:  # fallback: the single /*ea*/ marker for the line
+                one = dec._line_ea(dec.cursor)
+                eas = [one] if one is not None else []
+            rows: set[int] = set()
+            if lst.model is not None:
+                for e in eas:
+                    r = lst.model.ensure_ea(e)
+                    if r is not None and r >= 0:
+                        rows.add(r)
+            lst.set_link(rows)
+            if rows:
+                lst.reveal(min(rows))
         else:  # the listing drives
             lst.set_link(set())
             ea = lst._cursor_ea()
-            line = dec.line_for_ea(ea) if ea is not None else None
+            line = self._split_ea2line.get(ea) if ea is not None else None
+            if line is None and ea is not None:  # fallback: nearest marker
+                line = dec.line_for_ea(ea)
             if line is not None:
                 dec.set_link(line)
                 dec.reveal(line)
             else:
                 dec.set_link(None)
+
+    @work(thread=True, group="split-map")
+    def _load_split_map(self, ea: int) -> None:
+        # Fetch the rich per-line instruction map off the UI thread; sync stays
+        # on the crude single-ea fallback until it lands.
+        assert self.program is not None
+        m = self.program.decomp_map(ea)
+        self.app.call_from_thread(self._apply_split_map, ea, m)
+
+    def _apply_split_map(self, ea: int, m: list) -> None:
+        if not self._split or self._cur is None or self._cur.ea != ea:
+            return  # left split / navigated away
+        self._split_eamap = m
+        self._split_ea2line = {}
+        for line, eas in enumerate(m):
+            for e in eas:
+                self._split_ea2line.setdefault(e, line)
+        self._sync_split(self._active)  # re-link with the region map
 
     def on_decomp_view_cursor_moved(self, msg: DecompView.CursorMoved) -> None:
         if self._nav:

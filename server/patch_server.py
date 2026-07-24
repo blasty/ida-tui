@@ -582,6 +582,59 @@ def xref_types(
             rows = rows[:count]
         result.append({"query": raw, "data": rows, "next_offset": None})
     return {"result": result}
+
+
+@tool
+@idasync
+def decomp_map(
+    addr: Annotated[str, "Function address or name"],
+) -> dict:
+    """Per-pseudocode-line instruction coverage for the split view's region
+    highlight: for each line, the set of EAs the decompiler attributes to it,
+    swept across the line's columns via get_line_item. Shape:
+    {addr, lines:[{ea: primary|None, eas:[hex,...]}, ...]}."""
+    import ida_hexrays
+    import idaapi
+    try:
+        ea = int(str(addr), 16)
+    except ValueError:
+        ea = idaapi.get_name_ea(idaapi.BADADDR, str(addr).strip())
+    func = idaapi.get_func(ea)
+    if not func:
+        return {"error": f"no function at {addr}"}
+    try:
+        cfunc = ida_hexrays.decompile(func.start_ea)
+    except Exception as e:  # noqa: BLE001
+        return {"error": f"decompile failed: {e}"}
+    if cfunc is None:
+        return {"error": "decompile failed"}
+    lines = []
+    for sl in cfunc.get_pseudocode():
+        line = sl.line
+        eas, seen = [], set()
+        for x in range(len(line) + 1):
+            head = ida_hexrays.ctree_item_t()
+            item = ida_hexrays.ctree_item_t()
+            tail = ida_hexrays.ctree_item_t()
+            if not cfunc.get_line_item(line, x, False, head, item, tail):
+                continue
+            # Match the /*ea*/ marker's source (decompile_function_safe): the
+            # item's dstr() is 'EA: description'; get_ea() reports a different ea.
+            dstr = item.dstr()
+            if not dstr:
+                continue
+            parts = dstr.split(": ", 1)
+            if len(parts) != 2:
+                continue
+            try:
+                e = int(parts[0], 16)
+            except ValueError:
+                continue
+            if e not in seen:
+                seen.add(e)
+                eas.append(hex(e))
+        lines.append({"ea": eas[0] if eas else None, "eas": eas})
+    return {"addr": hex(func.start_ea), "lines": lines}
 '''
 
 SNIPPET = f"{BEGIN}\n{BODY.strip()}\n{END}\n"

@@ -807,6 +807,7 @@ class Program:
         self._disasm: dict[int, DisasmModel] = {}
         self._listings: dict[int, ListingModel] = {}  # keyed by segment start
         self._decomp: dict[int, tuple[Decompilation, int]] = {}
+        self._decomp_maps: dict[int, tuple[list[list[int]], int]] = {}  # line->ea sets
         self._name_gen = 0  # bumped on rename; invalidates stale name caches
         self._segments_cache: list[tuple[int, int, int, str]] | None = None
         self._sections: list[tuple[int, int, str]] | None = None
@@ -1244,6 +1245,27 @@ class Program:
                 return json.loads(r.read().decode("utf-8", "replace"))
         except Exception:  # noqa: BLE001 -- fall back to the truncated preview
             return None
+
+    def decomp_map(self, ea: int) -> list[list[int]]:
+        """Per-pseudocode-line instruction coverage for the split-view region
+        highlight: a list aligned to the decompiled lines, each the EAs the
+        decompiler attributes to that line (may be empty). Cached per function +
+        name generation; ``[]`` if the tool is unavailable."""
+        with self._lock:
+            hit = self._decomp_maps.get(ea)
+            gen = self._name_gen
+        if hit is not None and hit[1] == gen:
+            return hit[0]
+        try:
+            payload = self.client.call("decomp_map", addr=hex(ea))
+        except IDAToolError:
+            return []
+        lines = payload.get("lines", []) if isinstance(payload, dict) else []
+        out = [[_as_int(e) for e in (ln.get("eas") or [])]
+               for ln in lines if isinstance(ln, dict)]
+        with self._lock:
+            self._decomp_maps[ea] = (out, gen)
+        return out
 
     # -- cross-references & containing function --------------------------- #
     def function_of(self, ea: int) -> Func | None:

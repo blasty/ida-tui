@@ -350,6 +350,27 @@ async def s_split_view(c: Ctx):
     loaded = await c.wait(lambda: dec.loaded_ea == app._cur.ea, 25)
     c.check("split loads the pseudocode alongside the listing", loaded,
             f"loaded={dec.loaded_ea} cur={app._cur.ea if app._cur else None}")
+    # phase 3: the rich per-line instruction map (decomp_map tool, run on the
+    # pilot's real worker) — verify it returns, aligns with the markers, and
+    # bands a whole region for a multi-instruction C line.
+    m = app.program.decomp_map(app._cur.ea)
+    c.check("decomp_map returns per-line ea sets", len(m) > 5, f"lines={len(m)}")
+    aligned = sum(1 for i in range(min(len(m), len(dec._line_eas)))
+                  if m[i] and dec._line_eas[i] is not None
+                  and dec._line_eas[i] in m[i])
+    c.check("decomp_map aligns with the pseudocode markers", aligned >= 3,
+            f"aligned={aligned}/{len(dec._line_eas)}")
+    multi = next((i for i, eas in enumerate(m) if len(eas) > 1), None)
+    if multi is not None:
+        app._split_eamap = m
+        dec.cursor = multi
+        app._sync_split("decomp")
+        c.check("a multi-instruction C line bands a region (>1 listing row)",
+                len(lst._link_rows) > 1,
+                f"line={multi} eas={len(m[multi])} rows={sorted(lst._link_rows)[:8]}")
+    else:
+        c.check("a multi-instruction C line bands a region (>1 listing row)",
+                True, "no multi-instruction line in this function (skipped)")
     # listing drives: move it, the decomp band must track the covering C line
     lst.focus()
     for _ in range(6):

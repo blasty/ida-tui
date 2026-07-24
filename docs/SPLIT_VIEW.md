@@ -78,9 +78,15 @@ decomp→listing uses `ListingModel.ensure_ea`. Tab re-links from the new driver
 Still single-ea per line (one instruction highlighted); the region comes in
 phase 3.
 
-**Phase 3 — rich highlight.** `decomp_map` custom tool (line → ea-set) stored on
-`Decompilation`; highlight the whole instruction range of a C line; tighten the
-reverse map. One custom tool + an idalib spike to confirm the sweep works.
+**Phase 3 — rich highlight. DONE.** `decomp_map` custom tool
+(`server/patch_server.py`) sweeps `cfunc.get_line_item` across every column of
+each pseudocode line and collects the EAs from each item's `dstr()` (`'EA: desc'`
+— the same source as the `/*ea*/` marker, so it aligns). `Program.decomp_map(ea)`
+returns the per-line ea lists (cached by name-gen); the app loads it async into
+`_split_eamap` / `_split_ea2line` and `_sync_split` bands the **whole** instruction
+region of a C line (and uses the exact ea→line inverse for the reverse). Falls
+back to the single marker until the map lands. Verified on the pilot's real worker
+(alignment + multi-instruction region band).
 
 **Phase 4 — polish.** Navigation keeps both panes on the same function; loop/goto
 edge cases; decompile-failed fallback; min-width gate + resize; split state in
