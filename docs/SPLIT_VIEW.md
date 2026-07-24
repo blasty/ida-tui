@@ -70,9 +70,13 @@ Entering split loads listing + decomp for the current function; exiting returns 
 the focused pane. `Tab` in split switches the focused pane (single-view `Tab`
 still toggles disasm/pseudocode). No new tools. *← this doc's current target.*
 
-**Phase 2 — crude sync (MVP).** Wire both `cursor_moved` handlers using the
-existing single-ea map + `_decomp_line_for`. Subtle linked-row highlight
-(`_S_LINK`) + scroll-follow. Feels like Ghidra for most lines. No new tools.
+**Phase 2 — crude sync (MVP). DONE.** Both `cursor_moved` handlers wired via
+`_sync_split`: the focused pane drives; the companion gets a subtle `_S_LINK`
+band + scroll-into-view (its cursor never moves, so there's no echo — no guard
+needed). listing→decomp uses `DecompView.line_for_ea` (largest marker ≤ ea);
+decomp→listing uses `ListingModel.ensure_ea`. Tab re-links from the new driver.
+Still single-ea per line (one instruction highlighted); the region comes in
+phase 3.
 
 **Phase 3 — rich highlight.** `decomp_map` custom tool (line → ea-set) stored on
 `Decompilation`; highlight the whole instruction range of a C line; tighten the

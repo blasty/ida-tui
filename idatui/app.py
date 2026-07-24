@@ -82,6 +82,7 @@ _S_LINENO_CUR = Style(color="grey66", bold=True)  # gutter on the cursor line
 _S_DECOMP_SPIN = Style(color="#b58900", bold=True)   # 'decompiling' spinner glyph
 _S_DECOMP_WAIT = Style(color="grey58", italic=True)  # 'decompiling' label
 _S_DECOMP_DOTS = Style(color="grey37")               # trailing ellipsis
+_S_LINK = Style(bgcolor="#243447")  # split view: rows linked to the other pane's cursor
 
 # Hex-Rays appends a `/*0xEA*/` address marker to each pseudocode line (we fetch
 # with include_addresses so we have a per-line anchor). Matched here to extract
@@ -1000,6 +1001,7 @@ class ListingView(SearchMixin, NavMixin, ColumnCursor, ScrollView, can_focus=Tru
         self._op_w = 0          # char width of the hex-bytes field (excl. gap)
         self._search_loading = False
         self._search_pending: list = []  # done-callbacks awaiting the load
+        self._link_rows: set[int] = set()  # split-view: linked instruction rows
 
     # -- text helpers ------------------------------------------------------ #
     def _head(self, idx: int) -> Head | None:
@@ -1253,6 +1255,9 @@ class ListingView(SearchMixin, NavMixin, ColumnCursor, ScrollView, can_focus=Tru
             else:
                 segs.append(Segment(h.text, _S_UNK))
             strip = Strip(segs)
+        linked = idx in self._link_rows
+        if linked:
+            strip = strip.apply_style(_S_LINK)  # split-view companion band
         plain = self._line_plain(idx) if (self._hl_word or idx == self.cursor) else None
         if idx in self._ranges:
             strip = _overlay_ranges(strip, self._ranges[idx], self._match_style(idx))
@@ -1262,7 +1267,21 @@ class ListingView(SearchMixin, NavMixin, ColumnCursor, ScrollView, can_focus=Tru
                 strip = _overlay_ranges(strip, occ, _S_WORD)
         if idx == self.cursor:
             strip = _cursor_decorate(strip, plain or "", self.cursor_x)
-        return strip.adjust_cell_length(width, _S_INSN)
+        return strip.adjust_cell_length(width, _S_LINK if linked else _S_INSN)
+
+    # -- split-view link highlight ---------------------------------------- #
+    def set_link(self, rows) -> None:
+        rows = set(rows) if rows else set()
+        if rows != self._link_rows:
+            self._link_rows = rows
+            self.refresh()
+
+    def reveal(self, row: int) -> None:
+        """Scroll ``row`` into view without moving the cursor (companion pane)."""
+        height = self._visible_height()
+        top = round(self.scroll_offset.y)
+        if row < top or row >= top + height:
+            self.scroll_to(y=max(row - height // 3, 0), animate=False)
 
     # -- navigation -------------------------------------------------------- #
     def _visible_height(self) -> int:
@@ -1418,6 +1437,7 @@ class DecompView(SearchMixin, NavMixin, ColumnCursor, ScrollView, can_focus=True
         self._texts: list[str] = []
         self._gutter = 0  # line-number gutter width (cells)
         self._line_eas: list[int | None] = []  # per-line address (marker stripped)
+        self._link_line: int | None = None  # split-view: linked pseudocode line
         self._term = ""
         self._matches: list[int] = []
         self._ranges: dict[int, list[tuple[int, int]]] = {}
@@ -1540,7 +1560,10 @@ class DecompView(SearchMixin, NavMixin, ColumnCursor, ScrollView, can_focus=True
                 return Strip([Segment(" " * gw, _S_LINENO)]).adjust_cell_length(width)
             return Strip.blank(width)
         x = round(self.scroll_offset.x)
+        linked = idx == self._link_line
         base = self._strips[idx]
+        if linked:
+            base = base.apply_style(_S_LINK)  # split-view companion band
         if idx in self._ranges:
             base = _overlay_ranges(base, self._ranges[idx], self._match_style(idx))
         if self._hl_word:
@@ -1550,12 +1573,37 @@ class DecompView(SearchMixin, NavMixin, ColumnCursor, ScrollView, can_focus=True
         if idx == self.cursor:
             base = _cursor_decorate(base, self._texts[idx], self.cursor_x)
         code_w = max(width - gw, 0)
-        code = base.crop(x, x + code_w).adjust_cell_length(code_w)
+        code = base.crop(x, x + code_w).adjust_cell_length(
+            code_w, _S_LINK if linked else None)
         if gw <= 0:
             return code
         style = _S_LINENO_CUR if idx == self.cursor else _S_LINENO
+        if linked:
+            style = style + _S_LINK
         gutter = Strip([Segment(f"{idx + 1:>{gw - 1}} ", style)])
         return Strip.join([gutter, code]).adjust_cell_length(width)
+
+    # -- split-view link highlight ---------------------------------------- #
+    def set_link(self, line: int | None) -> None:
+        if line != self._link_line:
+            self._link_line = line
+            self.refresh()
+
+    def reveal(self, line: int) -> None:
+        """Scroll ``line`` into view without moving the cursor (companion pane)."""
+        height = self._visible_height()
+        top = round(self.scroll_offset.y)
+        if line < top or line >= top + height:
+            self.scroll_to(y=max(line - height // 3, 0), animate=False)
+
+    def line_for_ea(self, ea: int) -> int | None:
+        """The pseudocode line whose marker ea is the largest <= ``ea`` (the C
+        line that best covers an instruction address)."""
+        best, best_ea = None, -1
+        for i, e in enumerate(self._line_eas):
+            if e is not None and best_ea < e <= ea:
+                best, best_ea = i, e
+        return best
 
     # -- navigation (mirrors DisasmView) ---------------------------------- #
     def _visible_height(self) -> int:
@@ -2986,6 +3034,7 @@ class IdaTui(App):
             self._active = "decomp" if self._active == "listing" else "listing"
             (self.query_one(DecompView) if self._active == "decomp"
              else self.query_one(ListingView)).focus()
+            self._sync_split(self._active)  # re-link from the new driver
             self._status_for_cur("split")
             return
         if self._active == "hex":
@@ -3116,6 +3165,7 @@ class IdaTui(App):
         if lm is not None:
             lst.load(lm, name, cursor=idx, scroll_y=max(idx - _JUMP_CONTEXT, 0))
         self._show_active()  # split branch shows both + loads the decomp
+        self._sync_split(self._active)  # link now if the decomp was already loaded
 
     def action_hex(self) -> None:
         """Backslash: show the raw bytes of the loaded image, synced to the code
@@ -4396,6 +4446,8 @@ class IdaTui(App):
             return
         self._split = False  # a single-view target (hex, etc.) leaves split
         self.query_one("#panes").set_class(False, "split")
+        lst.set_link(set())
+        dec.set_link(None)
         dec.display = lst.display = hx.display = False
         if self._active in ("listing", "disasm"):
             lst.display = True
@@ -4508,11 +4560,43 @@ class IdaTui(App):
         note = "  (truncated)" if dec.truncated else ""
         view.show(ea, dec.code or "", cursor=c, cursor_x=cx, scroll_y=sy, scroll_x=sx)
         self._status(f"{name}  @ {ea:#x}   [pseudocode {len(dec.code or '')} chars]{note}")
+        if self._split:
+            self._sync_split(self._active)  # decomp just loaded: establish the link
+
+    def _sync_split(self, source: str) -> None:
+        """Split view: highlight (+ scroll into view) the companion pane's
+        location for the focused pane's cursor. The companion only gets a band +
+        scroll (its cursor never moves), so there is no echo/ping-pong. Crude
+        single-ea mapping for now; phase 3 upgrades to full ea sets."""
+        if not self._split or self.program is None:
+            return
+        lst = self.query_one(ListingView)
+        dec = self.query_one(DecompView)
+        if source == "decomp":
+            dec.set_link(None)  # the driver shows its own cursor, no band
+            ea = dec._line_ea(dec.cursor)
+            row = lst.model.ensure_ea(ea) if (ea is not None and lst.model) else None
+            if row is not None and row >= 0:
+                lst.set_link({row})
+                lst.reveal(row)
+            else:
+                lst.set_link(set())
+        else:  # the listing drives
+            lst.set_link(set())
+            ea = lst._cursor_ea()
+            line = dec.line_for_ea(ea) if ea is not None else None
+            if line is not None:
+                dec.set_link(line)
+                dec.reveal(line)
+            else:
+                dec.set_link(None)
 
     def on_decomp_view_cursor_moved(self, msg: DecompView.CursorMoved) -> None:
         if self._nav:
             self._nav[-1].dec_cursor = msg.index
             self._nav[-1].dec_cursor_x = self.query_one(DecompView).cursor_x
+        if self._split and self._active == "decomp":
+            self._sync_split("decomp")
         if self._cur is not None:
             loc = f" @ {msg.ea:#x}" if msg.ea is not None else ""
             self._status(f"{self._cur.name}{loc}   [pseudocode line {msg.index}]")
@@ -4523,6 +4607,8 @@ class IdaTui(App):
             self._nav[-1].cursor_x = self.query_one(ListingView).cursor_x
             if msg.index >= 0:
                 self._nav[-1].scroll_y = round(self.query_one(ListingView).scroll_offset.y)
+        if self._split and self._active == "listing":
+            self._sync_split("listing")
         ea = msg.ea
         if ea is not None:
             sec = self.program.section_of(ea) if self.program else None

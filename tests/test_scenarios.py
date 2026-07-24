@@ -350,10 +350,43 @@ async def s_split_view(c: Ctx):
     loaded = await c.wait(lambda: dec.loaded_ea == app._cur.ea, 25)
     c.check("split loads the pseudocode alongside the listing", loaded,
             f"loaded={dec.loaded_ea} cur={app._cur.ea if app._cur else None}")
+    # listing drives: move it, the decomp band must track the covering C line
+    lst.focus()
+    for _ in range(6):
+        await c.press("j")
+    await c.pause(0.2)
+    lea = lst._cursor_ea()
+    dl = dec._link_line
+    c.check("listing cursor links the covering pseudocode line",
+            dl is not None and lea is not None and dec._line_eas[dl] is not None
+            and dec._line_eas[dl] <= lea,
+            f"link_line={dl} lea={hex(lea) if lea else None}")
     await c.press("tab")
     await c.pause(0.1)
     c.check("Tab in split focuses the pseudocode pane", app._active == "decomp",
             f"active={app._active}")
+    # decomp drives: put the cursor on an addressed pseudocode line (past the
+    # variable decls); the listing band must track the covering instruction row.
+    target = next((i for i, e in enumerate(dec._line_eas) if e is not None), None)
+    c.check("pseudocode has addressed lines", target is not None,
+            "no /*0xEA*/ markers in the pseudocode")
+    if target is not None:
+        dec.cursor = target
+        app._sync_split("decomp")
+        await c.pause(0.1)
+        want = lst.model.ensure_ea(dec._line_eas[target])
+        c.check("decomp cursor links the instruction row in the listing",
+                want in lst._link_rows,
+                f"link_rows={sorted(lst._link_rows)[:6]} want={want}")
+        # and that linked row actually paints a background band (base rows have
+        # no bg; `want` is a deep code row, never the listing's own cursor row)
+        lst.reveal(want)
+        await c.pause(0.05)
+        y = want - round(lst.scroll_offset.y)
+        banded = (0 <= y < lst.size.height and any(
+            s.style and s.style.bgcolor is not None for s in lst.render_line(y)))
+        c.check("the linked instruction row renders a highlight band", banded,
+                f"y={y} cursor_row={lst.cursor}")
     await c.press("tab")
     await c.pause(0.1)
     c.check("Tab again focuses the listing pane", app._active == "listing",
@@ -363,6 +396,9 @@ async def s_split_view(c: Ctx):
                         and not dec.display, 10)
     c.check("'s' exits split back to a single view", gone,
             f"split={app._split} lst={lst.display} dec={dec.display}")
+    c.check("exiting split clears the link bands",
+            not lst._link_rows and dec._link_line is None,
+            f"rows={lst._link_rows} line={dec._link_line}")
 
 
 @scenario("decomp_fallback")
