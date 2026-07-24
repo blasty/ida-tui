@@ -315,6 +315,29 @@ async def s_palette(c: Ctx):
     c.check("Esc closes the palette", not isinstance(app.screen, SymbolPalette))
 
 
+@scenario("command_palette")
+async def s_command_palette(c: Ctx):
+    app = c.app
+    await c.open_biggest("listing")
+    await c.press("ctrl+p")
+    opened = await c.wait(
+        lambda: type(app.screen).__name__ == "CommandPalette", 10)
+    c.check("Ctrl+P opens the command palette", opened,
+            f"screen={type(app.screen).__name__}")
+    if not opened:
+        return
+    inp = app.screen.query_one(Input)
+    inp.value = "hex"  # filter to the 'Hex view' command
+    await c.pause(0.5)  # let the async search + option list settle
+    await c.press("enter")
+    landed = await c.wait(lambda: app._active == "hex", 10)
+    c.check("a palette command executes (Hex view opens)", landed,
+            f"active={app._active}")
+    if landed:
+        await c.press("backslash")  # leave hex
+        await c.wait(lambda: app._active != "hex", 5)
+
+
 @scenario("decomp_fallback")
 async def s_fallback(c: Ctx):
     app = c.app

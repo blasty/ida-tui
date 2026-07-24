@@ -28,6 +28,7 @@ from rich.text import Text
 from textual import work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
+from textual.command import DiscoveryHit, Hit, Provider
 from textual.containers import Horizontal, Vertical
 from textual.geometry import Region, Size
 from textual.message import Message
@@ -2342,7 +2343,71 @@ class StructEditor(ModalScreen):
 # --------------------------------------------------------------------------- #
 # The app
 # --------------------------------------------------------------------------- #
+class IdaCommands(Provider):
+    """Fills the Ctrl+P command palette with real ida-tui actions instead of the
+    stock Textual system commands (change theme / take screenshot / …).
+
+    App-level actions run directly; cursor-scoped ones (rename/xrefs/comment/…)
+    are dispatched to the active code view via ``IdaTui._palette_action``."""
+
+    def _commands(self):
+        app = self.app
+        va = app._palette_action  # dispatch to the focused code view
+        return (
+            ("Goto address / symbol…", "jump to an address or name (g)",
+             app.action_goto),
+            ("Find symbol…", "fuzzy function finder (Ctrl+N)", app.action_symbols),
+            ("Follow symbol under cursor", "jump to the referenced symbol (Enter)",
+             lambda: va("follow")),
+            ("Show xrefs to symbol", "cross-references to the cursor symbol (x)",
+             lambda: va("xrefs")),
+            ("Back", "navigation history (Esc)", app.action_back),
+            ("Toggle disassembly / pseudocode", "decompile / listing (F5, Tab)",
+             app.action_toggle_view),
+            ("Continuous listing here", "flat segment listing (L)",
+             app.action_continuous_here),
+            ("Hex view", "raw bytes at the cursor (\\)", app.action_hex),
+            ("Rename symbol…", "rename the symbol under the cursor (n)",
+             lambda: va("rename")),
+            ("Set type / prototype…", "retype the symbol under the cursor (y)",
+             lambda: va("retype")),
+            ("Add comment…", "comment at the cursor (;)", lambda: va("comment")),
+            ("Define code", "make code at the cursor (c)", lambda: va("define_code")),
+            ("Create function", "define a function at the cursor (p)",
+             lambda: va("define_func")),
+            ("Make data", "define a data item at the cursor (d)",
+             lambda: va("make_data")),
+            ("Make string", "define a string at the cursor (a)",
+             lambda: va("make_string")),
+            ("Undefine", "undefine the item at the cursor (u)",
+             lambda: va("undefine")),
+            ("Toggle opcode bytes", "cycle the opcode-bytes column (o)",
+             lambda: va("toggle_opcodes")),
+            ("Structs / types editor", "view + edit local types (Ctrl+T)",
+             app.action_structs),
+            ("Filter functions…", "glob-filter the function list (/)",
+             app.action_filter),
+            ("Toggle names pane", "function-list sidebar (Ctrl+B)",
+             app.action_toggle_functions),
+            ("Save database (.i64)", "persist changes (Ctrl+S)", app.action_save),
+            ("Quit", "exit ida-tui (q)", app.action_quit),
+        )
+
+    async def discover(self):
+        for title, help_text, cb in self._commands():
+            yield DiscoveryHit(title, cb, help=help_text)
+
+    async def search(self, query: str):
+        matcher = self.matcher(query)
+        for title, help_text, cb in self._commands():
+            score = matcher.match(title)
+            if score > 0:
+                yield Hit(score, matcher.highlight(title), cb, help=help_text)
+
+
 class IdaTui(App):
+    COMMANDS = {IdaCommands}  # replace the stock system-commands palette
+
     CSS = """
     Screen { layout: vertical; }
     #panes { height: 1fr; }
@@ -4060,6 +4125,20 @@ class IdaTui(App):
         if self._active == "decomp":
             return self.query_one(DecompView)
         return None
+
+    def _palette_action(self, name: str) -> None:
+        """Run a cursor-scoped code-view action (rename/xrefs/follow/…) picked from
+        the command palette against the active code view."""
+        view = self._active_code_view()
+        if view is None:
+            self._status("open a function first")
+            return
+        view.focus()
+        fn = getattr(view, f"action_{name}", None)
+        if fn is None:
+            self._status(f"'{name}' isn't available in this view")
+            return
+        fn()
 
     def action_continuous_here(self) -> None:
         """'L': open the continuous segment listing at the cursor — one long
