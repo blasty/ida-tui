@@ -59,9 +59,29 @@ def recv(sock: socket.socket):
 # --------------------------------------------------------------------------- #
 # worker
 # --------------------------------------------------------------------------- #
+def _ensure_tools_injected() -> None:
+    """Inject idatui's custom tools (heads/read_raw/resolve_names/func_types/...)
+    into the installed ida_pro_mcp, idempotently, so the worker is self-sufficient
+    without spawn.sh having run server/patch_server.py first. Must run BEFORE
+    ida_pro_mcp.ida_mcp is imported (the injected code lives in api_types.py)."""
+    import importlib.util
+    repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    patch = os.path.join(repo, "server", "patch_server.py")
+    if not os.path.exists(patch):
+        return
+    try:
+        spec = importlib.util.spec_from_file_location("_idatui_patch", patch)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)  # IDA-free; just defines + patches api_types
+        mod.main()
+    except Exception as e:  # noqa: BLE001 -- tools may already be present
+        sys.stderr.write(f"idatui: tool injection skipped: {e}\n")
+
+
 def _open_and_register(binpath: str):
     """Open the DB (main thread) then import ida-pro-mcp so every @tool registers
     against this live database. Returns (tools_dict, module_name, save_fn)."""
+    _ensure_tools_injected()  # before any ida_pro_mcp import
     import idapro
     idapro.enable_console_messages(False)
     if idapro.open_database(binpath, run_auto_analysis=True):  # nonzero == failure
