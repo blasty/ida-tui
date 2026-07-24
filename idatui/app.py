@@ -4626,11 +4626,26 @@ class IdaTui(App):
             at = f" @ {ea:#x}" if ea is not None else ""
             rel = f" \u2194 {n} insn" if n else ""
             self._status(f"{self._cur.name}{at}   "
-                         f"[split \u00b7 pseudocode line {dec.cursor + 1}{rel}]")
+                         f"[split \u00b7 pseudocode line {dec.cursor + 1}{rel}]"
+                         f"   (Tab/click: drive listing)")
         else:
             ea = self.query_one(ListingView)._cursor_ea()
             at = f" @ {ea:#x}" if ea is not None else ""
-            self._status(f"{self._cur.name}{at}   [split \u00b7 listing]")
+            self._status(f"{self._cur.name}{at}   [split \u00b7 listing]"
+                         f"   (Tab/click: drive pseudocode)")
+
+    def on_descendant_focus(self, event) -> None:  # type: ignore[no-untyped-def]
+        """In split, focusing a pane (Tab or a mouse click) makes it the leading/
+        driver pane, so the sync direction follows where you're actually working."""
+        if not self._split:
+            return
+        w = event.control
+        new = ("decomp" if isinstance(w, DecompView)
+               else "listing" if isinstance(w, ListingView) else None)
+        if new is not None and new != self._active:
+            self._active = new
+            self._sync_split(new)
+            self._split_status()
 
     @work(thread=True, group="split-map")
     def _load_split_map(self, ea: int) -> None:

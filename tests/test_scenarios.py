@@ -415,6 +415,13 @@ async def s_split_view(c: Ctx):
     await c.pause(0.1)
     c.check("Tab again focuses the listing pane", app._active == "listing",
             f"active={app._active}")
+    # a mouse click on the other pane also makes it the driver (not just Tab)
+    await c.pilot.click(DecompView, offset=(10, 5))
+    await c.pause(0.15)
+    c.check("clicking the pseudocode pane makes it the driver",
+            app._active == "decomp", f"active={app._active}")
+    await c.press("tab")  # restore listing as the driver
+    await c.pause(0.1)
     # navigation in split keeps BOTH panes on the (new) function
     nf = c.find_func(lambda f: f.addr != app._cur.ea and f.size > 80)
     if nf is not None:
