@@ -338,6 +338,32 @@ async def s_command_palette(c: Ctx):
         await c.wait(lambda: app._active != "hex", 5)
 
 
+@scenario("split_view")
+async def s_split_view(c: Ctx):
+    app, lst, dec = c.app, c.lst, c.dec
+    await c.open_biggest("listing")
+    await c.press("s")
+    shown = await c.wait(lambda: app._split and lst.display and dec.display, 20)
+    c.check("'s' enters split view (both panes shown)", shown,
+            f"split={app._split} lst={lst.display} dec={dec.display}")
+    loaded = await c.wait(lambda: dec.loaded_ea == app._cur.ea, 25)
+    c.check("split loads the pseudocode alongside the listing", loaded,
+            f"loaded={dec.loaded_ea} cur={app._cur.ea if app._cur else None}")
+    await c.press("tab")
+    await c.pause(0.1)
+    c.check("Tab in split focuses the pseudocode pane", app._active == "decomp",
+            f"active={app._active}")
+    await c.press("tab")
+    await c.pause(0.1)
+    c.check("Tab again focuses the listing pane", app._active == "listing",
+            f"active={app._active}")
+    await c.press("s")
+    gone = await c.wait(lambda: not app._split and lst.display
+                        and not dec.display, 10)
+    c.check("'s' exits split back to a single view", gone,
+            f"split={app._split} lst={lst.display} dec={dec.display}")
+
+
 @scenario("decomp_fallback")
 async def s_fallback(c: Ctx):
     app = c.app
@@ -485,8 +511,9 @@ async def s_disasm_nav(c: Ctx):
     await c.wait(lambda: app._clipboard == cur_line, 10)
     c.check("Ctrl+Y copies the current code line to the clipboard",
             bool(cur_line) and app._clipboard == cur_line, f"clip={app._clipboard!r}")
-    # goto-bottom must not hang on a huge function.
-    await c.press("end")
+    # goto-bottom must not hang on a huge function (ctrl+end; plain 'end' now
+    # moves the cursor to end-of-line).
+    await c.press("ctrl+end")
     await c.pause(0.05)
     c.check("goto-bottom lands near end", view.cursor >= view.total - 1,
             f"cursor={view.cursor}/{view.total}")

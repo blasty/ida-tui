@@ -2396,6 +2396,8 @@ class IdaCommands(Provider):
             ("Continuous listing here", "flat segment listing (L)",
              app.action_continuous_here),
             ("Hex view", "raw bytes at the cursor (\\)", app.action_hex),
+            ("Split view (listing ⇄ pseudocode)",
+             "side-by-side synced views (s)", app.action_toggle_split),
             ("Rename symbol…", "rename the symbol under the cursor (n)",
              lambda: va("rename")),
             ("Set type / prototype…", "retype the symbol under the cursor (y)",
@@ -2446,6 +2448,7 @@ class IdaTui(App):
     DisasmView { width: 1fr; padding: 0 1; }
     DecompView { width: 1fr; }
     ListingView { width: 1fr; padding: 0 1; }
+    #panes.split ListingView { border-right: tall $panel-lighten-2; }
     HexView { width: 1fr; padding: 0 1; }
     #search {
         height: 1; border: none; padding: 0 1;
@@ -2523,6 +2526,7 @@ class IdaTui(App):
         Binding("ctrl+n", "symbols", "Symbols"),
         Binding("ctrl+t", "structs", "Structs"),
         Binding("backslash", "hex", "Hex"),
+        Binding("s", "toggle_split", "Split", show=False),
         Binding("g", "goto", "Goto"),
         Binding("slash", "filter", "Filter", show=False),
         Binding("ctrl+b", "toggle_functions", "Names", show=False),
@@ -2552,7 +2556,8 @@ class IdaTui(App):
         self._sort_col = 0        # 0=addr, 1=name, 2=size
         self._sort_reverse = False
         self._pref = "listing"   # unified: the linear listing is the code view
-        self._active = "listing"  # currently shown view
+        self._active = "listing"  # currently shown view (in split: the focused pane)
+        self._split = False       # side-by-side listing + pseudocode
         self._hex_pending_ea: int | None = None
         self._cur: NavEntry | None = None
         self._pending_focus_name: str | None = None  # token to land the cursor on
@@ -2976,6 +2981,13 @@ class IdaTui(App):
         the hex view back to the preferred code view)."""
         if self._cur is None:
             return
+        if self._split:
+            # In split mode Tab/F5 just moves focus between the two panes.
+            self._active = "decomp" if self._active == "listing" else "listing"
+            (self.query_one(DecompView) if self._active == "decomp"
+             else self.query_one(ListingView)).focus()
+            self._status_for_cur("split")
+            return
         if self._active == "hex":
             self._active = self._code_mode()
             self._show_active()
@@ -3073,6 +3085,35 @@ class IdaTui(App):
         self._cur = entry
         self._active = "decomp"
         self._show_active()
+
+    def action_toggle_split(self) -> None:
+        """Toggle the side-by-side listing ⇄ pseudocode view (Ghidra-style)."""
+        if self._cur is None or self.program is None:
+            self._status("open a function first")
+            return
+        self._split = not self._split
+        if self._active not in ("listing", "decomp"):
+            self._active = "listing"
+        if self._split:
+            self._enter_split(self._cur.ea, self._cur.name)
+        else:
+            self._show_active()
+
+    @work(thread=True, group="split")
+    def _enter_split(self, ea: int, name: str) -> None:
+        # Load the listing for the current function (bg) then reveal both panes.
+        assert self.program is not None
+        lm = self.program.listing(ea)
+        idx = max(lm.ensure_ea(ea), 0) if lm is not None else 0
+        self.app.call_from_thread(self._apply_enter_split, lm, ea, name, idx)
+
+    def _apply_enter_split(self, lm, ea: int, name: str, idx: int) -> None:  # type: ignore[no-untyped-def]
+        if not self._split:
+            return  # toggled back off before the listing finished loading
+        lst = self.query_one(ListingView)
+        if lm is not None:
+            lst.load(lm, name, cursor=idx, scroll_y=max(idx - _JUMP_CONTEXT, 0))
+        self._show_active()  # split branch shows both + loads the decomp
 
     def action_hex(self) -> None:
         """Backslash: show the raw bytes of the loaded image, synced to the code
@@ -4337,6 +4378,22 @@ class IdaTui(App):
         # Don't steal focus from an open prompt (search/rename/…) — a late async
         # navigation completing here would otherwise pull it into the code view.
         grab = not self._prompt_active()
+        if self._split and self._active in ("listing", "decomp"):
+            # Side-by-side: listing (left) + pseudocode (right), one focused.
+            hx.display = False
+            lst.display = dec.display = True
+            self.query_one("#panes").set_class(True, "split")
+            if self._cur is not None and dec.loaded_ea != self._cur.ea:
+                dec.loading = True
+                self._load_decomp(self._cur.ea, self._cur.name)
+            else:
+                dec.loading = False
+            if grab:
+                (dec if self._active == "decomp" else lst).focus()
+            self._status_for_cur("split")
+            return
+        self._split = False  # a single-view target (hex, etc.) leaves split
+        self.query_one("#panes").set_class(False, "split")
         dec.display = lst.display = hx.display = False
         if self._active in ("listing", "disasm"):
             lst.display = True
