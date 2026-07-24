@@ -310,7 +310,7 @@ def disassembly(app, target=None, max_lines: int = 2000) -> dict[str, Any]:
 
 
 def _xref_dicts(xs, limit: int) -> list[dict[str, Any]]:
-    return [{"frm": x.frm, "to": x.to, "type": x.type,
+    return [{"frm": x.frm, "to": x.to, "type": x.type, "kind": x.kind,
              "fn_addr": x.fn_addr, "fn_name": x.fn_name} for x in xs[:limit]]
 
 

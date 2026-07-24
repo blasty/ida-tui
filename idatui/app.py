@@ -3164,7 +3164,8 @@ class IdaTui(App):
                 # not inside a function: name the section it lives in (a GOT/reloc
                 # data slot or a loose thunk) instead of a bare '?'.
                 loc = self.program.section_of(x.frm) or "<no seg>"
-            items.append((x.frm, f"{x.frm:08X}  {loc:<26}  [{x.type}]"))
+            kind = x.kind or x.type or "?"
+            items.append((x.frm, f"{x.frm:08X}  {kind:<6}  {loc}"))
         preselect = self._xref_preselect(xr, here_ea, here_end)
         self.app.call_from_thread(self._present_xrefs, label, items, focus, preselect)
 

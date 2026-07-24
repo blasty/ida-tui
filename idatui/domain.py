@@ -127,9 +127,10 @@ class Ref:
 class Xref:
     frm: int              # the referencing address
     to: int | None        # the referenced address
-    type: str             # "code" | "data" | ...
+    type: str             # coarse: "code" | "data"
     fn_name: str | None   # function containing `frm`
     fn_addr: int | None
+    kind: str | None = None  # fine: call/jump/flow/read/write/offset/text/info
 
 
 @dataclass(frozen=True)
@@ -1260,11 +1261,14 @@ class Program:
         return _parse_xrefs(payload)
 
     def xrefs_to(self, ea: int, limit: int = 2000) -> list[Xref]:
-        payload = self.client.call(
-            "xref_query",
-            queries=[{"addr": hex(ea), "direction": "to", "include_fn": True,
-                      "dedup": True, "count": limit}],
-        )
+        q = [{"addr": hex(ea), "direction": "to", "include_fn": True,
+              "dedup": True, "count": limit}]
+        try:
+            # xref_types adds a fine-grained `kind` (call/read/write/...) for the
+            # xref dialog; fall back to xref_query (code/data only) if absent.
+            payload = self.client.call("xref_types", queries=q)
+        except IDAToolError:
+            payload = self.client.call("xref_query", queries=q)
         return _parse_xrefs(payload)
 
     # -- address resolution ------------------------------------------------ #
@@ -1365,6 +1369,7 @@ def _parse_xrefs(payload) -> list[Xref]:
             type=d.get("type", "?"),
             fn_name=fn.get("name"),
             fn_addr=_as_int(fn["addr"]) if fn.get("addr") else None,
+            kind=d.get("kind"),
         ))
     return out
 

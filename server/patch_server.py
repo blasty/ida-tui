@@ -503,6 +503,85 @@ def heads(
         ea = _advance(ea)
     cursor = {"next": hex(ea)} if more else {"done": True}
     return {"addr": str(addr), "heads": rows, "cursor": cursor}
+
+
+@tool
+@idasync
+def xref_types(
+    queries: Annotated[list, "[{addr, direction:'to'|'from'|'both', include_fn, dedup, count}]"],
+) -> dict:
+    """Like xref_query, but every row carries a fine-grained ``kind`` derived from
+    the IDA xref type \u2014 call/jump/flow for code, read/write/offset/text/info for
+    data \u2014 alongside the coarse ``type`` (code/data). Feeds the xref dialog's
+    r/w/call badges. Same query/envelope shape as xref_query."""
+    import idaapi, idautils, ida_funcs, ida_bytes, ida_xref
+    code_kind = {ida_xref.fl_CF: "call", ida_xref.fl_CN: "call",
+                 ida_xref.fl_JF: "jump", ida_xref.fl_JN: "jump",
+                 ida_xref.fl_F: "flow"}
+    data_kind = {ida_xref.dr_O: "offset", ida_xref.dr_W: "write",
+                 ida_xref.dr_R: "read", ida_xref.dr_T: "text", ida_xref.dr_I: "info"}
+
+    def _kind(xr):
+        table = code_kind if xr.iscode else data_kind
+        return table.get(xr.type, "code" if xr.iscode else "data")
+
+    def _fn(ea):
+        f = ida_funcs.get_func(ea)
+        if not f:
+            return None
+        return {"addr": hex(f.start_ea), "name": ida_funcs.get_func_name(f.start_ea)}
+
+    def _resolve(raw):
+        raw = str(raw).strip()
+        try:
+            return int(raw, 16)  # handles '0x2490' and '2490'
+        except ValueError:
+            return idaapi.get_name_ea(idaapi.BADADDR, raw)
+
+    qs = queries if isinstance(queries, list) else [queries]
+    result = []
+    for q in qs:
+        q = q if isinstance(q, dict) else {"addr": q}
+        raw = str(q.get("addr", "")).strip()
+        direction = str(q.get("direction", "to") or "to").lower()
+        include_fn = bool(q.get("include_fn", True))
+        dedup = bool(q.get("dedup", True))
+        try:
+            count = int(q.get("count", 2000) or 2000)
+        except (TypeError, ValueError):
+            count = 2000
+        target = _resolve(raw)
+        rows = []
+        if target is not None and target != idaapi.BADADDR and ida_bytes.is_mapped(target):
+            if direction in ("to", "both"):
+                for xr in idautils.XrefsTo(target, 0):
+                    row = {"direction": "to", "addr": hex(xr.frm), "from": hex(xr.frm),
+                           "to": hex(target), "type": "code" if xr.iscode else "data",
+                           "kind": _kind(xr)}
+                    if include_fn:
+                        row["fn"] = _fn(xr.frm)
+                    rows.append(row)
+            if direction in ("from", "both"):
+                for xr in idautils.XrefsFrom(target, 0):
+                    row = {"direction": "from", "addr": hex(xr.to), "from": hex(target),
+                           "to": hex(xr.to), "type": "code" if xr.iscode else "data",
+                           "kind": _kind(xr)}
+                    if include_fn:
+                        row["fn"] = _fn(xr.to)
+                    rows.append(row)
+            if dedup:
+                seen = set()
+                deduped = []
+                for r in rows:
+                    k = (r["direction"], r["from"], r["to"], r["kind"])
+                    if k in seen:
+                        continue
+                    seen.add(k)
+                    deduped.append(r)
+                rows = deduped
+            rows = rows[:count]
+        result.append({"query": raw, "data": rows, "next_offset": None})
+    return {"result": result}
 '''
 
 SNIPPET = f"{BEGIN}\n{BODY.strip()}\n{END}\n"
