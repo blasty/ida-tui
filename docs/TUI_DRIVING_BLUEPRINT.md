@@ -328,9 +328,9 @@ terse, socket auto-resolved, every action visible in the gdb TUI pane.
    vocabulary — don't invent; mirror what a power user types).
 4. Wire the **spawn command** + **readiness** into the pane manager.
 5. Reuse transport, client, and ergonomic CLI unchanged.
-6. Add a **smoke test** that spawns the target on a socket and drives the whole
-   surface end-to-end (idatui's `rpc_smoke.py` is the template — it also locks the
-   protocol against regressions).
+6. Add a **regression test** that drives the surface end-to-end (idatui uses a
+   headless Textual Pilot suite, `tests/test_scenarios.py`, sharing the settle
+   logic with the live RPC server via `_sync.py`).
 
 ## 13. Pitfalls & lessons (paid for once already)
 
@@ -352,4 +352,4 @@ terse, socket auto-resolved, every action visible in the gdb TUI pane.
 ---
 
 *Reference implementation: `idatui/{rpc,rpcclient,drive,pane,_sync}.py`,
-`docs/RPC.md`, `tests/rpc_smoke.py` in this repo.*
+`docs/RPC.md`, `tests/test_scenarios.py` in this repo.*

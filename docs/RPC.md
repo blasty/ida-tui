@@ -16,7 +16,7 @@ this doc is the underlying protocol reference.
 
 ```
 # pane A — the TUI (real render) + a socket listener
-python -m idatui.tui --db <session> --rpc /tmp/ida.sock
+./ida-tui /abs/path/to/binary --rpc /tmp/ida.sock
 
 # pane B — drive it. Ergonomic (auto-finds the socket, terse text):
 python -m idatui.drive where
@@ -117,6 +117,7 @@ to read the pseudocode → `cursor line=.. col=..` onto a token → `rename name
   a generic worker-drain — read `state()` to confirm.
 - IDA renders some names without a leading `.` (e.g. `.init_proc` → `init_proc`
   in pseudocode); resolve/goto by the list name, but match tokens by what's shown.
-- `tests/rpc_smoke.py` boots the app on a socket in-process and drives the whole
-  surface end-to-end — the protocol's regression lock.
+- Drive the surface end-to-end from another process with `idatui.rpcclient` /
+  `idatui.drive`; the headless pilot (`tests/test_scenarios.py`) is the UI
+  regression lock and shares `_sync.py`'s settle logic with the RPC server.
 ```

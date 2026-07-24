@@ -2,7 +2,10 @@
 
 Measured against a real target: `libcrypto.so.3` (5.7 MB, **10,092 functions**,
 biggest function **52,120 instructions**). These constraints drive the domain /
-paging layer. Reproduce with `tests/stress_paging.py --db <session>`.
+paging layer. They describe the ida-pro-mcp *tool functions* (`list_funcs`,
+`disasm`, `decompile`, `xref_query`, …) which the idalib worker now calls
+in-process (`idatui/worker.py`) — the shapes and caps below are the tools'
+behaviour and are unchanged by dropping the HTTP transport.
 
 ## Response shape (list_* / *_query tools)
 
@@ -93,52 +96,25 @@ fall back to the disassembly view or show an error panel.
 Normal decompile bodies are server-truncated with a `[N chars total]` marker
 (still to be solved for full-body display — see Phase 2).
 
-## Workers self-exit when idle (`idle_ttl_sec`, default 600s) — SOLVED
+## Worker lifecycle (idatui's own idalib worker)
 
-### Why it happens
-Each idalib worker runs a `WorkerLifecycle` watchdog
-(`ida_pro_mcp/worker_lifecycle.py`): if no JSON-RPC request hits its dispatcher
-for `idle_ttl_sec` (default **600s**), the worker **self-exits cleanly**. It is
-refcount-free — "activity == alive": every forwarded tool call `touch()`es the
-timer. This is deliberate resource hygiene for a *shared* supervisor (each worker
-holds an IDA license slot + the DB's RAM; default max 4 workers), aimed at
-ephemeral/agent usage that opens a DB and wanders off. For an **interactive TUI
-that should be able to just chill, it's the wrong default.** The startup binary
-passed to `idalib-mcp` on the CLI always gets 600s (no CLI flag to change it).
+idatui no longer uses ida-pro-mcp's shared HTTP supervisor. `idatui/worker.py`
+opens exactly **one** database with `idapro.open_database(...)` in its own process
+and serves tool calls over a unix socket (`WorkerClient`). Consequences vs the
+old supervisor model, which several design choices here were built around:
 
-After self-exit the session lingers in `idb_list` but calls fail with
-`"Worker for session <id> is not reachable"` (distinct from `"Session not
-found"`).
-
-### The fix (both implemented + verified in `tests/test_keepalive.py`)
-1. **`IDAClient.bump_idle_ttl(idle_ttl_sec=1e9)`** — `idb_open` on the
-   already-open path is idempotent and re-applies the TTL; `set_idle_ttl` has no
-   upper cap, so ~1e9s is effectively 'never'. This is the intended knob and the
-   primary fix: the TUI calls it once at startup.
-2. **`IDAClient.keepalive(interval=120)` -> `KeepAlive`** — a background
-   heartbeat issuing a cheap `server_health` (~2ms) that resets the watchdog.
-   Belt-and-suspenders, and it also covers *adopted* sessions whose path we don't
-   control / don't want to re-open.
-
-Recommended TUI policy: run a `KeepAlive` heartbeat (interval < TTL) to keep the
-*running* session warm, and use a **moderate** idle TTL (not ‘never’) so the
-worker is reclaimed after the TUI exits. "Worker not reachable" then only occurs
-on a real crash, which the app handles by re-`idb_open`.
-
-## Supervisor worker cap (`max_workers`, default 4)
-
-The supervisor allows at most `max_workers` concurrently-open binaries; a 5th
-`idb_open` fails with "Maximum idalib worker count reached". Before counting it
-**prunes unreachable workers**, so a dead/killed worker frees its slot on the
-next open. Two consequences drove design choices:
-
-* Do **not** make sessions immortal (`bump_idle_ttl(1e9)`) — they pile up to the
-  cap and never free. Instead: `KeepAlive` while running + a moderate TTL
-  (idatui uses 1800s on `--open`) so idle sessions self-exit after the TUI
-  closes and free their slot.
-* `spawn.sh` sets `IDA_MCP_MAX_WORKERS` (default raised to 8) for headroom; to
-  free a stuck slot immediately, kill the idle worker process (it gets pruned on
-  the next open).
+* **No `max_workers` cap, no cross-session contention.** Each TUI owns its
+  worker; there is no "Maximum idalib worker count reached" and no shared license
+  slot to free.
+* **No idle self-exit / keepalive dance.** The old per-worker `WorkerLifecycle`
+  watchdog (`idle_ttl_sec`, default 600s) and the `KeepAlive` heartbeat that
+  fought it are gone with the supervisor. The worker lives as long as the TUI
+  holds the socket and dies with it. `WorkerClient.keepalive()` is a no-op kept
+  for API parity, and `--ttl` is passed through but the single owned worker does
+  not self-reap.
+* **A crashed worker drops the socket**, surfacing as `IDAConnectionError`; the
+  app's `_reconnect` respawns a fresh worker (re-opening + re-analyzing the
+  binary). The hard-kill lock recovery below still applies.
 
 ## Writable path requirement (operational)
 

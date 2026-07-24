@@ -1,7 +1,7 @@
 # Textual notes & app patterns
 
 Hard-won Textual behaviour and the patterns this app relies on. Pairs with
-`PAGING_FINDINGS.md` (the ida-pro-mcp/idalib side).
+`PAGING_FINDINGS.md` (the idalib side).
 
 ## Textual pitfalls
 
