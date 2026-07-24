@@ -28,9 +28,12 @@ import threading
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
-from typing import Callable
+from typing import Callable, TYPE_CHECKING
 
-from .client import IDAClient, IDAToolError
+from .errors import IDAToolError
+
+if TYPE_CHECKING:  # type hint only; the runtime client is mcp IDAClient or worker
+    from .client import IDAClient  # noqa: F401
 
 # Clamps derived from measured caps (list ~700, disasm ~500). Margin included.
 LIST_PAGE = 500

@@ -1,7 +1,6 @@
 """idatui — a minimal keyboard-first TUI for IDA Pro over ida-pro-mcp (idalib)."""
 
-from .client import (
-    IDAClient,
+from .errors import (
     IDAError,
     IDAConnectionError,
     IDATimeoutError,
@@ -10,8 +9,8 @@ from .client import (
     IDAToolError,
     IDASessionError,
     Session,
-    KeepAlive,
 )
+from .client import IDAClient, KeepAlive  # deprecated mcp transport
 from .domain import (
     Program,
     FunctionIndex,

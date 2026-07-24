@@ -42,7 +42,8 @@ from textual.widgets.option_list import Option
 
 from .highlight import highlight_c
 
-from .client import IDAClient, IDAToolError, IDAConnectionError
+from .errors import IDAToolError, IDAConnectionError
+from .client import IDAClient  # deprecated mcp transport (worker path uses WorkerClient)
 from .domain import DisasmModel, Func, Head, ListingModel, Program, Struct
 
 # Styles for the disassembly listing.

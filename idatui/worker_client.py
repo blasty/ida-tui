@@ -23,7 +23,7 @@ import time
 import uuid
 from typing import Any
 
-from .client import IDAToolError, IDAConnectionError, Session
+from .errors import IDAToolError, IDAConnectionError, Session
 from .worker import recv as _recv
 from .worker import send as _send
 
