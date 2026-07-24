@@ -1651,15 +1651,9 @@ async def s_func_banners(c: Ctx):
 # --------------------------------------------------------------------------- #
 # Runner
 # --------------------------------------------------------------------------- #
-async def run(db, only=None, binary=None, backend="mcp"):
-    if backend == "worker":
-        # Own idalib worker: opens the binary in-process over a unix socket, no
-        # supervisor. Mirrors launch.py's worker branch.
-        app = IdaTui(url="", db=None, open_path=binary, ensure_server=False,
-                     backend="worker", keepalive=False)
-    else:
-        url = os.environ.get("IDA_MCP_URL", "http://127.0.0.1:8745/mcp")
-        app = IdaTui(url=url, db=db, keepalive=False)
+async def run(binary, only=None):
+    # Own idalib worker: opens the binary in-process over a unix socket.
+    app = IdaTui(open_path=binary, keepalive=False)
     async with app.run_test(size=(140, 44)) as pilot:
         c = Ctx(app, pilot)
         await c.boot()
@@ -1682,26 +1676,28 @@ async def run(db, only=None, binary=None, backend="mcp"):
 
 def main(argv):
     global STOP_AFTER
-    db = only = binary = None
-    backend = "mcp"
+    only = None
+    binary = None
     it = iter(argv)
     for a in it:
-        if a == "--db":
-            db = next(it)
-        elif a == "--only":
+        if a == "--only":
             only = next(it).split(",")
         elif a == "--stop-after":
             STOP_AFTER = next(it)
-        elif a == "--worker":
-            # --worker <binary>: run the suite against our own idalib worker
-            backend = "worker"
+        elif a in ("--worker", "--binary"):
             binary = os.path.abspath(os.path.expanduser(next(it)))
         elif a == "--list":
             for name, _ in SCENARIOS:
                 print(name)
             return 0
+        elif not a.startswith("-"):
+            binary = os.path.abspath(os.path.expanduser(a))
+    if binary is None:  # default target for the pilot
+        binary = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            "targets", "echo")
     try:
-        asyncio.run(run(db, only, binary=binary, backend=backend))
+        asyncio.run(run(binary, only))
     except _StopSuite:
         print(f"  … stopped after '{STOP_AFTER}'")
     print(f"\n{PASS} passed, {FAIL} failed")
