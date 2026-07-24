@@ -1651,9 +1651,15 @@ async def s_func_banners(c: Ctx):
 # --------------------------------------------------------------------------- #
 # Runner
 # --------------------------------------------------------------------------- #
-async def run(db, only=None):
-    url = os.environ.get("IDA_MCP_URL", "http://127.0.0.1:8745/mcp")
-    app = IdaTui(url=url, db=db, keepalive=False)
+async def run(db, only=None, binary=None, backend="mcp"):
+    if backend == "worker":
+        # Own idalib worker: opens the binary in-process over a unix socket, no
+        # supervisor. Mirrors launch.py's worker branch.
+        app = IdaTui(open_path=binary, ensure_server=False,
+                     backend="worker", keepalive=False)
+    else:
+        url = os.environ.get("IDA_MCP_URL", "http://127.0.0.1:8745/mcp")
+        app = IdaTui(url=url, db=db, keepalive=False)
     async with app.run_test(size=(140, 44)) as pilot:
         c = Ctx(app, pilot)
         await c.boot()
@@ -1676,7 +1682,8 @@ async def run(db, only=None):
 
 def main(argv):
     global STOP_AFTER
-    db = only = None
+    db = only = binary = None
+    backend = "mcp"
     it = iter(argv)
     for a in it:
         if a == "--db":
@@ -1685,12 +1692,16 @@ def main(argv):
             only = next(it).split(",")
         elif a == "--stop-after":
             STOP_AFTER = next(it)
+        elif a == "--worker":
+            # --worker <binary>: run the suite against our own idalib worker
+            backend = "worker"
+            binary = os.path.abspath(os.path.expanduser(next(it)))
         elif a == "--list":
             for name, _ in SCENARIOS:
                 print(name)
             return 0
     try:
-        asyncio.run(run(db, only))
+        asyncio.run(run(db, only, binary=binary, backend=backend))
     except _StopSuite:
         print(f"  … stopped after '{STOP_AFTER}'")
     print(f"\n{PASS} passed, {FAIL} failed")
