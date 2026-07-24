@@ -511,12 +511,13 @@ async def s_hex(c: Ctx):
     await c.type(hex(rng[0]))
     await c.press("enter")
     await c.wait(lambda: hx.cursor_va() == rng[0], 10)
-    hx.scroll_to(y=40, animate=False)  # wheel-style scroll: viewport only
+    hx.scroll_to(y=40, animate=False)  # wheel-style scroll
     await c.pause(0.15)
     top = round(hx.scroll_offset.y)
-    c.check("hex viewport scrolls without dragging the cursor along",
-            top >= 20 and (hx.cursor // 16) < top,
-            f"top={top} cursor_row={hx.cursor // 16}")
+    height = hx._visible_height()
+    c.check("hex cursor follows the scroll (stays visible)",
+            top >= 20 and top <= (hx.cursor // 16) < top + height,
+            f"top={top} cursor_row={hx.cursor // 16} height={height}")
     PAD = 1  # HexView { padding: 0 1 } -> content is inset one col
     await c.pilot.click(HexView, offset=(PAD + 19 + 3 * 3, 5))  # hex byte 3, row 5
     await c.pause(0.1)

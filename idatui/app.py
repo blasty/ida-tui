@@ -1680,6 +1680,26 @@ class HexView(ScrollView, can_focus=True):
         top = max(0, min(top, max(self.total - 1, 0)))
         self._apply_scroll(top)
 
+    def watch_scroll_y(self, old_value: float, new_value: float) -> None:
+        super().watch_scroll_y(old_value, new_value)
+        # Follow the scroll: a wheel-scroll / scrollbar drag drags the byte cursor
+        # along so it stays visible (pinned to the nearest edge row, same column).
+        if round(old_value) != round(new_value):
+            self._follow_scroll(round(new_value))
+
+    def _follow_scroll(self, top: int) -> None:
+        if self.model is None or self.model.size == 0:
+            return
+        height = self._visible_height()
+        row, col = self.cursor // 16, self.cursor % 16
+        new_row = min(max(row, top), top + max(height - 1, 0))
+        new_row = max(0, min(new_row, max(self.total - 1, 0)))
+        new_cursor = max(0, min(new_row * 16 + col, self.model.size - 1))
+        if new_cursor != self.cursor:
+            self.cursor = new_cursor
+            self.refresh()  # cursor is reactive(repaint=False)
+            self.post_message(HexView.Moved(self.cursor_va()))
+
     # -- navigation -------------------------------------------------------- #
     def _move(self, delta: int) -> None:
         if self.model is None or self.model.size == 0:
