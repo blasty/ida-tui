@@ -3879,6 +3879,27 @@ class IdaTui(App):
             return
         self._goto_ea(addr, push=True)  # land on the literal in the listing
 
+    def on_descendant_focus(self, event) -> None:  # type: ignore[no-untyped-def]
+        """Keep ``_active`` in step with focus while split.
+
+        Tab moves both together, but focus also moves on its own — a click, or a
+        pane focusing itself after a load — and then ``_active`` still names the
+        pane you're NOT in. Everything downstream trusts ``_active``: follow
+        resolves the word under that pane's cursor and pushes history for it, so
+        Enter in the pseudocode would follow something from the listing and the
+        next Esc got spent undoing it.
+        """
+        if not self._split:
+            return
+        w = self.focused
+        mode = ("decomp" if isinstance(w, DecompView)
+                else "listing" if isinstance(w, ListingView) else None)
+        if mode is None or mode == self._active:
+            return
+        self._active = mode
+        self._sync_split(mode)   # re-link the band from the new driver
+        self._status_for_cur("split")
+
     def action_toggle_view(self) -> None:
         """Tab: switch the code pane between disassembly and pseudocode (or leave
         the hex view back to the preferred code view)."""
