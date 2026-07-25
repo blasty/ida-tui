@@ -327,6 +327,21 @@ async def s_palette(c: Ctx):
     c.check("selecting a palette entry opens that function",
             bool(app._cur) and app._cur.ea == want,
             f"cur={app._cur.ea if app._cur else None}")
+    # Re-open the function we are ALREADY standing on. That used to append an
+    # identical nav entry, and the extra Esc it bought popped the stack without
+    # changing anything on screen — a dead keypress, which is precisely what
+    # "back is broken" feels like from the keyboard.
+    depth = len(app._nav)
+    await c.press("ctrl+n")
+    await c.wait(lambda: isinstance(app.screen, SymbolPalette), 10)
+    pal2 = app.screen
+    pal2.query_one(Input).value = "main"
+    await c.wait(lambda: pal2._results and pal2._results[0][2] == "main", 10)
+    await c.press("enter")
+    await c.wait(lambda: not isinstance(app.screen, SymbolPalette), 10)
+    await c.pause(0.4)
+    c.check("re-opening the current function doesn't stack a duplicate",
+            len(app._nav) == depth, f"nav {depth} -> {len(app._nav)}")
     await c.press("ctrl+n")
     await c.wait(lambda: isinstance(app.screen, SymbolPalette), 10)
     await c.press("escape")

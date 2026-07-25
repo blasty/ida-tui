@@ -4968,14 +4968,14 @@ class IdaTui(App):
                 src.dec_cursor_x = dv.cursor_x
                 src.dec_scroll_y = round(dv.scroll_offset.y)
                 if not self._nav or self._nav[-1] is not src:
-                    self._nav.append(src)
+                    self._push_nav(src)   # never stack a second copy of a spot
             else:
                 self._save_current_pos()
         self._decomp_return = None  # a real navigation abandons the F5 return
         entry = NavEntry(ea=fn_addr, name=fn_name, view="decomp",
                          dec_cursor=dec_idx, dec_cursor_x=dec_cursor_x)
         if push:
-            self._nav.append(entry)
+            self._push_nav(entry)
         self._open_entry(entry, push=False)
 
     def _decomp_col_for(self, fn_addr: int, line_idx: int, name: str) -> int:
@@ -5047,6 +5047,30 @@ class IdaTui(App):
                     best_ea, best_idx = e, i
         return best_idx
 
+    @staticmethod
+    def _same_spot(a: NavEntry, b: NavEntry) -> bool:
+        """Same function, same view, same line — i.e. going from a to b is not a
+        move, so it has no business being a step in the history."""
+        if a.ea != b.ea or a.view != b.view:
+            return False
+        return (a.dec_cursor == b.dec_cursor if a.view == "decomp"
+                else a.cursor == b.cursor)
+
+    def _push_nav(self, entry: NavEntry) -> None:
+        """Append to the nav stack unless that would duplicate where we already are.
+
+        Opening the place you're standing on — the app auto-lands on main, then
+        you pick main out of Ctrl+N — used to append an identical entry. The Esc
+        it created popped the stack without changing anything on screen: a dead
+        keypress, which is exactly what "back doesn't work" feels like. Replace
+        the top instead, so the newer entry's metadata still wins.
+        """
+        top = self._nav[-1] if self._nav else None
+        if top is not None and self._same_spot(top, entry):
+            self._nav[-1] = entry
+            return
+        self._nav.append(entry)
+
     def _open_at(self, ea: int, name: str, cursor: int, push: bool,
                  dec_cursor: int = -1, dec_cursor_x: int = 0,
                  is_region: bool = False, focus_name: str | None = None) -> None:
@@ -5061,7 +5085,7 @@ class IdaTui(App):
             entry.dec_cursor = dec_cursor
             entry.dec_cursor_x = dec_cursor_x
         if push:
-            self._nav.append(entry)
+            self._push_nav(entry)
         self._open_entry(entry, push=False)
 
     def on_input_changed(self, event: Input.Changed) -> None:
