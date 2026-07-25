@@ -146,15 +146,35 @@ fuzzy-subsequence feel as local scope. Queries shorter than 3 characters fall
 back to `LIKE` — a trigram index silently returns *nothing* below that, which
 would make incremental typing look broken until the third keystroke.
 
-`Ctrl+N` gains a scope toggle on **F2** (not `ctrl+a`: the focused `Input` binds
-that to `home`). Project-scope hits are prefixed with their binary, and choosing
-one in another binary switches to it and jumps. **Strings (`"`) still needs the
-same toggle** — the index already carries them.
+Both palettes gain a scope toggle on **F2** (not `ctrl+a`: the focused `Input`
+binds that to `home`) — `Ctrl+N` for symbols and `"` for strings. Project-scope
+hits are prefixed with their binary, and choosing one in another binary switches
+to it and jumps. Project scope caps at 60 rows; it saturates any cap because
+every binary contributes, and a long list is what makes arrowing feel sluggish.
 
-**Phase 3 — cross-binary linking.** Import/export index; "who in the project
-calls this export"; follow an import stub in A into its implementation in B.
-Subsumes the standing PLT/import-stub backlog item — today following a libc call
-dead-ends on `extrn X:near`.
+Ranking, both palettes: the index already guarantees the match, so ordering only
+sorts — earliest match, then shortest, then `(binary, addr)`. That last tiebreak
+is load-bearing: without it, a name shared by two binaries (`main`, `textdomain`,
+most of libc) ties on every other field and Python falls through to comparing the
+hit objects, which raises `TypeError`.
+
+**Phase 3 — cross-binary linking.** Index what each binary *imports* and
+*exports*, then join them: "who in the project calls this export", and following
+an import in A lands on the real implementation in B.
+
+This is where the standing **PLT/import-stub** backlog item mostly goes away.
+Today, following a call to `strcmp` reaches the PLT thunk and stops at
+`extrn strcmp:near` — Hex-Rays has nothing to decompile because the code lives in
+a library the app never opened. With an export index, that stub resolves to
+`libc`'s implementation *when that library is in the project*, so the dead end
+becomes a normal cross-binary jump.
+
+It does not retire the item completely: a single-binary session, or an import
+whose provider isn't in the project, still lands on a stub, and that case still
+wants the original fix — recognise the thunk and present it as an import
+("strcmp — imported, provider not in project") instead of surfacing a decompiler
+error. So phase 3 covers the valuable half; stub *presentation* stays worth doing
+on its own.
 
 **Phase 4 — polish.** Background pre-warm, nav-history policy (per-binary to
 start; a global stack is a later question), RPC/`drive` verbs (`binaries`,
