@@ -2108,17 +2108,22 @@ class SymbolPalette(ModalScreen):
         # rows: (binary|None, addr, name, match positions)
         if self._project_scope and self._index is not None:
             from .index import KIND_FUNC
-            # Two stages: the trigram index narrows across every binary (cheap,
-            # and works for binaries with no live worker), then the same fuzzy
-            # ranking as local scope orders what's left.
+            # The trigram index already guarantees every hit CONTAINS the query,
+            # so ranking only has to order them — an exact-substring rank (match
+            # position, then name length) costs a find() per row instead of a
+            # full fuzzy pass, and fetching 3x the display limit rather than 10x
+            # keeps the per-keystroke work down on a big project.
             hits = self._index.search(query, kind=KIND_FUNC,
-                                      limit=self.LIMIT * 10) if query else []
+                                      limit=self.LIMIT * 3) if query else []
+            q = query.lower()
             scored = []
             for h in hits:
-                m = _fuzzy(h.text, query)
-                scored.append(((m[0] if m else 0.0), (m[1] if m else ()), h))
-            scored.sort(key=lambda t: (-t[0], t[2].text))
-            rows = [(h.binary, h.addr, h.text, pos) for _, pos, h in scored[:self.LIMIT]]
+                at = h.text.lower().find(q)
+                scored.append((at if at >= 0 else 1 << 30, len(h.text), h.text, h))
+            scored.sort()
+            rows = [(h.binary, h.addr, h.text,
+                     tuple(range(at, at + len(q))) if at < (1 << 30) else ())
+                    for at, _, _, h in scored[:self.LIMIT]]
         elif query:
             scored = []
             for f in self._funcs:
