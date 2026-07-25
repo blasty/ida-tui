@@ -201,6 +201,45 @@ async def run(bins):
                 check("the hop is consumed, not repeated",
                       not app._hops, f"hops={app._hops}")
 
+            # -- xrefs: callers in OTHER project binaries ------------------ #
+            # xrefs_to only sees this database, so an exported function looks
+            # unused from the inside even when the rest of the project calls it.
+            # The selection rule is "only for a symbol we actually export"; two
+            # executables share no linkage, so here it must stay quiet.
+            from idatui.app import XrefsScreen
+            fake = app._foreign_importers(app._cur.ea, "strrchr", None)
+            check("no cross-binary callers for a symbol this binary doesn't export",
+                  fake == [], f"{fake}")
+
+            # The routing a real cross-binary caller takes: the dialog carries a
+            # (binary, addr) payload instead of a bare address, and choosing it
+            # goes through the same switch path as a search hit — hop included,
+            # so Esc comes back.
+            where_from = app._binary
+            other = first if where_from == second else second
+            hit = next((h for h in app._index.search("main", limit=200)
+                        if h.binary == other), None)
+            if hit is None:
+                check("a cross-binary xref jumps to the other binary", False,
+                      "no symbol found in the other binary")
+            else:
+                hops0 = len(app._hops)
+                app.push_screen(
+                    XrefsScreen("xrefs to fake", [((hit.binary, hit.addr),
+                                                   f"{hit.addr:08X}  import  [{hit.binary}]")]),
+                    app._on_xref_chosen)
+                await settle(lambda: isinstance(app.screen, XrefsScreen), 20)
+                await pilot.press("enter")
+                jumped = await settle(lambda: app._binary == other
+                                      and app._func_index is not None
+                                      and app._func_index.complete, 180)
+                check("a cross-binary xref jumps to the other binary", jumped,
+                      f"binary={app._binary} want={other}")
+                check("and records a hop so Esc returns",
+                      len(app._hops) == hops0 + 1 and app._hops[-1] == where_from,
+                      f"hops={app._hops}")
+                app._hops.clear()
+
             # -- and the same toggle for strings --------------------------- #
             from idatui.app import StringsPalette
             await pilot.press("quotation_mark")

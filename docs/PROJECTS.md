@@ -187,6 +187,17 @@ trigram floor, which matters — plenty of real exports are one or two character
 is evicted; that is the reason the index is on disk. The switch itself then pages
 the provider in through the normal pool path.
 
+The reverse direction is in the xrefs dialog. `xrefs_to` only ever sees the
+current database, so an exported function looks unused from the inside even when
+half the project calls it. `_foreign_importers` appends the project binaries that
+IMPORT the symbol — read from the on-disk index, so a caller shows up whether or
+not its worker is resident — and choosing one carries a `(binary, addr)` payload
+through the same switch path as a search hit, hop included. From libc's
+`strrchr`: `0000C318  import  [echo] strrchr`.
+
+It only fires for a symbol this binary actually exports. A local name that
+happens to collide with another binary's import is not a caller of ours.
+
 When nothing in the project provides the symbol, `_follow_import` declines and
 the local navigation proceeds — landing on the stub is still the honest answer,
 and a single-binary session behaves exactly as before.

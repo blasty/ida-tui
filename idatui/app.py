@@ -2008,8 +2008,10 @@ class XrefsScreen(ModalScreen):
 
     BINDINGS = [Binding("escape", "close", "Close")]
 
-    def __init__(self, label: str, items: list[tuple[int, str]],
+    def __init__(self, label: str, items: list[tuple[object, str]],
                  preselect: int = 0) -> None:
+        # payload is an int address, or (binary, address) for a caller in another
+        # project binary; dismiss() hands it back untouched.
         super().__init__()
         self._label = label
         self._items = items
@@ -4467,9 +4469,45 @@ class IdaTui(App):
             kind = x.kind or x.type or "?"
             items.append((x.frm, f"{x.frm:08X}  {kind:<6}  {loc}"))
         preselect = self._xref_preselect(xr, here_ea, here_end)
+        # Callers in OTHER project binaries. xrefs_to only ever sees this
+        # database, so an exported function looks unused from the inside even
+        # when half the project calls it — the import side of the linkage index
+        # is the only place that knowledge exists.
+        for label_b, addr_b, text_b in self._foreign_importers(subj, subj_name, fn):
+            items.append(((label_b, addr_b), text_b))
         self.app.call_from_thread(self._present_xrefs, label, items, focus, preselect)
 
-    def _present_xrefs(self, label: str, items: list[tuple[int, str]],
+    def _foreign_importers(self, subj: int, subj_name, fn):  # type: ignore[no-untyped-def]
+        """Project binaries that IMPORT the symbol at ``subj`` — the other half
+        of the phase-3 join, read from the on-disk index so a caller shows up
+        whether or not its worker is resident.
+
+        Only for a symbol this binary actually exports: a local name that
+        happens to collide with another binary's import isn't a caller of ours.
+        """
+        if self._index is None or self._project is None or self._binary is None:
+            return []
+        name = subj_name if self._looks_like_symbol(subj_name) else None
+        if name is None and fn is not None and fn.addr == subj:
+            name = fn.name
+        if not name:
+            return []
+        from .domain import link_name
+        name = link_name(name)
+        try:
+            _, exports = self.program.linkage()
+        except Exception:  # noqa: BLE001
+            return []
+        if not any(e.name == name for e in exports):
+            return []          # we don't export it; nobody imports it FROM US
+        try:
+            hits = self._index.importers(name, exclude=self._binary)
+        except Exception:  # noqa: BLE001
+            return []
+        return [(h.binary, h.addr, f"{h.addr:08X}  import  [{h.binary}] {name}")
+                for h in hits]
+
+    def _present_xrefs(self, label: str, items: list[tuple[object, str]],
                        focus_name: str | None = None, preselect: int = 0) -> None:
         if not self._xref_active:
             return  # cancelled (Esc) while we were still gathering
@@ -4482,12 +4520,17 @@ class IdaTui(App):
         self._status(f"{label}: {len(items)}")
         self.push_screen(XrefsScreen(label, items, preselect), self._on_xref_chosen)
 
-    def _on_xref_chosen(self, addr: int | None) -> None:
-        if addr is not None:
-            # If xrefs was invoked from the decompiler, land the jump back in the
-            # decompiler (when the target is decompilable) rather than the listing.
-            self._goto_ea(addr, push=True, focus_name=self._xref_focus_name,
-                          prefer_decomp=(self._active == "decomp"))
+    def _on_xref_chosen(self, addr) -> None:  # type: ignore[no-untyped-def]
+        if addr is None:
+            return
+        if isinstance(addr, tuple):   # a caller in another project binary
+            binary, ea = addr
+            self._switch_then_goto(binary, ea)   # records a hop, so Esc returns
+            return
+        # If xrefs was invoked from the decompiler, land the jump back in the
+        # decompiler (when the target is decompilable) rather than the listing.
+        self._goto_ea(addr, push=True, focus_name=self._xref_focus_name,
+                      prefer_decomp=(self._active == "decomp"))
 
     # -- rename ------------------------------------------------------------ #
     @staticmethod
