@@ -2064,17 +2064,24 @@ class SymbolPalette(ModalScreen):
         Binding("escape", "close", "Close"),
         Binding("down,ctrl+n", "cursor_down", show=False),
         Binding("up,ctrl+p", "cursor_up", show=False),
+        # F2, not ctrl+a: the focused Input binds "home,ctrl+a" so it would never
+        # reach us. Function keys are untouched by Input.
+        Binding("f2", "scope", "This binary / whole project", show=False),
     ]
     LIMIT = 200
 
-    def __init__(self, funcs: list[Func]) -> None:
+    def __init__(self, funcs: list[Func], index=None, binary=None) -> None:
         super().__init__()
         self._funcs = funcs
-        self._results: list[Func] = []
+        self._index = index      # ProjectIndex, when this is a project
+        self._binary = binary    # label of the binary we're currently in
+        self._project_scope = False
+        #: (binary|None, addr, name) — binary is None for a local hit
+        self._results: list[tuple] = []
 
     def compose(self) -> ComposeResult:
         with Vertical(id="pal-box"):
-            yield Static(" symbols", id="pal-title")
+            yield Static(" symbols", id="pal-title", markup=False)
             yield Input(placeholder="fuzzy find symbol…  ↑↓ select · Enter open · Esc close",
                         id="pal-input")
             yield OptionList(id="pal-list")
@@ -2091,35 +2098,61 @@ class SymbolPalette(ModalScreen):
         event.stop()
         self.action_choose()
 
+    def action_scope(self) -> None:
+        if self._index is None:
+            return  # not a project: nothing else to search
+        self._project_scope = not self._project_scope
+        self._apply(self.query_one("#pal-input", Input).value.strip())
+
     def _apply(self, query: str) -> None:
-        if query:
+        # rows: (binary|None, addr, name, match positions)
+        if self._project_scope and self._index is not None:
+            from .index import KIND_FUNC
+            # Two stages: the trigram index narrows across every binary (cheap,
+            # and works for binaries with no live worker), then the same fuzzy
+            # ranking as local scope orders what's left.
+            hits = self._index.search(query, kind=KIND_FUNC,
+                                      limit=self.LIMIT * 10) if query else []
+            scored = []
+            for h in hits:
+                m = _fuzzy(h.text, query)
+                scored.append(((m[0] if m else 0.0), (m[1] if m else ()), h))
+            scored.sort(key=lambda t: (-t[0], t[2].text))
+            rows = [(h.binary, h.addr, h.text, pos) for _, pos, h in scored[:self.LIMIT]]
+        elif query:
             scored = []
             for f in self._funcs:
                 m = _fuzzy(f.name, query)
                 if m is not None:
                     scored.append((m[0], m[1], f))
             scored.sort(key=lambda t: (-t[0], t[2].name))
-            rows = [(f, pos) for _, pos, f in scored[:self.LIMIT]]
+            rows = [(None, f.addr, f.name, pos) for _, pos, f in scored[:self.LIMIT]]
         else:
-            rows = [(f, ()) for f in self._funcs[:self.LIMIT]]
-        self._results = [f for f, _ in rows]
+            rows = [(None, f.addr, f.name, ()) for f in self._funcs[:self.LIMIT]]
+        self._results = [(b, a, n) for b, a, n, _ in rows]
         ol = self.query_one(OptionList)
         ol.clear_options()
         opts = []
-        for f, pos in rows:
+        for binary, addr, name, pos in rows:
             label = Text()
-            label.append(f"{f.addr:08X}  ", _S_ADDR)
-            nm = Text(f.name)
+            if binary:
+                label.append(f"{binary:<14.14} ", _S_LABEL)
+            label.append(f"{addr:08X}  ", _S_ADDR)
+            nm = Text(name)
             for p in pos:
-                if p < len(f.name):
+                if p < len(name):
                     nm.stylize(_S_NAME_MATCH, p, p + 1)
             label.append_text(nm)
             opts.append(Option(label))
         ol.add_options(opts)
         if self._results:
             ol.highlighted = 0
+        scope = "project" if self._project_scope else "this binary"
+        more = "+" if len(self._results) == self.LIMIT else ""
+        hint = "  (F2: this binary)" if self._project_scope else (
+            "  (F2: whole project)" if self._index is not None else "")
         self.query_one("#pal-title", Static).update(
-            f" symbols: {len(self._results)}" + ("+" if len(self._results) == self.LIMIT else ""))
+            f" symbols [{scope}]: {len(self._results)}{more}{hint}")
 
     def action_cursor_down(self) -> None:
         ol = self.query_one(OptionList)
@@ -2135,11 +2168,13 @@ class SymbolPalette(ModalScreen):
         ol = self.query_one(OptionList)
         i = ol.highlighted
         if i is not None and 0 <= i < len(self._results):
-            self.dismiss(self._results[i].addr)
+            b, a, _ = self._results[i]
+            self.dismiss((b, a))
 
     def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
         if 0 <= event.option_index < len(self._results):
-            self.dismiss(self._results[event.option_index].addr)
+            b, a, _ = self._results[event.option_index]
+            self.dismiss((b, a))
 
     def action_close(self) -> None:
         self.dismiss(None)
@@ -2175,7 +2210,7 @@ class StringsPalette(ModalScreen):
 
     def compose(self) -> ComposeResult:
         with Vertical(id="pal-box"):
-            yield Static(" strings", id="pal-title")
+            yield Static(" strings", id="pal-title", markup=False)
             yield Input(placeholder="filter strings\u2026  \u2191\u2193 select \u00b7 "
                                     "Enter jump \u00b7 Esc close", id="pal-input")
             yield OptionList(id="pal-list")
@@ -2383,7 +2418,7 @@ class ProjectPalette(ModalScreen):
 
     def compose(self) -> ComposeResult:
         with Vertical(id="pal-box"):
-            yield Static(" binaries", id="pal-title")
+            yield Static(" binaries", id="pal-title", markup=False)
             yield Input(placeholder="filter binaries\u2026  \u2191\u2193 select \u00b7 "
                                     "Enter switch \u00b7 Esc close", id="pal-input")
             yield OptionList(id="pal-list")
@@ -2992,12 +3027,17 @@ class IdaTui(App):
         self._binary: str | None = None       # active project binary (label)
         self._states: dict[str, BinaryState] = {}
         self._pending_restore = None          # entry to reopen after a switch
+        self._goto_after_switch = None        # cross-binary search hit to land on
         # None = teardown wasn't an explicit quit (crash/kill): save defensively.
         # False = the user chose discard, or we already saved on the way out.
         self._save_on_exit: bool | None = None
+        self._index = None                    # project-wide symbol/string index
         if project is not None:
+            from .index import ProjectIndex
             from .pool import WorkerPool
             self._pool = WorkerPool(project, ttl=ttl)
+            self._index = ProjectIndex(
+                os.path.join(project.index_dir, "project.db"))
             self._binary = project.refs[0].label
             open_path = project.refs[0].staged
         self._open_path = open_path
@@ -3297,6 +3337,32 @@ class IdaTui(App):
         # Land somewhere useful instead of an empty pane: main() if present,
         # otherwise pop the fuzzy symbol picker.
         self.app.call_from_thread(self._auto_land)
+        self._index_binary()  # project mode: keep the cross-binary index fresh
+
+    @work(thread=True, exclusive=True, group="index")
+    def _index_binary(self) -> None:
+        """Fold this binary's symbols + strings into the project index, so it can
+        be searched later even when its worker is gone."""
+        if self._index is None or self._project is None or self._binary is None:
+            return
+        ref = self._project.by_label(self._binary)
+        if ref is None or not self._index.is_stale(self._binary, ref.source):
+            return
+        from .index import KIND_FUNC, KIND_STRING
+        idx = self._func_index
+        entries = [(KIND_FUNC, f.addr, f.name) for f in (idx.all_loaded() if idx else [])]
+        try:
+            entries += [(KIND_STRING, s.addr, s.text)
+                        for s in self.program.strings()]
+        except Exception:  # noqa: BLE001 -- symbols alone are still worth indexing
+            pass
+        try:
+            n = self._index.reindex(self._binary, entries, source=ref.source)
+        except Exception as e:  # noqa: BLE001
+            self.app.call_from_thread(self._status, f"indexing failed: {e}")
+            return
+        self.app.call_from_thread(
+            self._status, f"indexed {self._binary}: {n} symbols + strings")
 
     # -- initial landing --------------------------------------------------- #
     #: function names tried (in order) as the startup landing spot
@@ -3307,6 +3373,13 @@ class IdaTui(App):
         main() if it exists; else open the symbol picker so you're never staring
         at a blank pane. Runs once (guarded by ``_cur``) and never steals focus
         from a user who already navigated."""
+        goto = self._goto_after_switch
+        if goto is not None:  # arrived here from a project-wide search hit
+            self._goto_after_switch = None
+            self._did_auto_land = True
+            self._dismiss_loading()
+            self._goto_ea(goto, push=True)
+            return
         entry = self._pending_restore
         if entry is not None:  # switched back to a binary we'd already explored
             self._pending_restore = None
@@ -3447,19 +3520,31 @@ class IdaTui(App):
         self.push_screen(StructEditor(self.program))
 
     def action_symbols(self) -> None:
-        """Ctrl+N: fuzzy-find a symbol in a command-palette overlay."""
+        """Ctrl+N: fuzzy-find a symbol (Ctrl+A widens it to the whole project)."""
         idx = self._func_index
         funcs = idx.all_loaded() if idx is not None else []
         if not funcs:
             self._status("functions still loading…")
             return
-        self.push_screen(SymbolPalette(funcs), self._on_symbol_chosen)
+        self.push_screen(SymbolPalette(funcs, index=self._index,
+                                       binary=self._binary),
+                         self._on_symbol_chosen)
 
-    def _on_symbol_chosen(self, addr: int | None) -> None:
-        if addr is None:
+    def _on_symbol_chosen(self, choice) -> None:  # type: ignore[no-untyped-def]
+        if choice is None:
+            return
+        binary, addr = choice
+        if binary and binary != self._binary:
+            self._switch_then_goto(binary, addr)
             return
         f = self._func_index.by_addr(addr) if self._func_index else None
         self._open_function(addr, f.name if f else hex(addr))
+
+    def _switch_then_goto(self, binary: str, addr: int) -> None:
+        """A project-wide hit in another binary: switch to it, then jump there
+        once its index has loaded."""
+        self._goto_after_switch = addr
+        self._switch_binary(binary)
 
     # -- projects: switching between the binaries of one target ------------ #
     # -- exit ---------------------------------------------------------------- #
@@ -3588,7 +3673,10 @@ class IdaTui(App):
             self._func_index = st.func_index
             self._apply_filter(self._filter_term)  # repopulate the names table
             self._dismiss_loading()
-            if self._cur is not None:
+            if self._goto_after_switch is not None:
+                addr, self._goto_after_switch = self._goto_after_switch, None
+                self._goto_ea(addr, push=True)
+            elif self._cur is not None:
                 self._open_entry(self._cur, push=False)
             else:
                 self._did_auto_land = False

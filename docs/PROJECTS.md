@@ -122,9 +122,34 @@ index, reopen the entry. A binary whose worker is still resident restores
 instantly (its `Program` and index are still in memory); an evicted one comes
 back with a fresh worker but keeps its nav history, since that is just addresses.
 
-**Phase 2 — index cache + project-wide search.** Per-binary index (functions,
-strings) persisted after first open, keyed by source size+mtime. Scope toggle in
-the symbol/strings palettes, working for never-opened binaries.
+**Phase 2 — index cache + project-wide search. (symbols done)**
+`idatui/index.py` keeps one **SQLite FTS5 trigram** index at
+`<sidecar>/idx/project.db`, populated per binary after its functions load and
+re-done only when the source's size/mtime changes.
+
+Why that and not a library: nothing needed installing (FTS5 + the trigram
+tokenizer are stdlib), and trigram indexes arbitrary *substrings*, which is what
+symbol names and string bodies need. Measured on 300k entries: **1.9 ms** per
+query vs 11.8 ms for a Python scan and 28.9 ms for plain `LIKE`; 0.2 ms per
+incremental insert.
+
+Size turned out to be a non-issue. Real binaries: `bash` = 5.9k entries /
+0.15 MB of text, `libcrypto.so.3` = 30.7k / 0.52 MB. The index runs ~5.7x the
+text, so a 20-binary project lands around 12-23 MB — next to the `.i64` files
+already in the sidecar (libcrypto's alone is 72 MB) that is ~1% of what the
+project already costs. The reason to keep it on disk is **residency, not size**:
+search has to work for binaries whose worker isn't running.
+
+Querying is two-stage: the trigram index narrows across every binary, then the
+existing `_fuzzy` ranks what's left, so project scope keeps the same
+fuzzy-subsequence feel as local scope. Queries shorter than 3 characters fall
+back to `LIKE` — a trigram index silently returns *nothing* below that, which
+would make incremental typing look broken until the third keystroke.
+
+`Ctrl+N` gains a scope toggle on **F2** (not `ctrl+a`: the focused `Input` binds
+that to `home`). Project-scope hits are prefixed with their binary, and choosing
+one in another binary switches to it and jumps. **Strings (`"`) still needs the
+same toggle** — the index already carries them.
 
 **Phase 3 — cross-binary linking.** Import/export index; "who in the project
 calls this export"; follow an import stub in A into its implementation in B.

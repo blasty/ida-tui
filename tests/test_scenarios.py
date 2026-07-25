@@ -300,18 +300,18 @@ async def s_palette(c: Ctx):
     pal = app.screen
     pinp = pal.query_one(Input)
     pinp.value = "main"
-    await c.wait(lambda: pal._results and pal._results[0].name == "main", 10)
+    await c.wait(lambda: pal._results and pal._results[0][2] == "main", 10)
     c.check("palette fuzzy-finds (top result matches the query)",
-            bool(pal._results) and pal._results[0].name == "main",
-            f"top={pal._results[0].name if pal._results else None}")
+            bool(pal._results) and pal._results[0][2] == "main",
+            f"top={pal._results[0][2] if pal._results else None}")
     pinp.value = "eror"  # scattered subsequence of 'error'
-    await c.wait(lambda: any(f.name == "error" for f in pal._results), 10)
+    await c.wait(lambda: any(n == "error" for _, _, n in pal._results), 10)
     c.check("palette matches a fuzzy subsequence",
-            any(f.name == "error" for f in pal._results),
-            f"results={[f.name for f in pal._results[:4]]}")
+            any(n == "error" for _, _, n in pal._results),
+            f"results={[n for _, _, n in pal._results[:4]]}")
     pinp.value = "main"
-    await c.wait(lambda: pal._results and pal._results[0].name == "main", 10)
-    want = pal._results[0].addr
+    await c.wait(lambda: pal._results and pal._results[0][2] == "main", 10)
+    want = pal._results[0][1]
     await c.press("enter")
     await c.wait(lambda: not isinstance(app.screen, SymbolPalette), 10)
     await c.wait(lambda: app._cur and app._cur.ea == want, 20)
