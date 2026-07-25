@@ -22,6 +22,7 @@ import re
 import subprocess
 from dataclasses import dataclass, field
 
+from rich.align import Align
 from rich.segment import Segment
 from rich.style import Style
 from rich.text import Text
@@ -2388,7 +2389,10 @@ class LoadingScreen(ModalScreen):
                 sz = self.app.size
                 n = len(logo.split("\n"))
                 if sz.height >= n + 9 and sz.width >= 64:
-                    yield Static(logo, id="loading-logo")
+                    # Align.center, not the box's align-horizontal: the 1fr
+                    # title/note siblings make the child group span the full
+                    # width, so container alignment has nothing left to centre.
+                    yield Static(Align.center(logo), id="loading-logo")
             yield Static(f"\u23f3  loading  {self._title}", id="loading-title")
             yield Static(self._note, id="loading-note")
             yield Static("first open of a big binary can take a while  \u00b7  "
@@ -2802,8 +2806,8 @@ class IdaTui(App):
     #confirm-help { height: 1; color: $text-muted; margin-top: 1; }
     LoadingScreen { align: center middle; }
     #loading-box { width: 72; height: auto; border: thick $accent;
-                   background: $panel; padding: 1 2; align-horizontal: center; }
-    #loading-logo { width: auto; height: auto; margin-bottom: 1; }
+                   background: $panel; padding: 1 2; }
+    #loading-logo { width: 100%; height: auto; margin-bottom: 1; }
     #loading-title { width: 1fr; height: 1; text-style: bold; }
     #loading-note { height: auto; color: $text-muted; margin-top: 1; }
     #loading-help { height: auto; color: $text-muted; margin-top: 1; }
