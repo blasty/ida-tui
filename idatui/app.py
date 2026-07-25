@@ -3898,7 +3898,8 @@ class IdaTui(App):
             return
         self._active = mode
         self._sync_split(mode)   # re-link the band from the new driver
-        self._status_for_cur("split")
+        if not self.query_one(DecompView).loading:
+            self._status_for_cur("split")  # never clobber "decompiling…"
 
     def action_toggle_view(self) -> None:
         """Tab: switch the code pane between disassembly and pseudocode (or leave
@@ -5353,14 +5354,21 @@ class IdaTui(App):
             hx.display = False
             lst.display = dec.display = True
             self.query_one("#panes").set_class(True, "split")
-            if self._cur is not None and dec.loaded_ea != self._cur.ea:
+            busy = self._cur is not None and dec.loaded_ea != self._cur.ea
+            if busy:
                 dec.loading = True
                 self._load_decomp(self._cur.ea, self._cur.name)
             else:
                 dec.loading = False
             if grab:
                 (dec if self._active == "decomp" else lst).focus()
-            self._status_for_cur("split")
+            if busy and self._cur is not None:
+                # Keep the in-flight message: the idle status used to overwrite
+                # it, so travelling history in split showed nothing at all while
+                # a decompile ran and Esc looked like a no-op.
+                self._status(f"{self._cur.name} \u2014 decompiling\u2026")
+            else:
+                self._status_for_cur("split")
             return
         self._split = False  # a single-view target (hex, etc.) leaves split
         self.query_one("#panes").set_class(False, "split")
