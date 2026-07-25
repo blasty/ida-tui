@@ -185,6 +185,46 @@ def main() -> int:
         except ProjectError:
             check("staging a missing binary raises ProjectError", True)
 
+    # -- load options for headerless blobs --------------------------------- #
+    with tempfile.TemporaryDirectory() as tmp:
+        src = os.path.join(tmp, "src"); os.makedirs(src)
+        blob = os.path.join(src, "fw.bin")
+        with open(blob, "wb") as f:
+            f.write(b"\x00" * 64)
+        proj = Project.create(os.path.join(tmp, "p.json"), [blob], name="p",
+                              load={"processor": "arm", "base": 0x8000000})
+        r = proj.refs[0]
+        check("create() records load options per binary",
+              r.processor == "arm" and r.base == 0x8000000,
+              f"proc={r.processor!r} base={r.base:#x}")
+        # -b is PARAGRAPHS: 0x8000000 >> 4 == 0x800000. Getting this wrong loads
+        # the image 16x too high and every address in the database is wrong.
+        check("base is converted to IDA's paragraph units",
+              r.load_args == "-parm -b800000", r.load_args)
+
+        proj2 = Project.load(proj.path)
+        check("load options survive a round-trip through the file",
+              proj2.refs[0].load_args == "-parm -b800000",
+              proj2.refs[0].load_args)
+
+        blob2 = os.path.join(src, "other.bin")
+        with open(blob2, "wb") as f:
+            f.write(b"\x00" * 64)
+        r2 = proj2.add(blob2, load={"processor": "mipsb"})
+        check("add() takes load options too",
+              r2.load_args == "-pmipsb", r2.load_args)
+
+        # a normal ELF needs none of this and must pass nothing
+        check("a binary with no load options passes no switches",
+              Project.create(os.path.join(tmp, "q.json"), [blob],
+                             name="q").refs[0].load_args == "")
+
+        # addresses get written by hand, so accept how people write them
+        proj3 = Project.create(os.path.join(tmp, "r.json"), [blob], name="r",
+                               load={"base": "0x1000"})
+        check("a base given as a hex STRING is parsed",
+              proj3.refs[0].base == 0x1000, f"{proj3.refs[0].base}")
+
     print(f"\n{PASS} passed, {FAIL} failed")
     return 1 if FAIL else 0
 

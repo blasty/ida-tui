@@ -3162,7 +3162,7 @@ class IdaTui(App):
 
     def __init__(self, open_path: str | None = None, keepalive: bool = True,
                  rpc_path: str | None = None, ttl: int = 1800,
-                 project=None) -> None:
+                 project=None, load_args: str = "") -> None:
         super().__init__()
         # Project mode is additive: with no project this is the plain
         # single-binary app, unchanged.
@@ -3188,6 +3188,7 @@ class IdaTui(App):
             open_path = project.refs[0].staged
         self._open_path = open_path
         self._ttl = ttl
+        self._load_args = load_args or ""   # IDA switches for a headerless blob
         self._do_keepalive = keepalive
         self._rpc_path = rpc_path
         self._rpc = None
@@ -3390,7 +3391,8 @@ class IdaTui(App):
                 self.app.call_from_thread(self._reconnect_failed,
                                           "no binary to reopen")
                 return
-            client = WorkerClient(self._open_path, ttl=self._ttl)
+            client = WorkerClient(self._open_path, ttl=self._ttl,
+                                  load_args=self._load_args)
             client.connect(progress=lambda m: self.app.call_from_thread(
                 self._conn_note, m))
         except Exception as e:  # noqa: BLE001
@@ -3456,7 +3458,8 @@ class IdaTui(App):
         base = os.path.basename(self._open_path)
         self.app.call_from_thread(
             self._status, f"starting worker — initial auto-analysis of {base}…")
-        client = WorkerClient(self._open_path, ttl=self._ttl)
+        client = WorkerClient(self._open_path, ttl=self._ttl,
+                              load_args=self._load_args)
         client.connect(progress=lambda m: self.app.call_from_thread(
             self._status, m))
         return client

@@ -78,13 +78,39 @@ def _ensure_tools_injected() -> None:
         sys.stderr.write(f"idatui: tool injection skipped: {e}\n")
 
 
-def _open_and_register(binpath: str):
+def _has_database(binpath: str) -> bool:
+    """Whether IDA already has a database for ``binpath``.
+
+    IDA names it ``<file>.i64`` (keeping the extension), but a database made
+    from ``foo.bin`` can also appear as ``foo.i64`` depending on how it was
+    created — check both, because guessing wrong here means re-passing load
+    switches to an existing database, which fails the open.
+    """
+    return (os.path.exists(binpath + ".i64")
+            or os.path.exists(os.path.splitext(binpath)[0] + ".i64"))
+
+
+def _open_and_register(binpath: str, load_args: str = ""):
     """Open the DB (main thread) then import ida-pro-mcp so every @tool registers
-    against this live database. Returns (tools_dict, module_name, save_fn)."""
+    against this live database. Returns (tools_dict, module_name, save_fn).
+
+    ``load_args`` is passed to IDA as command-line switches, which is the only
+    way to tell it how to read a headerless blob: a raw firmware image has no
+    format to detect, so without ``-p<processor>`` it loads as metapc at 0 and
+    finds nothing. Ignored once a database exists — the .i64 already records how
+    it was loaded, and re-passing conflicting switches is how you corrupt one.
+    """
     _ensure_tools_injected()  # before any ida_pro_mcp import
     import idapro
     idapro.enable_console_messages(False)
-    if idapro.open_database(binpath, run_auto_analysis=True):  # nonzero == failure
+    args = load_args or None
+    if args and _has_database(binpath):
+        # The .i64 already records how this image was loaded. Passing the
+        # switches again on reopen makes IDA fail outright (rc != 0) — the load
+        # options belong to the FIRST open only.
+        args = None
+    if idapro.open_database(binpath, run_auto_analysis=True,
+                            args=args):  # nonzero == failure
         raise RuntimeError(
             f"failed to open {binpath}: the .i64 is likely held by a running "
             f"ida-mcp worker (try: pkill -f idalib) or wedged from a crash "
@@ -109,8 +135,8 @@ def _open_and_register(binpath: str):
     return MCP_SERVER.tools.methods, module, save
 
 
-def serve(sockpath: str, binpath: str) -> None:
-    tools, module, save = _open_and_register(binpath)
+def serve(sockpath: str, binpath: str, load_args: str = "") -> None:
+    tools, module, save = _open_and_register(binpath, load_args)
     sid = uuid.uuid4().hex[:8]
 
     def dispatch(name: str, args: dict):
@@ -179,10 +205,11 @@ def serve(sockpath: str, binpath: str) -> None:
 def main(argv=None) -> None:
     argv = argv if argv is not None else sys.argv[1:]
     if len(argv) < 2:
-        sys.stderr.write("usage: python -m idatui.worker <sock> <binary>\n")
+        sys.stderr.write(
+            "usage: python -m idatui.worker <sock> <binary> [ida-load-args]\n")
         raise SystemExit(2)
     try:
-        serve(argv[0], argv[1])
+        serve(argv[0], argv[1], argv[2] if len(argv) > 2 else "")
     except SystemExit:
         raise
     except BaseException as e:  # noqa: BLE001 -- surface a clean cause + code 1

@@ -56,7 +56,7 @@ def _pss_mb(pid: int | None) -> int:
 
 def _default_spawn(ref: BinaryRef, ttl: int):  # pragma: no cover - needs idalib
     from .worker_client import WorkerClient
-    return WorkerClient(ref.staged, ttl=ttl)
+    return WorkerClient(ref.staged, ttl=ttl, load_args=ref.load_args)
 
 
 class WorkerPool:

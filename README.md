@@ -90,6 +90,19 @@ It uses `~/ida-venv/bin/python` for the TUI (override with `$IDATUI_PYTHON`) and
 resolves binary paths against your real cwd. The binary's directory must be
 writable (idalib writes a `.i64` there).
 
+Headerless blobs need to be told what they are — a raw firmware dump has no
+format to detect, and IDA falls back to x86 at address 0, which analyses to
+nothing:
+
+```sh
+./ida-tui fw.bin --processor arm --base 0x8000000
+```
+
+`--base` is a real address (IDA's own `-b` is in paragraphs; the conversion is
+done for you). In a project the options are recorded per binary, which is what a
+multi-image firmware wants. They apply to the first open only — after that the
+`.i64` records how the image was loaded. See `docs/PROJECTS.md`.
+
 > Recovering a wedged database: if a worker was hard-killed it leaves unpacked
 > `foo.id0/.id1/.id2/.nam/.til` next to `foo.i64`, and the `.i64` then refuses to
 > reopen. Delete those stale files (never the `.i64`) and retry — `ida-tui` does

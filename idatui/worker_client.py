@@ -71,8 +71,9 @@ class _NoopKeepAlive:
 
 class WorkerClient:
     def __init__(self, binary_path: str, *, ttl: int = 0,
-                 python: str | None = None) -> None:
+                 python: str | None = None, load_args: str = "") -> None:
         self._bin = os.path.abspath(os.path.expanduser(binary_path))
+        self._load_args = load_args or ""   # IDA switches for a headerless blob
         self._python = python or _find_worker_python()
         tag = f"{os.getpid()}-{uuid.uuid4().hex[:8]}"
         self._sock_path = f"/tmp/idatui-worker-{tag}.sock"
@@ -93,8 +94,11 @@ class WorkerClient:
                 # run worker.py as a SCRIPT (not -m idatui.worker) so we don't
                 # import the textual-dependent idatui package __init__ under the
                 # IDA python, which usually has no textual.
+                argv = [self._python, _WORKER_PY, self._sock_path, self._bin]
+                if self._load_args:
+                    argv.append(self._load_args)
                 self._proc = subprocess.Popen(
-                    [self._python, _WORKER_PY, self._sock_path, self._bin],
+                    argv,
                     stdout=open(self._log_path, "wb"),
                     stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
                 )

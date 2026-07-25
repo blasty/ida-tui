@@ -52,11 +52,49 @@ class BinaryRef:
     label: str    # unique within the project; names the staged file
     source: str   # absolute path to the original binary
     staged: str   # absolute path IDA actually opens (inside the sidecar)
+    #: How to LOAD it. Only meaningful for a headerless blob: an ELF/PE says what
+    #: it is, a raw firmware image doesn't, and IDA defaults to metapc at 0.
+    processor: str = ""   # IDA processor name: arm, armb, mipsb, metapc, …
+    base: int = 0         # load address (natural, e.g. 0x8000000)
+    ida_args: str = ""    # escape hatch: extra IDA command-line switches
 
     @property
     def db(self) -> str:
         """The database IDA creates for the staged file."""
         return self.staged + ".i64"
+
+    @property
+    def load_args(self) -> str:
+        """``processor``/``base`` as IDA command-line switches.
+
+        ``-b`` is in PARAGRAPHS, not bytes — ``-b1000`` loads at 0x10000. That
+        is a trap worth hiding: projects say ``"base": "0x8000000"`` and the
+        conversion happens here.
+        """
+        parts = []
+        if self.processor:
+            parts.append(f"-p{self.processor}")
+        if self.base:
+            parts.append(f"-b{self.base >> 4:x}")
+        if self.ida_args:
+            parts.append(self.ida_args)
+        return " ".join(parts)
+
+
+def _as_addr(v) -> int:
+    """A load address from JSON: int, or a string in any base ("0x8000000").
+
+    Addresses are written by hand in a project file, so accept how people write
+    them rather than demanding decimal.
+    """
+    if v is None or v == "":
+        return 0
+    if isinstance(v, int):
+        return v
+    try:
+        return int(str(v), 0)
+    except ValueError:
+        return 0
 
 
 def _stat_key(path: str) -> tuple[int, int] | None:
@@ -109,7 +147,12 @@ class Project:
                 e = {"path": e}
             if not isinstance(e, dict) or not e.get("path"):
                 raise ProjectError(f"project {path}: bad binary entry {e!r}")
-            norm.append({k: e[k] for k in ("path", "label") if e.get(k)})
+            # Keep every recognised key: a whitelist of path/label silently
+            # dropped the load options on the first save, so a blob's processor
+            # and base vanished the moment the project was reopened.
+            norm.append({k: e[k] for k in
+                         ("path", "label", "processor", "base", "ida_args")
+                         if e.get(k) not in (None, "")})
         name = raw.get("name") or os.path.splitext(os.path.basename(path))[0]
         try:
             pct = int(raw.get("memory_pct", DEFAULT_MEMORY_PCT))
@@ -119,8 +162,13 @@ class Project:
 
     @classmethod
     def create(cls, path: str, binaries: list[str], name: str | None = None,
-               memory_pct: int = DEFAULT_MEMORY_PCT) -> "Project":
-        """Write a new project file listing ``binaries`` (an ad-hoc project)."""
+               memory_pct: int = DEFAULT_MEMORY_PCT, load: dict | None = None) -> "Project":
+        """Write a new project file listing ``binaries`` (an ad-hoc project).
+
+        ``load`` carries per-binary load options (processor/base/ida_args) that
+        apply to every binary given here — a headerless blob needs them, and one
+        command line normally adds blobs of the same kind.
+        """
         if not binaries:
             raise ProjectError("a project needs at least one binary")
         entries, seen = [], set()
@@ -130,7 +178,9 @@ class Project:
             if key in seen:
                 continue
             seen.add(key)
-            entries.append({"path": p})
+            e = {"path": p}
+            e.update({k: v for k, v in (load or {}).items() if v})
+            entries.append(e)
         path = os.path.abspath(os.path.expanduser(path))
         proj = cls(path, name or os.path.splitext(os.path.basename(path))[0],
                    entries, memory_pct)
@@ -183,8 +233,12 @@ class Project:
                     n += 1
                 label = f"{label}_{n}"
             used.add(label)
-            refs.append(BinaryRef(label=label, source=src,
-                                  staged=os.path.join(self.bin_dir, label)))
+            refs.append(BinaryRef(
+                label=label, source=src,
+                staged=os.path.join(self.bin_dir, label),
+                processor=str(e.get("processor") or ""),
+                base=_as_addr(e.get("base")),
+                ida_args=str(e.get("ida_args") or "")))
         return tuple(refs)
 
     @property
@@ -206,7 +260,8 @@ class Project:
         return next((r for r in self._refs
                      if os.path.realpath(r.source) == key), None)
 
-    def add(self, binary: str, label: str | None = None) -> BinaryRef:
+    def add(self, binary: str, label: str | None = None,
+            load: dict | None = None) -> BinaryRef:
         """Add a binary, or return the existing entry if it's already here."""
         existing = self.by_source(binary)
         if existing is not None:
@@ -214,6 +269,7 @@ class Project:
         entry = {"path": os.path.abspath(os.path.expanduser(binary))}
         if label:
             entry["label"] = label
+        entry.update({k: v for k, v in (load or {}).items() if v})
         self._entries.append(entry)
         self._refs = self._build_refs()
         return self._refs[-1]

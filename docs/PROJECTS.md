@@ -239,6 +239,37 @@ Still open: project-level persistence (remember the active binary and each
 binary's position across sessions — today a fresh launch auto-lands).
 
 
+## Headerless blobs
+
+An ELF/PE/Mach-O says what it is, so IDA figures it out. A raw firmware dump
+says nothing, and IDA falls back to **x86 at address 0** — which on an ARM image
+analyses to zero functions. It doesn't fail; it just quietly gives you nothing.
+
+    ida-tui fw.bin --processor arm --base 0x8000000
+
+or per binary in a project, which is where it belongs for a multi-image firmware:
+
+    {"binaries": [
+       {"path": "bootloader.bin", "processor": "arm",  "base": "0x0"},
+       {"path": "app.bin",        "processor": "arm",  "base": "0x8000000"},
+       {"path": "dsp.bin",        "processor": "mipsb", "base": "0x10000000"}
+    ]}
+
+`base` is written the way you'd say it (`0x8000000`, any base, int or string).
+IDA's own `-b` switch is in **paragraphs** — `-b1000` loads at 0x10000 — so the
+conversion happens in `BinaryRef.load_args`, and a base that isn't 16-byte
+aligned is rejected rather than silently landing somewhere else. `ida_args`
+passes anything else through untouched.
+
+Two things worth knowing:
+
+* The options apply to the **first** open only. Afterwards the `.i64` records how
+  the image was loaded, and passing the switches again makes IDA refuse to open
+  it — so the worker skips them once a database exists.
+* Changing the processor or base of a binary you've already analysed does
+  nothing, because the database wins. Delete its `.i64` from the sidecar to
+  reload with new options.
+
 ## Decisions
 
 - Residency is a **memory budget** (default 25% of RAM, `memory_pct`), not a

@@ -23,6 +23,18 @@ import sys
 _LOCK_SUFFIXES = (".id0", ".id1", ".id2", ".nam", ".til")
 
 
+def _load_args(load: dict) -> str:
+    """``load`` as IDA switches, for the single-binary path (no project ref)."""
+    parts = []
+    if load.get("processor"):
+        parts.append(f"-p{load['processor']}")
+    if load.get("base"):
+        parts.append(f"-b{int(load['base']) >> 4:x}")   # -b is PARAGRAPHS
+    if load.get("ida_args"):
+        parts.append(str(load["ida_args"]))
+    return " ".join(parts)
+
+
 def _log(msg: str) -> None:
     print(f"ida-tui: {msg}", file=sys.stderr)
 
@@ -57,7 +69,36 @@ def main(argv: list[str] | None = None) -> int:
                    help="do not run the keepalive heartbeat")
     p.add_argument("--rpc", metavar="PATH",
                    help="listen for RPC on this unix socket (puppeteer the TUI)")
+    g = p.add_argument_group(
+        "loading a headerless blob",
+        "An ELF/PE/Mach-O says what it is. A raw firmware dump doesn't, and IDA "
+        "falls back to x86 at address 0 — which analyses to nothing. These say "
+        "how to read it, and are recorded per binary in a project.")
+    g.add_argument("--processor", metavar="NAME",
+                   help="IDA processor: arm, armb (big-endian), mipsb, metapc, …")
+    g.add_argument("--base", metavar="ADDR",
+                   help="load address, e.g. 0x8000000 (any base; NOT paragraphs)")
+    g.add_argument("--ida-args", metavar="STR", dest="ida_args",
+                   help="extra IDA command-line switches, passed through as-is")
     args = p.parse_args(argv)
+
+    load: dict = {}
+    if args.processor:
+        load["processor"] = args.processor
+    if args.base:
+        try:
+            base = int(args.base, 0)
+        except ValueError:
+            _log(f"--base must be a number (got {args.base!r})")
+            return 2
+        if base % 16:
+            # -b is in paragraphs, so an unaligned base cannot be expressed and
+            # would silently load somewhere else.
+            _log(f"--base must be 16-byte aligned (got {base:#x})")
+            return 2
+        load["base"] = base
+    if args.ida_args:
+        load["ida_args"] = args.ida_args
 
     project = None
     binary = None
@@ -70,7 +111,7 @@ def main(argv: list[str] | None = None) -> int:
                 if args.binary:  # extend an existing project, skipping repeats
                     before = len(project.refs)
                     for b in args.binary:
-                        project.add(b)
+                        project.add(b, load=load or None)
                     added = len(project.refs) - before
                     dupes = len(args.binary) - added
                     if added:
@@ -80,7 +121,7 @@ def main(argv: list[str] | None = None) -> int:
                         _log(f"{dupes} already in the project (matched by path) "
                              f"— left alone")
             elif args.binary:
-                project = Project.create(ppath, args.binary)
+                project = Project.create(ppath, args.binary, load=load or None)
                 _log(f"created project {ppath} with {len(project.refs)} binaries")
             else:
                 _log(f"no such project: {ppath} (pass binaries to create it)")
@@ -120,7 +161,8 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     rpc_path = os.path.abspath(os.path.expanduser(args.rpc)) if args.rpc else None
     IdaTui(open_path=binary, keepalive=not args.no_keepalive,
-           rpc_path=rpc_path, ttl=args.ttl, project=project).run()
+           rpc_path=rpc_path, ttl=args.ttl, project=project,
+           load_args=_load_args(load)).run()
     return 0
 
 
