@@ -2069,6 +2069,10 @@ class SymbolPalette(ModalScreen):
         Binding("f2", "scope", "This binary / whole project", show=False),
     ]
     LIMIT = 200
+    #: Project scope nearly always saturates its cap (every binary contributes),
+    #: where a local filter usually returns a handful. Keep the list short so
+    #: arrowing through it stays snappy; narrow further by typing.
+    PROJECT_LIMIT = 60
 
     def __init__(self, funcs: list[Func], index=None, binary=None) -> None:
         super().__init__()
@@ -2114,7 +2118,7 @@ class SymbolPalette(ModalScreen):
             # full fuzzy pass, and fetching 3x the display limit rather than 10x
             # keeps the per-keystroke work down on a big project.
             hits = self._index.search(query, kind=KIND_FUNC,
-                                      limit=self.LIMIT * 3) if query else []
+                                      limit=self.PROJECT_LIMIT * 3) if query else []
             q = query.lower()
             scored = []
             for h in hits:
@@ -2126,7 +2130,7 @@ class SymbolPalette(ModalScreen):
             scored.sort(key=lambda t: (t[0], t[1], t[2], t[3].binary, t[3].addr))
             rows = [(h.binary, h.addr, h.text,
                      tuple(range(at, at + len(q))) if at < (1 << 30) else ())
-                    for at, _, _, h in scored[:self.LIMIT]]
+                    for at, _, _, h in scored[:self.PROJECT_LIMIT]]
         elif query:
             scored = []
             for f in self._funcs:
@@ -2156,7 +2160,8 @@ class SymbolPalette(ModalScreen):
         if self._results:
             ol.highlighted = 0
         scope = "project" if self._project_scope else "this binary"
-        more = "+" if len(self._results) == self.LIMIT else ""
+        cap = self.PROJECT_LIMIT if self._project_scope else self.LIMIT
+        more = "+" if len(self._results) == cap else ""
         hint = "  (F2: this binary)" if self._project_scope else (
             "  (F2: whole project)" if self._index is not None else "")
         self.query_one("#pal-title", Static).update(
