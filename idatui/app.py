@@ -988,6 +988,10 @@ class ListingView(SearchMixin, NavMixin, ColumnCursor, ScrollView, can_focus=Tru
             self.index = index
             self.ea = ea
 
+    class Scrolled(Message):
+        """Posted when the viewport scrolls (wheel/scrollbar) — the cursor need
+        not have moved, so the split view can still follow along."""
+
     def __init__(self) -> None:
         super().__init__()
         self.model: ListingModel | None = None
@@ -1292,6 +1296,11 @@ class ListingView(SearchMixin, NavMixin, ColumnCursor, ScrollView, can_focus=Tru
         if top != round(self.scroll_offset.y):
             self.scroll_to(y=top, animate=False)
 
+    def watch_scroll_y(self, old_value: float, new_value: float) -> None:
+        super().watch_scroll_y(old_value, new_value)
+        if round(old_value) != round(new_value):
+            self.post_message(ListingView.Scrolled())
+
     # -- navigation -------------------------------------------------------- #
     def _visible_height(self) -> int:
         return max(self.size.height, 1)
@@ -1438,6 +1447,10 @@ class DecompView(SearchMixin, NavMixin, ColumnCursor, ScrollView, can_focus=True
             super().__init__()
             self.index = index
             self.ea = ea
+
+    class Scrolled(Message):
+        """Posted when the viewport scrolls (wheel/scrollbar) — the cursor need
+        not have moved, so the split view can still follow along."""
 
     def __init__(self) -> None:
         super().__init__(id="decomp")
@@ -1611,6 +1624,11 @@ class DecompView(SearchMixin, NavMixin, ColumnCursor, ScrollView, can_focus=True
         top = max(0, min(line - max(screen_row, 0), max(len(self._strips) - 1, 0)))
         if top != round(self.scroll_offset.y):
             self.scroll_to(y=top, animate=False)
+
+    def watch_scroll_y(self, old_value: float, new_value: float) -> None:
+        super().watch_scroll_y(old_value, new_value)
+        if round(old_value) != round(new_value):
+            self.post_message(DecompView.Scrolled())
 
     def line_for_ea(self, ea: int) -> int | None:
         """The pseudocode line whose marker ea is the largest <= ``ea`` (the C
@@ -4743,10 +4761,11 @@ class IdaTui(App):
         dec = self.query_one(DecompView)
         if source == "decomp":
             dec.set_link(None)  # the driver shows its own cursor, no band
-            eas = (self._split_eamap[dec.cursor]
-                   if 0 <= dec.cursor < len(self._split_eamap) else [])
+            line, screen = self._split_anchor(dec)
+            eas = (self._split_eamap[line]
+                   if 0 <= line < len(self._split_eamap) else [])
             if not eas:  # fallback: the single /*ea*/ marker for the line
-                one = dec._line_ea(dec.cursor)
+                one = dec._line_ea(line)
                 eas = [one] if one is not None else []
             rows: set[int] = set()
             if lst.model is not None:
@@ -4756,19 +4775,21 @@ class IdaTui(App):
                         rows.add(r)
             lst.set_link(rows)
             if rows:
-                # keep the linked region level with the driver's cursor row so
+                # keep the linked region level with the driver's anchor row so
                 # the eye tracks straight across the two panes
-                lst.align(min(rows), dec.cursor - round(dec.scroll_offset.y))
+                lst.align(min(rows), screen)
         else:  # the listing drives
             lst.set_link(set())
-            ea = lst._cursor_ea()
+            row, screen = self._split_anchor(lst)
+            head = lst._head(row)
+            ea = head.ea if head is not None else None
             if ea is None:
                 dec.set_link(None)
                 return
             rng = self._split_range
             if rng is not None and not (rng[0] <= ea <= rng[1]):
-                # cursor left the decompiled function — follow it to whatever
-                # function it's now in (the unified view spans many functions).
+                # left the decompiled function — follow to whatever function is
+                # under the anchor (the unified view spans many functions).
                 self._resync_decomp(ea)
                 return
             line = self._split_ea2line.get(ea)
@@ -4776,9 +4797,28 @@ class IdaTui(App):
                 line = dec.line_for_ea(ea)
             if line is not None:
                 dec.set_link(line)
-                dec.align(line, lst.cursor - round(lst.scroll_offset.y))
+                dec.align(line, screen)
             else:
                 dec.set_link(None)
+
+    @staticmethod
+    def _split_anchor(view) -> tuple[int, int]:  # type: ignore[no-untyped-def]
+        """(row, screen_row) the split sync anchors on: the driver's cursor while
+        it's visible, else the top visible row. A wheel-scroll/scrollbar drag
+        never moves the cursor, so anchoring on the viewport keeps the companion
+        following once the cursor scrolls out of sight."""
+        top = round(view.scroll_offset.y)
+        if top <= view.cursor < top + view._visible_height():
+            return view.cursor, view.cursor - top
+        return top, 0
+
+    def on_listing_view_scrolled(self, msg: "ListingView.Scrolled") -> None:
+        if self._split and self._active == "listing":
+            self._sync_split("listing")
+
+    def on_decomp_view_scrolled(self, msg: "DecompView.Scrolled") -> None:
+        if self._split and self._active == "decomp":
+            self._sync_split("decomp")
 
     @work(thread=True, group="split-resync", exclusive=True)
     def _resync_decomp(self, ea: int) -> None:

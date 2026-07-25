@@ -409,11 +409,19 @@ async def s_split_view(c: Ctx):
     multi = next((i for i, eas in enumerate(m) if len(eas) > 1), None)
     if multi is not None:
         app._split_eamap = m
+        dec.focus()          # the decomp must BE the driver for a decomp-driven
+        app._active = "decomp"  # sync (else its align() re-syncs listing-driven)
         dec.cursor = multi
+        dec._scroll_cursor_into_view()  # key-nav always does; the anchor needs it
+        await c.pause(0.1)
         app._sync_split("decomp")
+        await c.pause(0.1)
         c.check("a multi-instruction C line bands a region (>1 listing row)",
                 len(lst._link_rows) > 1,
                 f"line={multi} eas={len(m[multi])} rows={sorted(lst._link_rows)[:8]}")
+        lst.focus()
+        app._active = "listing"
+        await c.pause(0.05)
     else:
         c.check("a multi-instruction C line bands a region (>1 listing row)",
                 True, "no multi-instruction line in this function (skipped)")
@@ -447,6 +455,16 @@ async def s_split_view(c: Ctx):
         c.check("the companion pane sits level with the driver's cursor",
                 link is not None and top == want,
                 f"driver_row={drv} link={link} dec_top={top} want={want}")
+        # a PURE scroll (wheel/scrollbar) moves no cursor — it must still drag
+        # the companion along (anchors on the viewport once the cursor is gone)
+        before_cur, before_dec = lst.cursor, round(dec.scroll_offset.y)
+        lst.scroll_to(y=round(lst.scroll_offset.y) + 30, animate=False)
+        await c.pause(0.35)
+        c.check("a pure scroll in the driver drags the companion along",
+                lst.cursor == before_cur
+                and round(dec.scroll_offset.y) != before_dec,
+                f"cursor {before_cur}->{lst.cursor} "
+                f"dec_top {before_dec}->{round(dec.scroll_offset.y)}")
     await c.press("tab")
     await c.pause(0.1)
     c.check("Tab in split focuses the pseudocode pane", app._active == "decomp",
@@ -458,6 +476,8 @@ async def s_split_view(c: Ctx):
             "no /*0xEA*/ markers in the pseudocode")
     if target is not None:
         dec.cursor = target
+        dec._scroll_cursor_into_view()
+        await c.pause(0.1)
         app._sync_split("decomp")
         await c.pause(0.1)
         want = lst.model.ensure_ea(dec._line_eas[target])
@@ -493,6 +513,8 @@ async def s_split_view(c: Ctx):
         lst.focus()
         app._active = "listing"
         lst.cursor = row
+        lst._scroll_cursor_into_view()
+        await c.pause(0.1)
         app._sync_split("listing")  # cursor now outside the decompiled fn
         followed = await c.wait(lambda: dec.loaded_ea == other.addr, 25)
         c.check("listing cursor crossing into another function re-syncs the decomp",
