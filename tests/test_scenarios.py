@@ -911,6 +911,23 @@ async def s_view_toggle(c: Ctx):
     styled = any(seg.style is not None and seg.style.color is not None
                  for strip in dec._strips[:min(dec.total, 200)] for seg in strip)
     c.check("pseudocode is syntax-highlighted", styled)
+    # Cancelling a prompt must hand focus back to the pane you were READING.
+    # _code_view() used to choose on _pref, which was only ever "listing", so it
+    # focused the hidden listing and the pseudocode stopped answering the
+    # keyboard — arrows did nothing at all until you clicked.
+    dec.focus()
+    await c.pause(0.05)
+    line0 = dec.cursor
+    await c.press("g")
+    await c.wait(lambda: app.query_one("#goto", Input).display, 10)
+    await c.press("escape")
+    await c.wait(lambda: not app.query_one("#goto", Input).display, 10)
+    await c.press("down")
+    await c.press("down")
+    await c.pause(0.2)
+    c.check("cancelling goto leaves focus in the pseudocode (arrows still work)",
+            dec.cursor > line0,
+            f"cursor {line0} -> {dec.cursor} focus={type(app.focused).__name__}")
     dec.focus()  # Tab only toggles the view from a code pane; elsewhere it's
     await c.pause(0.05)  # focus-next, which would silently leave us in decomp
     await c.press("tab")

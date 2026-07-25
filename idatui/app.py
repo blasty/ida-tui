@@ -105,7 +105,6 @@ class BinaryState:
     func_index: object | None = None
     nav: list = field(default_factory=list)
     cur: object | None = None
-    pref: str = "listing"
     active: str = "listing"
     split: bool = False
     filter_term: str = ""
@@ -3201,7 +3200,9 @@ class IdaTui(App):
         self._filter_timer = None
         self._sort_col = 0        # 0=addr, 1=name, 2=size
         self._sort_reverse = False
-        self._pref = "listing"   # unified: the linear listing is the code view
+        # ONE notion of "which pane you're in": _active, kept in step with focus
+        # (on_descendant_focus does that while split). There used to be a second,
+        # _pref, but it was only ever assigned "listing" — see _code_mode().
         self._active = "listing"  # currently shown view (in split: the focused pane)
         self._split = False       # side-by-side listing + pseudocode
         self._split_eamap: list[list[int]] = []  # split: decomp line -> instr EAs
@@ -3774,7 +3775,7 @@ class IdaTui(App):
             self._states[self._binary] = BinaryState(
                 label=self._binary, program=self.program,
                 func_index=self._func_index, nav=list(self._nav), cur=self._cur,
-                pref=self._pref, active=self._active, split=self._split,
+                active=self._active, split=self._split,
                 filter_term=self._filter_term, dirty=self._dirty)
         self._loading_screen = LoadingScreen(label, note="switching\u2026")
         self.push_screen(self._loading_screen)
@@ -3805,7 +3806,6 @@ class IdaTui(App):
         self._binary = label
         self._pool.set_active(label)
         self._open_path = self._project.by_label(label).staged
-        self._pref = st.pref if st else "listing"
         self._active = st.active if st else "listing"
         self._split = st.split if st else False
         self._filter_term = st.filter_term if st else ""
@@ -5210,7 +5210,12 @@ class IdaTui(App):
         self.query_one("#func-table", DataTable).focus()
 
     def _code_view(self):  # type: ignore[no-untyped-def]
-        return self.query_one(DecompView if self._pref == "decomp" else ListingView)
+        """The code pane the user is in — where focus belongs after a prompt closes.
+
+        This used to pick on _pref, which was always "listing", so closing the
+        goto prompt while reading pseudocode threw focus into the listing.
+        """
+        return self._active_code_view()
 
     def _active_code_view(self):  # type: ignore[no-untyped-def]
         """The currently-shown code widget (for reading the cursor address)."""
@@ -5472,7 +5477,7 @@ class IdaTui(App):
         self._show_active()
 
     def on_hex_view_to_code(self, msg: HexView.ToCode) -> None:
-        self._active = self._pref
+        self._active = self._code_mode()
         self._goto_ea(msg.va, push=True)
 
     def _status_for_cur(self, mode: str) -> None:

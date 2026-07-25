@@ -168,7 +168,7 @@ def snapshot(app) -> dict[str, Any]:
         pass
     return {
         "active": app._active,
-        "pref": app._pref,
+        "pref": app._code_mode(),   # kept for wire compat; a constant now
         "function": ({"ea": cur.ea, "name": cur.name} if cur else None),
         "cursor": _cursor_info(app, w),
         "status": st,
