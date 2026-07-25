@@ -26,7 +26,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from idatui.app import (  # noqa: E402
     ConfirmScreen, DecompView, DisasmView, FunctionsPanel, HexView, IdaTui,
     ListingView, StringsPalette, StructEditor, SymbolPalette, XrefsScreen,
-    _str_display,
+    _str_display, _word_occurrences,
 )
 from textual.widgets import (  # noqa: E402
     DataTable, Footer, Input, OptionList, Static, TextArea,
@@ -1388,6 +1388,103 @@ async def s_retype(c: Ctx):
             after is not None and "zz_retype_arg" in after.prototype,
             f"proto={after.prototype if after else None!r}")
     app.program.set_function_type(cf.addr, old_proto)  # restore
+    # the retype above kicked off a recompile+reload; let it land before we start
+    # placing the cursor, or the reload resets it under us.
+    app.program.bump_names()
+    await c.wait(lambda: not dec.loading and dec.loaded_ea == cf.addr
+                 and bool(dec._texts), 25)
+    await c.pause(0.3)
+
+    # -- 'y' on a LOCAL variable retypes that variable, not the prototype --- #
+    fts = app.program.func_types(cf.addr)
+    lv = next((v for v in (fts.lvars if fts else []) if not v.is_arg), None)
+    if lv is not None:
+        line = next((i for i, t in enumerate(dec._texts)
+                     if _word_occurrences(t, lv.name)), None)
+        if line is not None:
+            col = _word_occurrences(dec._texts[line], lv.name)[0][0]
+            dec.focus()
+            dec.cursor, dec.cursor_x = line, col + 1  # inside the word
+            dec.refresh()
+            await c.pause(0.05)
+            await c.press("y")
+            await c.wait(lambda: app.query_one("#retype", Input).display, 10)
+            ri = app.query_one("#retype", Input)
+            c.check("'y' on a local variable prefills that variable's type",
+                    ri.value == lv.type and lv.name in str(ri.placeholder),
+                    f"val={ri.value!r} want={lv.type!r} ph={ri.placeholder!r}")
+            ri.value = "unsigned __int64"
+            await c.press("enter")
+            changed = await c.wait(lambda: (lambda f: bool(f) and any(
+                v.name == lv.name and v.type == "unsigned __int64"
+                for v in f.lvars))(app.program.func_types(cf.addr)), 25)
+            c.check("applying it retypes the local variable", changed,
+                    f"{lv.name}: wanted unsigned __int64")
+            after = app.program.func_types(cf.addr)
+            c.check("retyping a local leaves the prototype alone",
+                    after is not None and after.prototype == old_proto,
+                    f"proto={after.prototype if after else None!r}")
+
+    # -- 'y' on a GLOBAL retypes the global, not the enclosing function ----- #
+    # The lvar retype above recompiled too — settle again, or the scan below
+    # indexes into pseudocode that's about to be replaced.
+    await c.wait(lambda: not dec.loading and dec.loaded_ea == cf.addr
+                 and bool(dec._texts), 25)
+    await c.pause(0.3)
+
+    # Pick a global that actually appears as a word in the pseudocode — a symbol
+    # from decompile().refs often doesn't (a string ref renders as its literal).
+    lvnames = {v.name for v in (fts.lvars if fts else [])}
+    glob = None
+    for i, t in enumerate(dec._texts):
+        for w in re.findall(r"[A-Za-z_][A-Za-z0-9_]*", t):
+            if w in lvnames or w == cf.name:
+                continue
+            try:
+                a = app.program.resolve(w)
+            except Exception:  # noqa: BLE001
+                continue
+            if app.program.func_types(a) is not None:
+                continue
+            d = app.program.data_type(a) or {}
+            if (d.get("name") and not d.get("is_func")
+                    and "(" not in (d.get("type") or "")):
+                glob = (w, a, d, i)
+                break
+        if glob:
+            break
+    if glob is not None:
+        gname, gaddr, dt, line = glob
+        glob = type("G", (), {"addr": gaddr})()  # keep the checks below readable
+        if line is not None:
+            col = _word_occurrences(dec._texts[line], gname)[0][0]
+            dec.focus()
+            dec.cursor, dec.cursor_x = line, col + 1  # inside the word
+            dec.refresh()
+            await c.pause(0.05)
+            c.check("the cursor sits on the global",
+                    dec.word_under_cursor() == gname,
+                    f"word={dec.word_under_cursor()!r} want={gname!r} "
+                    f"line={line} col={col} text={dec._texts[line][:60]!r}")
+            await c.press("y")
+            await c.wait(lambda: app.query_one("#retype", Input).display, 10)
+            ri = app.query_one("#retype", Input)
+            c.check("'y' on a global prefills the global's type (not the proto)",
+                    ri.value != old_proto and gname in str(ri.placeholder),
+                    f"val={ri.value!r} ph={ri.placeholder!r}")
+            ri.value = "unsigned __int64"
+            await c.press("enter")
+            retyped = await c.wait(
+                lambda: (app.program.data_type(glob.addr) or {}).get("type")
+                == "unsigned __int64", 25)
+            c.check("applying it retypes the global", retyped,
+                    f"type={(app.program.data_type(glob.addr) or {}).get('type')!r}")
+            after = app.program.func_types(cf.addr)
+            c.check("retyping a global leaves the prototype alone",
+                    after is not None and after.prototype == old_proto,
+                    f"proto={after.prototype if after else None!r}")
+            if dt.get("type"):  # restore
+                app.program.set_data_type(glob.addr, dt["type"])
 
 
 @scenario("scroll_restore")

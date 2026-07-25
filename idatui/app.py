@@ -4122,7 +4122,10 @@ class IdaTui(App):
             lv = next((v for v in ft.lvars if v.name == word), None)
             if lv is not None:
                 kind, prefill = "lvar", lv.type
-        # 2) a function under the cursor (self or a referenced one)
+        # 2) a symbol under the cursor: a function (retype its prototype) or a
+        #    global/data item (retype the variable). Without the data case a
+        #    global fell through to (3) and silently retyped the ENCLOSING
+        #    function's prototype instead.
         if kind is None and self._looks_like_symbol(word):
             try:
                 tgt = self.program.resolve(word)
@@ -4132,6 +4135,12 @@ class IdaTui(App):
                 tft = self.program.func_types(tgt)
                 if tft is not None:
                     kind, subject, prefill = "func", tgt, tft.prototype
+                else:
+                    dt = self.program.data_type(tgt)
+                    if dt is not None and not dt.get("is_func"):
+                        kind, subject = "data", tgt
+                        prefill = dt.get("type") or self._guess_data_type(
+                            dt.get("size") or 0)
         # 3) fall back to the current function itself
         if kind is None and ft is not None:
             kind, subject, prefill = "func", self._cur.ea, ft.prototype
@@ -4139,6 +4148,13 @@ class IdaTui(App):
             self.app.call_from_thread(self._status, "nothing to retype under the cursor")
             return
         self.app.call_from_thread(self._open_retype, view, kind, subject, word or "", prefill)
+
+    @staticmethod
+    def _guess_data_type(size: int) -> str:
+        """A sensible prefill when a global carries no type yet."""
+        return {1: "unsigned __int8", 2: "unsigned __int16",
+                4: "unsigned __int32", 8: "unsigned __int64"}.get(
+                    size, f"char[{size}]" if size > 0 else "void *")
 
     def _open_retype(self, view, kind: str, subject: int, word: str,  # type: ignore[no-untyped-def]
                      prefill: str) -> None:
@@ -4166,6 +4182,8 @@ class IdaTui(App):
         assert self.program is not None
         if kind == "func":
             err = self.program.set_function_type(subject, new)
+        elif kind == "data":  # a global / data item referenced in the body
+            err = self.program.set_data_type(subject, new)
         else:  # lvar of the current function
             err = self.program.set_lvar_type(self._cur.ea, word, new)
         if err:
@@ -5135,9 +5153,10 @@ class IdaTui(App):
         self._sync_split(self._active)  # re-link with the region map
 
     def on_decomp_view_cursor_moved(self, msg: DecompView.CursorMoved) -> None:
-        if self._nav:
+        dv = self._try_view(DecompView)
+        if self._nav and dv is not None:
             self._nav[-1].dec_cursor = msg.index
-            self._nav[-1].dec_cursor_x = self.query_one(DecompView).cursor_x
+            self._nav[-1].dec_cursor_x = dv.cursor_x
         if self._split:
             if self._active == "decomp":
                 self._sync_split("decomp")
@@ -5147,12 +5166,23 @@ class IdaTui(App):
             loc = f" @ {msg.ea:#x}" if msg.ea is not None else ""
             self._status(f"{self._cur.name}{loc}   [pseudocode line {msg.index}]")
 
+    def _try_view(self, cls):  # type: ignore[no-untyped-def]
+        """The code view, or None. App.query_one searches the TOP screen, so a
+        cursor-moved message that lands while any modal is up (the loading
+        overlay, a project switch) would otherwise raise NoMatches and kill the
+        app from a message handler."""
+        try:
+            return self.query_one(cls)
+        except Exception:  # noqa: BLE001 -- NoMatches: a modal owns the screen
+            return None
+
     def on_listing_view_cursor_moved(self, msg: ListingView.CursorMoved) -> None:
-        if self._nav:
+        lst = self._try_view(ListingView)
+        if self._nav and lst is not None:
             self._nav[-1].cursor = msg.index
-            self._nav[-1].cursor_x = self.query_one(ListingView).cursor_x
+            self._nav[-1].cursor_x = lst.cursor_x
             if msg.index >= 0:
-                self._nav[-1].scroll_y = round(self.query_one(ListingView).scroll_offset.y)
+                self._nav[-1].scroll_y = round(lst.scroll_offset.y)
         if self._split:
             if self._active == "listing":
                 self._sync_split("listing")

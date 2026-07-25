@@ -586,6 +586,35 @@ def xref_types(
 
 @tool
 @idasync
+def data_type(
+    addr: Annotated[str, "Address or name of a data item / global"],
+) -> dict:
+    """The current C type of a data item, for prefilling a retype prompt:
+    {addr, name, type, size, is_func}. ``type`` is empty when the item is
+    untyped; ``is_func`` distinguishes a global from a function so the caller
+    knows which flavour of set_type to use."""
+    import idaapi
+    import ida_bytes
+    import ida_name
+    import idc
+    raw = str(addr).strip()
+    try:
+        ea = int(raw, 16)
+    except ValueError:
+        ea = idaapi.get_name_ea(idaapi.BADADDR, raw)
+    if ea == idaapi.BADADDR or not ida_bytes.is_mapped(ea):
+        return {"addr": raw, "error": f"not a mapped address: {raw}"}
+    return {
+        "addr": hex(ea),
+        "name": ida_name.get_name(ea) or "",
+        "type": idc.get_type(ea) or "",
+        "size": int(ida_bytes.get_item_size(ea) or 0),
+        "is_func": bool(idaapi.get_func(ea)),
+    }
+
+
+@tool
+@idasync
 def decomp_map(
     addr: Annotated[str, "Function address or name"],
 ) -> dict:

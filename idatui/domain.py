@@ -1068,6 +1068,27 @@ class Program:
             return None
         return row.get("error") or "failed to set the prototype"
 
+    def data_type(self, ea: int) -> dict | None:
+        """Current type info for a data item/global: {addr,name,type,size,is_func}.
+        None if the tool is unavailable or the address isn't mapped."""
+        try:
+            r = self.client.call("data_type", addr=hex(ea))
+        except IDAToolError:
+            return None
+        if not isinstance(r, dict) or r.get("error"):
+            return None
+        return r
+
+    def set_data_type(self, ea: int, decl: str) -> str | None:
+        """Set a global/data item's type. None on success, else an error string."""
+        r = self.client.call(
+            "set_type", edits=[{"kind": "global", "addr": hex(ea), "type": decl}])
+        res = r.get("result", []) if isinstance(r, dict) else []
+        row = res[0] if res and isinstance(res[0], dict) else {}
+        if row.get("ok"):
+            return None
+        return row.get("error") or "failed to set the type"
+
     def set_lvar_type(self, fn_ea: int, var: str, ty: str) -> str | None:
         """Set a decompiler local variable's type (via the injected server tool).
         None on success, else an error string."""
