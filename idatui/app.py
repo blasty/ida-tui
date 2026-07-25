@@ -1284,6 +1284,14 @@ class ListingView(SearchMixin, NavMixin, ColumnCursor, ScrollView, can_focus=Tru
         if row < top or row >= top + height:
             self.scroll_to(y=max(row - height // 3, 0), animate=False)
 
+    def align(self, row: int, screen_row: int) -> None:
+        """Scroll so ``row`` sits at viewport offset ``screen_row`` — keeps this
+        (companion) pane visually level with the driver's cursor in split view.
+        Clamps at the ends, so alignment is best-effort near the edges."""
+        top = max(0, min(row - max(screen_row, 0), max(self.total - 1, 0)))
+        if top != round(self.scroll_offset.y):
+            self.scroll_to(y=top, animate=False)
+
     # -- navigation -------------------------------------------------------- #
     def _visible_height(self) -> int:
         return max(self.size.height, 1)
@@ -1596,6 +1604,13 @@ class DecompView(SearchMixin, NavMixin, ColumnCursor, ScrollView, can_focus=True
         top = round(self.scroll_offset.y)
         if line < top or line >= top + height:
             self.scroll_to(y=max(line - height // 3, 0), animate=False)
+
+    def align(self, line: int, screen_row: int) -> None:
+        """Scroll so ``line`` sits at viewport offset ``screen_row`` — keeps this
+        (companion) pane visually level with the driver's cursor in split view."""
+        top = max(0, min(line - max(screen_row, 0), max(len(self._strips) - 1, 0)))
+        if top != round(self.scroll_offset.y):
+            self.scroll_to(y=top, animate=False)
 
     def line_for_ea(self, ea: int) -> int | None:
         """The pseudocode line whose marker ea is the largest <= ``ea`` (the C
@@ -4741,7 +4756,9 @@ class IdaTui(App):
                         rows.add(r)
             lst.set_link(rows)
             if rows:
-                lst.reveal(min(rows))
+                # keep the linked region level with the driver's cursor row so
+                # the eye tracks straight across the two panes
+                lst.align(min(rows), dec.cursor - round(dec.scroll_offset.y))
         else:  # the listing drives
             lst.set_link(set())
             ea = lst._cursor_ea()
@@ -4759,7 +4776,7 @@ class IdaTui(App):
                 line = dec.line_for_ea(ea)
             if line is not None:
                 dec.set_link(line)
-                dec.reveal(line)
+                dec.align(line, lst.cursor - round(lst.scroll_offset.y))
             else:
                 dec.set_link(None)
 

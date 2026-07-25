@@ -428,6 +428,25 @@ async def s_split_view(c: Ctx):
             dl is not None and lea is not None and dec._line_eas[dl] is not None
             and dec._line_eas[dl] <= lea,
             f"link_line={dl} lea={hex(lea) if lea else None}")
+    # the companion pane sits LEVEL with the driver's cursor (visual coherence):
+    # the linked row lands at the same viewport offset, not merely on-screen.
+    deep = [i for i, eas in enumerate(m) if eas][10:]
+    row = lst.model.ensure_ea(m[deep[0]][0]) if (deep and lst.model) else None
+    if row is not None and row > 12:
+        lst.scroll_to(y=row - 10, animate=False)
+        await c.pause(0.2)          # let the deferred scroll land
+        lst.cursor = row            # driver cursor now at viewport offset 10
+        app._sync_split("listing")
+        await c.pause(0.2)          # let the companion's scroll land
+        drv = lst.cursor - round(lst.scroll_offset.y)
+        link, top = dec._link_line, round(dec.scroll_offset.y)
+        # exact, modulo the unavoidable clamps (can't scroll above line 0, nor
+        # past the end when the pseudocode is shorter than the viewport)
+        want = min(max(0, (link or 0) - drv),
+                   max(0, dec.total - dec._visible_height()))
+        c.check("the companion pane sits level with the driver's cursor",
+                link is not None and top == want,
+                f"driver_row={drv} link={link} dec_top={top} want={want}")
     await c.press("tab")
     await c.pause(0.1)
     c.check("Tab in split focuses the pseudocode pane", app._active == "decomp",
