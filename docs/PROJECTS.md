@@ -245,6 +245,33 @@ An ELF/PE/Mach-O says what it is, so IDA figures it out. A raw firmware dump
 says nothing, and IDA falls back to **x86 at address 0** — which on an ARM image
 analyses to zero functions. It doesn't fail; it just quietly gives you nothing.
 
+Open one without saying anything and idatui asks, the way interactive IDA does
+when no loader matches:
+
+    ┌ unrecognised file — processor? (20) ────────────────┐
+    │ fw.bin  (32,768 bytes) — no loader matched; without │
+    │ a processor IDA assumes x86 at 0                    │
+    │ arm                                                 │
+    │   arm          ARM / AArch64 — little-endian        │
+    │   armb         ARM — big-endian                     │
+    │ load address, e.g. 0x8000000 (blank = 0)            │
+    │ Enter accept · Tab base address · Esc load as IDA   │
+    └─────────────────────────────────────────────────────┘
+
+`formats.sniff()` decides whether to ask, and only recognises formats IDA
+definitely handles (ELF, PE, Mach-O, dex, wasm, ar, COFF, Intel HEX, S-records).
+Being cautious the wrong way costs one dismissible dialog; being cautious the
+other way is the silent-nothing case we're trying to kill. Esc loads it the way
+IDA would have, because the sniff can be wrong.
+
+A text container is only accepted when the whole header is printable — a raw
+image whose first byte happens to be `:` is far likelier than Intel HEX.
+
+The dialog is skipped when the answer already exists: options on the command
+line, options in the project, or a database that already records them.
+
+Or say it up front:
+
     ida-tui fw.bin --processor arm --base 0x8000000
 
 or per binary in a project, which is where it belongs for a multi-image firmware:

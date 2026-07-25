@@ -25,14 +25,9 @@ _LOCK_SUFFIXES = (".id0", ".id1", ".id2", ".nam", ".til")
 
 def _load_args(load: dict) -> str:
     """``load`` as IDA switches, for the single-binary path (no project ref)."""
-    parts = []
-    if load.get("processor"):
-        parts.append(f"-p{load['processor']}")
-    if load.get("base"):
-        parts.append(f"-b{int(load['base']) >> 4:x}")   # -b is PARAGRAPHS
-    if load.get("ida_args"):
-        parts.append(str(load["ida_args"]))
-    return " ".join(parts)
+    from .formats import load_args
+    return load_args(load.get("processor", ""), int(load.get("base", 0) or 0),
+                     str(load.get("ida_args", "") or ""))
 
 
 def _log(msg: str) -> None:

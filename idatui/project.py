@@ -68,17 +68,11 @@ class BinaryRef:
         """``processor``/``base`` as IDA command-line switches.
 
         ``-b`` is in PARAGRAPHS, not bytes — ``-b1000`` loads at 0x10000. That
-        is a trap worth hiding: projects say ``"base": "0x8000000"`` and the
-        conversion happens here.
+        trap is worth hiding: projects say ``"base": "0x8000000"`` and the one
+        conversion lives in ``formats.load_args``.
         """
-        parts = []
-        if self.processor:
-            parts.append(f"-p{self.processor}")
-        if self.base:
-            parts.append(f"-b{self.base >> 4:x}")
-        if self.ida_args:
-            parts.append(self.ida_args)
-        return " ".join(parts)
+        from .formats import load_args
+        return load_args(self.processor, self.base, self.ida_args)
 
 
 def _as_addr(v) -> int:

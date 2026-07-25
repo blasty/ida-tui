@@ -349,6 +349,27 @@ async def s_palette(c: Ctx):
     c.check("Esc closes the palette", not isinstance(app.screen, SymbolPalette))
 
 
+@scenario("load_options")
+async def s_load_options(c: Ctx):
+    """The dialog must never appear for a file IDA can load itself — the whole
+    suite runs on an ELF, so a false positive here would block every run."""
+    from idatui.app import LoadOptionsScreen
+    app = c.app
+    c.check("no load dialog for a recognised binary",
+            not isinstance(app.screen, LoadOptionsScreen),
+            f"screen={type(app.screen).__name__}")
+    c.check("and the app agrees it shouldn't ask",
+            not app._should_ask_load_options())
+    # The dialog itself, driven directly: it has to come back with switches the
+    # worker can use, and -b has to be paragraphs.
+    from idatui.formats import load_args, needs_load_options, sniff
+    c.check("the running target sniffs as a real format",
+            sniff(app._open_path) is not None and not needs_load_options(app._open_path),
+            f"{sniff(app._open_path)}")
+    c.check("dialog output converts a base to paragraphs",
+            load_args("arm", 0x8000000) == "-parm -b800000")
+
+
 @scenario("command_palette")
 async def s_command_palette(c: Ctx):
     app = c.app

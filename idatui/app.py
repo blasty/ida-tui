@@ -2517,6 +2517,127 @@ class HelpScreen(ModalScreen):
         self.dismiss(None)
 
 
+class LoadOptionsScreen(ModalScreen):
+    """Ask how to load a file no loader recognised.
+
+    IDA's own answer to an unidentified file is a dialog; ours is this. Without
+    it the fallback is x86 at address 0, which doesn't fail — it analyses to
+    nothing, and you're left wondering why a firmware image has no functions.
+
+    Returns ``{"processor": str, "base": int}``, or ``{}`` to load it the way
+    IDA would have anyway (that IS the right answer sometimes: our sniff only
+    recognises formats we're sure about, so it says "unknown" for things IDA
+    can in fact handle).
+    """
+
+    BINDINGS = [
+        Binding("escape", "close", "Close"),
+        Binding("down,ctrl+n", "cursor_down", show=False),
+        Binding("up,ctrl+p", "cursor_up", show=False),
+        Binding("enter", "choose", show=False, priority=True),
+    ]
+
+    def __init__(self, path: str, size: int = 0) -> None:
+        super().__init__()
+        self._path = path
+        # NOT self._size: that is Textual's own backing field for outer_size, and
+        # assigning an int to it crashes the layout with a bewildering
+        # "'int' object has no attribute 'region'" from deep inside _set_dirty.
+        self._nbytes = size
+        self._results: list[tuple[str, str]] = []
+
+    def compose(self) -> ComposeResult:
+        from .formats import PROCESSORS
+        self._all = list(PROCESSORS)
+        with Vertical(id="pal-box"):
+            yield Static(" unrecognised file \u2014 how should IDA load it?",
+                         id="pal-title", markup=False)
+            yield Static(f" {os.path.basename(self._path)}  ({self._nbytes:,} bytes) "
+                         f"\u2014 no loader matched; without a processor IDA "
+                         f"assumes x86 at 0", id="load-note", markup=False)
+            yield Input(placeholder="filter processors\u2026", id="pal-input")
+            yield OptionList(id="pal-list")
+            yield Input(placeholder="load address, e.g. 0x8000000 (blank = 0)",
+                        id="load-base")
+            yield Static(" Enter accept \u00b7 Tab base address \u00b7 "
+                         "Esc load as IDA would", id="load-help", markup=False)
+
+    def on_mount(self) -> None:
+        self._apply("")
+        self.query_one("#pal-input", Input).focus()
+
+    def on_input_changed(self, event: Input.Changed) -> None:
+        event.stop()
+        if event.input.id == "pal-input":
+            self._apply(event.value.strip())
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        event.stop()
+        self.action_choose()
+
+    def _apply(self, query: str) -> None:
+        q = query.lower()
+        rows = [(name, desc) for name, desc in self._all
+                if not q or q in name.lower() or q in desc.lower()]
+        # An unlisted processor is still valid: IDA has 73 modules and this
+        # offers 20, so a typed name that matches nothing is taken literally
+        # rather than refused.
+        if not rows and q:
+            rows = [(query.strip(), "use this processor name as typed")]
+        self._results = rows
+        ol = self.query_one(OptionList)
+        ol.clear_options()
+        opts = []
+        for name, desc in rows:
+            label = Text()
+            label.append(f"  {name:<12}", _S_LABEL)
+            label.append(desc, _S_DIM)
+            opts.append(Option(label))
+        ol.add_options(opts)
+        if rows:
+            ol.highlighted = 0
+        self.query_one("#pal-title", Static).update(
+            f" unrecognised file \u2014 processor? ({len(rows)})")
+
+    def action_cursor_down(self) -> None:
+        ol = self.query_one(OptionList)
+        if ol.option_count:
+            ol.highlighted = min((ol.highlighted or 0) + 1, ol.option_count - 1)
+
+    def action_cursor_up(self) -> None:
+        ol = self.query_one(OptionList)
+        if ol.option_count:
+            ol.highlighted = max((ol.highlighted or 0) - 1, 0)
+
+    def action_choose(self) -> None:
+        ol = self.query_one(OptionList)
+        i = ol.highlighted
+        if i is None or not (0 <= i < len(self._results)):
+            self.dismiss({})
+            return
+        raw = self.query_one("#load-base", Input).value.strip()
+        base = 0
+        if raw:
+            try:
+                base = int(raw, 0)
+            except ValueError:
+                self.query_one("#load-help", Static).update(
+                    f" {raw!r} is not an address \u2014 try 0x8000000")
+                self.query_one("#load-base", Input).focus()
+                return
+            if base % 16:
+                # IDA's -b is in paragraphs, so an unaligned base can't be
+                # expressed and would quietly load somewhere else.
+                self.query_one("#load-help", Static).update(
+                    f" {base:#x} must be 16-byte aligned")
+                self.query_one("#load-base", Input).focus()
+                return
+        self.dismiss({"processor": self._results[i][0], "base": base})
+
+    def action_close(self) -> None:
+        self.dismiss({})
+
+
 class ProjectPalette(ModalScreen):
     """The project's binaries; Enter switches to one. Shows which are resident
     (a live worker, so switching is instant) vs cold (needs an open)."""
@@ -3105,7 +3226,8 @@ class IdaTui(App):
     #xref-title { dock: top; height: 1; background: $accent; color: $background; text-style: bold; padding: 0 1; }
     #xref-list { height: auto; max-height: 100%; }
     /* every #pal-box palette centres, not just the symbol one */
-    SymbolPalette, StringsPalette, ProjectPalette { align: center middle; }
+    SymbolPalette, StringsPalette, ProjectPalette,
+    LoadOptionsScreen { align: center middle; }
     /* Give the stock Ctrl+P command palette side padding instead of full width;
        the input + results inherit this width (results is an overlay, so pin it). */
     CommandPalette > Vertical { width: 80%; max-width: 120; }
@@ -3115,6 +3237,9 @@ class IdaTui(App):
     #pal-title { dock: top; height: 1; background: $accent; color: $background; text-style: bold; padding: 0 1; }
     #pal-input { border: none; height: 1; margin: 0 1; background: $panel; color: $text; }
     #pal-list { height: auto; max-height: 24; }
+    #load-note { height: 2; padding: 1 1 0 1; color: $text-muted; }
+    #load-base { border: none; height: 1; margin: 1 1 0 1; background: $panel; color: $text; }
+    #load-help { height: 1; padding: 0 1; color: $text-muted; }
     StructEditor { align: center middle; }
     #se-box { width: 90%; height: 84%; border: thick $accent; background: $panel; }
     #se-panes { height: 1fr; }
@@ -3282,13 +3407,56 @@ class IdaTui(App):
         # The names pane is an overlay now (Ctrl+N); focus the default code view
         # (pseudocode) so app bindings work before anything is opened.
         self.query_one(ListingView).focus()
+        if self._rpc_path:
+            self._start_rpc()
+        # A file no loader recognises has to be described before it can be
+        # opened, so ask BEFORE the worker starts — once IDA has made a database
+        # the answer is baked in and changing it means deleting the .i64.
+        if self._should_ask_load_options():
+            self._ask_load_options()
+            return
         # Show a loading overlay immediately so a slow open/analysis (big binary)
         # isn't just dead air behind empty panes; dismissed once we land.
         self._loading_screen = LoadingScreen(self._loading_title())
         self.push_screen(self._loading_screen)
         self._connect()
-        if self._rpc_path:
-            self._start_rpc()
+
+    def _should_ask_load_options(self) -> bool:
+        """Ask only when nobody has already answered, and only when it matters.
+
+        Skipped when: options came from the command line or the project (the
+        user already said); a database exists (the answer is recorded in it, and
+        re-passing switches fails the open); or the file is a format IDA
+        recognises, which is nearly always.
+        """
+        if self._project is not None or not self._open_path:
+            return False   # project mode carries per-binary options already
+        if self._load_args:
+            return False
+        from .formats import needs_load_options
+        if os.path.exists(self._open_path + ".i64") or os.path.exists(
+                os.path.splitext(self._open_path)[0] + ".i64"):
+            return False
+        return needs_load_options(self._open_path)
+
+    def _ask_load_options(self) -> None:
+        try:
+            size = os.path.getsize(self._open_path)
+        except OSError:
+            size = 0
+        self.push_screen(LoadOptionsScreen(self._open_path, size),
+                         self._on_load_options)
+
+    def _on_load_options(self, choice) -> None:  # type: ignore[no-untyped-def]
+        from .formats import load_args
+        choice = choice or {}
+        if choice.get("processor"):
+            self._load_args = load_args(choice["processor"], choice.get("base", 0))
+            self._status(f"loading as {choice['processor']} "
+                         f"@ {choice.get('base', 0):#x}")
+        self._loading_screen = LoadingScreen(self._loading_title())
+        self.push_screen(self._loading_screen)
+        self._connect()
 
     def _loading_title(self) -> str:
         return os.path.basename(self._open_path) if self._open_path else "database"
