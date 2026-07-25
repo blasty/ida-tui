@@ -79,6 +79,35 @@ def main() -> int:
     check("the processor list leads with the common targets",
           [n for n, _ in PROCESSORS[:3]] == ["arm", "armb", "metapc"],
           f"{[n for n, _ in PROCESSORS[:3]]}")
+
+    # Every offered name must have been checked against a real IDA, because a
+    # wrong one is REJECTED (rc=4) with nothing useful said — handing the user a
+    # dead end from inside the dialog meant to rescue them. This list is the
+    # output of tools/verify_procs.py; adding a processor without re-running it
+    # fails here on purpose.
+    VERIFIED = {
+        "arm", "armb", "metapc", "mipsl", "mipsb", "ppc", "ppcl", "sh4", "68k",
+        "riscv", "tricore", "xtensa", "avr", "z80", "tms320c6", "m32r", "arc",
+        "h8300", "sparcb", "sparcl", "s390",
+    }
+    offered = {n for n, _ in PROCESSORS}
+    check("every offered processor name is IDA-verified",
+          offered <= VERIFIED, f"unverified: {sorted(offered - VERIFIED)}")
+
+    # These are module FILENAMES or common aliases, not -p names. IDA refuses
+    # them; they were in the list until a real run said otherwise.
+    for wrong in ("h8", "sparc", "arm64", "aarch64", "mips", "m68k"):
+        check(f"{wrong!r} is not offered (IDA rejects it)", wrong not in offered)
+
+    # ...but someone WILL type them, so the labels have to carry the alias.
+    def finds(q):
+        ql = q.lower()
+        return [n for n, d in PROCESSORS if ql in n.lower() or ql in d.lower()]
+    check("typing 'arm64' still finds ARM", "arm" in finds("arm64"), f"{finds('arm64')}")
+    check("typing 'aarch64' still finds ARM", "arm" in finds("aarch64"))
+    check("typing 'm68k' still finds 68k", "68k" in finds("m68k"), f"{finds('m68k')}")
+    check("typing 'mips' finds both endiannesses",
+          set(finds("mips")) == {"mipsl", "mipsb"}, f"{finds('mips')}")
     check("every processor entry has a human label",
           all(n and d for n, d in PROCESSORS))
     check("endianness is spelled out where it matters",

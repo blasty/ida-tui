@@ -258,6 +258,15 @@ when no loader matches:
     │ Enter accept · Tab base address · Esc load as IDA   │
     └─────────────────────────────────────────────────────┘
 
+Every name in that list is verified against a real IDA by `tools/verify_procs.py`
+(open a scratch blob with `-p<name>`, read back `inf_get_procname()`). A wrong
+name is *rejected* — rc=4, nothing useful said — which would be a dead end handed
+out from inside the dialog meant to rescue you. Two of the first twenty were
+wrong: `h8` and `sparc` are module filenames (`procs/h8.so`), not processor
+names; the real ones are `h8300` and `sparcb`/`sparcl`. The aliases people reach
+for first — `arm64`, `aarch64`, `mips`, `m68k` — are all invalid too, so they
+live in the human labels where the filter still finds them.
+
 `formats.sniff()` decides whether to ask, and only recognises formats IDA
 definitely handles (ELF, PE, Mach-O, dex, wasm, ar, COFF, Intel HEX, S-records).
 Being cautious the wrong way costs one dismissible dialog; being cautious the

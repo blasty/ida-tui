@@ -82,8 +82,19 @@ def needs_load_options(path: str) -> bool:
 #: long is a worse answer than a short one plus free text. These are the targets
 #: that actually turn up in firmware work, endianness spelled out because
 #: getting it wrong is the most common way to end up with zero functions.
+#:
+#: EVERY NAME HERE IS VERIFIED against a real IDA by opening a scratch blob with
+#: ``-p<name>`` and reading back ``inf_get_procname()`` — see
+#: ``tools/verify_procs.py``. That is not ceremony: a wrong name is REJECTED by
+#: IDA (rc=4) with no useful message, which is the same silent-failure class this
+#: dialog exists to prevent. Two of the first twenty were wrong ("h8" and
+#: "sparc" are module filenames, not processor names), and the aliases people
+#: reach for first — arm64, aarch64, mips, m68k — are all invalid. Re-run the
+#: script before adding to this list.
 PROCESSORS: tuple[tuple[str, str], ...] = (
-    ("arm", "ARM / AArch64 — little-endian"),
+    # 'arm' covers AArch64 too; arm64/aarch64 are NOT valid -p names, so they
+    # live in the label where the filter can still find them.
+    ("arm", "ARM / AArch64 / arm64 — little-endian"),
     ("armb", "ARM — big-endian"),
     ("metapc", "x86 / x86-64"),
     ("mipsl", "MIPS — little-endian"),
@@ -91,7 +102,7 @@ PROCESSORS: tuple[tuple[str, str], ...] = (
     ("ppc", "PowerPC — big-endian"),
     ("ppcl", "PowerPC — little-endian"),
     ("sh4", "SuperH SH-4"),
-    ("68k", "Motorola 68000"),
+    ("68k", "Motorola 68000 / m68k"),
     ("riscv", "RISC-V"),
     ("tricore", "Infineon TriCore"),
     ("xtensa", "Tensilica Xtensa (ESP32 etc.)"),
@@ -100,8 +111,9 @@ PROCESSORS: tuple[tuple[str, str], ...] = (
     ("tms320c6", "TI TMS320C6x DSP"),
     ("m32r", "Renesas M32R"),
     ("arc", "Synopsys ARC"),
-    ("h8", "Renesas H8"),
-    ("sparc", "SPARC"),
+    ("h8300", "Renesas H8/300"),
+    ("sparcb", "SPARC — big-endian"),
+    ("sparcl", "SPARC — little-endian"),
     ("s390", "IBM S/390"),
 )
 
