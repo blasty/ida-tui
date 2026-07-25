@@ -30,7 +30,7 @@ from textual import work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.command import DiscoveryHit, Hit, Provider
-from textual.containers import Horizontal, Vertical
+from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.geometry import Region, Size
 from textual.message import Message
 from textual.reactive import reactive
@@ -38,7 +38,7 @@ from textual.screen import ModalScreen
 from textual.scroll_view import ScrollView
 from textual.strip import Strip
 from textual.widgets import (
-    DataTable, Footer, Input, OptionList, Static, TextArea,
+    DataTable, Input, OptionList, Static, TextArea,
 )
 from textual.widgets.option_list import Option
 
@@ -2246,6 +2246,90 @@ class StringsPalette(ModalScreen):
         self.dismiss(None)
 
 
+#: The keyboard cheatsheet (F1). Grouped by task rather than by widget, which is
+#: what makes it readable; keep it in step with the BINDINGS above it.
+_HELP = (
+    ("Navigate", (
+        ("Enter", "follow the symbol under the cursor"),
+        ("Esc", "back (navigation history)"),
+        ("g", "goto address or symbol"),
+        ("Ctrl+N", "find symbol (fuzzy)"),
+        ("\"", "strings browser"),
+        ("x", "cross-references to the symbol"),
+        ("L", "continuous listing at the cursor"),
+        ("Ctrl+O", "switch binary (projects)"),
+    )),
+    ("Views", (
+        ("Tab / F5", "disassembly \u21c4 pseudocode"),
+        ("s", "split view (listing + pseudocode, synced)"),
+        ("Tab", "in split: switch the driving pane"),
+        ("\\", "hex view"),
+        ("o", "cycle the opcode-bytes column"),
+        ("Ctrl+B", "show/hide the names pane"),
+        ("Ctrl+T", "structs / types editor"),
+        ("Ctrl+P", "command palette"),
+    )),
+    ("Move", (
+        ("j / k", "down / up"),
+        ("Ctrl+D / Ctrl+U", "half page down / up"),
+        ("PgDn / PgUp", "page down / up"),
+        ("Ctrl+Home / Ctrl+End", "top / bottom (G also)"),
+        ("Home / End", "start / end of line"),
+        ("Shift+Home", "start of the instruction / code"),
+        ("h / l", "column left / right"),
+        ("w / b", "word forward / back"),
+    )),
+    ("Edit", (
+        ("n", "rename"),
+        ("y", "set type (prototype, local or global)"),
+        (";", "comment"),
+        ("c", "make code"),
+        ("p", "make function"),
+        ("d", "make data"),
+        ("a", "make string"),
+        ("u", "undefine"),
+        ("Ctrl+S", "save the database"),
+    )),
+    ("Search", (
+        ("/", "search forward (repeat to continue)"),
+        ("?", "search backward"),
+        ("N", "previous match"),
+        ("Ctrl+Y", "copy the current line"),
+        ("F1", "this cheatsheet"),
+        ("q", "quit"),
+    )),
+)
+
+
+class HelpScreen(ModalScreen):
+    """F1: the keyboard cheatsheet, replacing the permanent footer."""
+
+    BINDINGS = [Binding("escape,f1,q,question_mark", "close", "Close")]
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="help-box"):
+            yield Static(" keys", id="help-title")
+            with VerticalScroll(id="help-body"):
+                yield Static(self._cheatsheet(), id="help-text")
+            yield Static("Esc / F1 to close", id="help-foot")
+
+    @staticmethod
+    def _cheatsheet() -> Text:  # NB: not _render — that's a Widget internal
+        width = max(len(k) for _, rows in _HELP for k, _ in rows)
+        out = Text()
+        for i, (title, rows) in enumerate(_HELP):
+            if i:
+                out.append("\n")
+            out.append(f"{title}\n", _S_FUNCHDR)
+            for key, desc in rows:
+                out.append(f"  {key:>{width}}", _S_MNEM)
+                out.append(f"  {desc}\n", _S_INSN)
+        return out
+
+    def action_close(self) -> None:
+        self.dismiss(None)
+
+
 class ProjectPalette(ModalScreen):
     """The project's binaries; Enter switches to one. Shows which are resident
     (a live worker, so switching is instant) vs cold (needs an open)."""
@@ -2696,6 +2780,7 @@ class IdaCommands(Provider):
              app.action_strings),
             ("Switch binary…", "another binary in the project (Ctrl+O)",
              app.action_switch_binary),
+            ("Keyboard shortcuts", "the key cheatsheet (F1)", app.action_help),
             ("Follow symbol under cursor", "jump to the referenced symbol (Enter)",
              lambda: va("follow")),
             ("Show xrefs to symbol", "cross-references to the cursor symbol (x)",
@@ -2789,6 +2874,12 @@ class IdaTui(App):
         width: 100%; height: 100%; content-align: center middle;
         background: $panel-darken-1;
     }
+    HelpScreen { align: center middle; }
+    #help-box { width: 76; max-width: 92%; height: auto; max-height: 85%;
+                border: thick $accent; background: $panel; }
+    #help-title { dock: top; height: 1; background: $accent; color: $text; padding: 0 1; }
+    #help-body { height: auto; max-height: 100%; padding: 1 2; }
+    #help-foot { dock: bottom; height: 1; color: $text-muted; padding: 0 2; }
     XrefsScreen { align: center middle; }
     #xref-box { width: 84; max-height: 70%; height: auto; border: thick $accent; background: $panel; }
     #xref-title { dock: top; height: 1; background: $accent; color: $text; padding: 0 1; }
@@ -2840,6 +2931,7 @@ class IdaTui(App):
         Binding("s", "toggle_split", "Split", show=False),
         Binding("quotation_mark,shift+f12", "strings", "Strings", show=False),
         Binding("ctrl+o", "switch_binary", "Binaries", show=False),
+        Binding("f1", "help", "Keys", show=False),
         Binding("g", "goto", "Goto"),
         Binding("slash", "filter", "Filter", show=False),
         Binding("ctrl+b", "toggle_functions", "Names", show=False),
@@ -2947,7 +3039,6 @@ class IdaTui(App):
         # on, a single-word marker parses as a style tag and is silently eaten —
         # which is why [listing] and [pseudocode] never actually rendered.
         yield Static("connecting\u2026", id="status", markup=False)
-        yield Footer()
 
     def on_mount(self) -> None:
         # Keep the hidden command input out of the focus chain until summoned.
@@ -3327,6 +3418,13 @@ class IdaTui(App):
         self._open_function(addr, f.name if f else hex(addr))
 
     # -- projects: switching between the binaries of one target ------------ #
+    def action_help(self) -> None:
+        """F1: the keyboard cheatsheet (there's no permanent footer any more)."""
+        if self._prompt_active():
+            return
+        if not isinstance(self.screen, HelpScreen):
+            self.push_screen(HelpScreen())
+
     def action_switch_binary(self) -> None:
         """Ctrl+O: pick another binary from the project (Ghidra-style)."""
         if self._pool is None:

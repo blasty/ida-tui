@@ -25,11 +25,11 @@ import traceback
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from idatui.app import (  # noqa: E402
     ConfirmScreen, DecompView, DisasmView, FunctionsPanel, HexView, IdaTui,
-    ListingView, StringsPalette, StructEditor, SymbolPalette, XrefsScreen,
-    _str_display, _word_occurrences,
+    HelpScreen, ListingView, StringsPalette, StructEditor, SymbolPalette,
+    XrefsScreen, _str_display, _word_occurrences,
 )
 from textual.widgets import (  # noqa: E402
-    DataTable, Footer, Input, OptionList, Static, TextArea,
+    DataTable, Input, OptionList, Static, TextArea,
 )
 from rich.text import Text  # noqa: E402
 from idatui._sync import wait_for  # noqa: E402
@@ -338,6 +338,30 @@ async def s_command_palette(c: Ctx):
     if landed:
         await c.press("backslash")  # leave hex
         await c.wait(lambda: app._active != "hex", 5)
+
+
+@scenario("help")
+async def s_help(c: Ctx):
+    app = c.app
+    st = app.query_one("#status", Static)
+    c.check("the status line owns the bottom row (no footer cheatsheet)",
+            st.region.y + st.region.height == app.size.height,
+            f"status={st.region} screen={app.size}")
+    await c.press("f1")
+    opened = await c.wait(lambda: isinstance(app.screen, HelpScreen), 10)
+    c.check("F1 opens the key cheatsheet", opened,
+            f"screen={type(app.screen).__name__}")
+    if not opened:
+        return
+    txt = str(app.screen.query_one("#help-text", Static).render())
+    c.check("it lists the key groups",
+            all(s in txt for s in ("Navigate", "Views", "Move", "Edit", "Search")),
+            txt[:70])
+    c.check("it documents real bindings",
+            "set type" in txt and "split view" in txt and "cross-references" in txt)
+    await c.press("escape")
+    await c.wait(lambda: not isinstance(app.screen, HelpScreen), 10)
+    c.check("Esc closes it", not isinstance(app.screen, HelpScreen))
 
 
 @scenario("strings")
@@ -933,10 +957,10 @@ async def s_search(c: Ctx):
     await c.pause(0.1)
     c.check("search bar visible, status hidden (no overlap)",
             si.display and not status.display, f"si={si.display} status={status.display}")
-    footer = app.query_one(Footer)
-    c.check("search input is rendered above the footer (not overlapping)",
-            si.region.height >= 1 and si.region.y < footer.region.y,
-            f"search={si.region} footer={footer.region}")
+    c.check("search input owns the bottom row (nothing overlaps it)",
+            si.region.height >= 1
+            and si.region.y + si.region.height == app.size.height,
+            f"search={si.region} screen={app.size}")
     for ch in term:
         await c.press(ch)
         await c.pause(0.05)
