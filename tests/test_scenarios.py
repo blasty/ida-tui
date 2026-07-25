@@ -17,6 +17,7 @@ Uses ~/ida-venv python (has textual).
 --list                    print scenario names and exit
 """
 import asyncio
+import fnmatch
 import os
 import re
 import sys
@@ -807,15 +808,25 @@ async def s_filter(c: Ctx):
     await c.wait(lambda: app._cur and app._cur.ea == fn.addr, 20)
     c.check("selecting a table row opens that function",
             bool(app._cur) and app._cur.ea == fn.addr, f"cur={app._cur.ea if app._cur else None}")
-    # filter round-trip
+    # filter round-trip. Derive the glob from real names: this used to hardcode
+    # 'sub_1*', which matches NOTHING in a binary whose code never reaches
+    # 0x1xxx (echo's functions are sub_2xxx..sub_7xxx) — a deterministic failure
+    # that looked like a flake, and left the table empty for the next scenario.
+    subs = sorted(f.name for f in c.all_funcs() if f.name.startswith("sub_"))
+    term = (subs[0][:5] + "*") if subs else ""
+    want = sum(1 for f in c.all_funcs()
+               if fnmatch.fnmatch(f.name.lower(), term.lower())) if term else 0
+    c.check("picked a glob that actually matches (test self-check)",
+            0 < want < nfuncs, f"term={term!r} want={want} of {nfuncs}")
     table.focus()
     await c.press("slash")
     await c.pause(0.05)
-    for ch in "sub_1*":
+    for ch in term:
         await c.press(ch if ch != "*" else "asterisk")
     await c.press("enter")
-    filtered = await c.wait(lambda: 0 < table.row_count < nfuncs, 15)
-    c.check("filter narrowed the list", filtered, f"rows={table.row_count} of {nfuncs}")
+    filtered = await c.wait(lambda: table.row_count == want, 15)
+    c.check("filter narrowed the list to exactly the matches", filtered,
+            f"term={term!r} rows={table.row_count} want={want} of {nfuncs}")
     # pane toggle
     left = app.query_one("#left", FunctionsPanel)
     await c.press("ctrl+b")
@@ -841,11 +852,21 @@ async def s_view_toggle(c: Ctx):
     styled = any(seg.style is not None and seg.style.color is not None
                  for strip in dec._strips[:min(dec.total, 200)] for seg in strip)
     c.check("pseudocode is syntax-highlighted", styled)
+    dec.focus()  # Tab only toggles the view from a code pane; elsewhere it's
+    await c.pause(0.05)  # focus-next, which would silently leave us in decomp
     await c.press("tab")
-    await c.pause(0.1)
-    c.check("tab switches to disassembly",
-            app._active == "listing" and dis.display and not dec.display,
-            f"active={app._active}")
+    # decomp -> listing runs through _toggle_to_listing, a background worker, so
+    # _active only flips once the listing model has loaded. A fixed pause held in
+    # a short run and lost the race in a full one.
+    switched = await c.wait(lambda: app._active == "listing" and dis.display
+                            and not dec.display, 20)
+    c.check("tab switches to disassembly", switched,
+            f"active={app._active} split={app._split} "
+            f"focus={type(app.focused).__name__} "
+            f"lst={dis.display} dec={dec.display}")
+    # _toggle_to_listing repositions asynchronously; F5 below reads the listing
+    # cursor's ea and no-ops if it isn't on an addressed row yet.
+    await c.wait(lambda: c.lst._cursor_ea() is not None, 10)
     # F5/Tab from the listing must raise the 'decompiling…' overlay synchronously,
     # BEFORE the background decompile runs (regression: it used to decompile first
     # in _decomp_from_listing, so the overlay only flashed once cached).
