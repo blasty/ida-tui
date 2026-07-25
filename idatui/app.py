@@ -2474,7 +2474,10 @@ class ProjectPalette(ModalScreen):
             opts.append(Option(label))
         ol.add_options(opts)
         if rows:
-            ol.highlighted = 0
+            # Land on the binary you're already in, so the switcher opens where
+            # you are rather than at whatever sorts first.
+            active = next((i for i, e in enumerate(rows) if e["active"]), 0)
+            ol.highlighted = active
         self.query_one("#pal-title", Static).update(
             f" binaries: {len(rows)} of {len(self._entries)}")
 

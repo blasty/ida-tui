@@ -18,7 +18,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from idatui._sync import wait_for  # noqa: E402
 from idatui.app import IdaTui, ProjectPalette  # noqa: E402
 from idatui.project import Project  # noqa: E402
-from textual.widgets import Input, Static  # noqa: E402
+from textual.widgets import Input, OptionList, Static  # noqa: E402
 
 PASS = FAIL = 0
 
@@ -82,6 +82,13 @@ async def run(bins):
             check("it marks the other as not yet opened",
                   any(not e["resident"] and e["label"] == second
                       for e in pal._results))
+            ol = pal.query_one(OptionList)
+            check("the switcher opens on the binary you're already in",
+                  ol.highlighted is not None
+                  and pal._results[ol.highlighted]["label"] == first,
+                  f"highlighted={ol.highlighted} "
+                  f"={pal._results[ol.highlighted]['label'] if ol.highlighted is not None else None} "
+                  f"want={first}")
 
             # -- switch to the second binary -------------------------------- #
             pal.query_one(Input).value = second
