@@ -117,7 +117,19 @@ class WorkerClient:
                     time.sleep(0.2)
             raise IDAConnectionError("worker did not become ready in time")
 
-    def close(self) -> None:
+    @property
+    def pid(self) -> int | None:
+        """The worker process id (for memory accounting), or None if not spawned."""
+        return self._proc.pid if self._proc is not None else None
+
+    def close(self, grace: float = 20.0) -> None:
+        """Shut the worker down cleanly.
+
+        After ``__shutdown__`` the worker still has to ``close_database()``, which
+        re-packs the ``.i64`` and removes the unpacked ``.id0/.id1/...`` scratch.
+        Signalling it before that finishes is what leaves databases wedged, so
+        wait out the grace period first and only escalate if it really is stuck.
+        """
         with self._lock:
             s = self._sock
             self._sock = None
@@ -132,13 +144,16 @@ class WorkerClient:
                     pass
         if self._proc is not None:
             try:
-                self._proc.terminate()
-                self._proc.wait(timeout=5)
-            except Exception:  # noqa: BLE001
+                self._proc.wait(timeout=grace)  # let it close the DB properly
+            except Exception:  # noqa: BLE001 -- TimeoutExpired: it's stuck
                 try:
-                    self._proc.kill()
+                    self._proc.terminate()
+                    self._proc.wait(timeout=5)
                 except Exception:  # noqa: BLE001
-                    pass
+                    try:
+                        self._proc.kill()
+                    except Exception:  # noqa: BLE001
+                        pass
 
     # -- the call surface -------------------------------------------------- #
     def call(self, tool: str, *, timeout: float | None = None, **args) -> Any:
