@@ -3150,7 +3150,12 @@ class IdaTui(App):
         Binding("ctrl+b", "toggle_functions", "Names", show=False),
         Binding("tab,shift+tab", "toggle_view", "Disasm/Pseudocode", priority=True),
         Binding("ctrl+s", "save", "Save"),
-        Binding("escape", "back", "Back"),
+        # Esc is IDA's muscle memory, but a bare \x1b is ambiguous in terminals:
+        # it's also the lead byte of every arrow/function-key sequence, so a
+        # terminal or tmux that merges it (see tmux escape-time) delivers the
+        # keypress as e.g. "right" and back silently doesn't happen. Backspace
+        # is unambiguous and always works.
+        Binding("escape,backspace", "back", "Back"),
     ]
 
     def __init__(self, open_path: str | None = None, keepalive: bool = True,

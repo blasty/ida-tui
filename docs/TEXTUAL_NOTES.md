@@ -80,3 +80,31 @@ Hard-won Textual behaviour and the patterns this app relies on. Pairs with
   failures. Re-run on a warm session before trusting a regression.
 - Edits mutate the `.i64` — revert renames (via API) for idempotency; use a
   PID-unique temp name to dodge collisions from a prior crashed run.
+
+
+## A bare Esc is ambiguous in a terminal
+
+Symptom: `Esc` (bound to history-back) appears to do nothing, and only a *second*
+press works. It looks like a widget is swallowing the first one.
+
+It isn't. `\x1b` is both the Escape key AND the lead byte of every arrow /
+function-key sequence (`ESC [ C` is right-arrow). If the terminal or tmux merges
+a lone Esc with what follows, the app receives a different key entirely.
+
+Confirmed on a live session via the RPC `state` dump, before and after one Esc:
+
+    nav_depth   3  ->  3      (action_back never ran)
+    cursor.col  19 -> 20      (+1 column == `right`)
+
+The keypress arrived as a right-arrow. Nothing in the nav path touches
+`cursor_x`, and `modal` was null, so no widget-level binding was involved.
+
+Two consequences:
+
+* Don't debug this in application code. Check `nav_depth` in the state dump
+  first: if the action didn't run at all, it's the input layer, not the logic.
+* tmux's `escape-time` (default 500ms) is the usual culprit; `set -sg
+  escape-time 10` normally fixes it.
+
+`back` is therefore bound to `escape,backspace`. Backspace is unambiguous, so
+history navigation never depends on a byte the terminal can reinterpret.
