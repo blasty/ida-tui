@@ -34,6 +34,7 @@ from textual.containers import Grid, Horizontal, Vertical, VerticalScroll
 from textual.geometry import Region, Size
 from textual.message import Message
 from textual.reactive import reactive
+from textual.theme import Theme
 from textual.screen import ModalScreen
 from textual.scroll_view import ScrollView
 from textual.strip import Strip
@@ -2937,6 +2938,27 @@ class StructEditor(ModalScreen):
 # --------------------------------------------------------------------------- #
 # The app
 # --------------------------------------------------------------------------- #
+#: The app's own theme. Textual's default (textual-dark) paints every accent and
+#: border in #ffa62b, a neon orange that fights the muted VS Code/Solarized
+#: palette the code views already use (amber #b58900 for matches, #6a9955 green,
+#: #264f78 blue). This keeps the chrome in the same family as the content:
+#: desaturated blue-greys, amber for emphasis, blue reserved for focus.
+IDATUI_THEME = Theme(
+    name="idatui",
+    dark=True,
+    background="#12161c",   # deep blue-black, softer than pure black
+    surface="#181d25",      # views
+    panel="#212832",        # dialogs, status bar, gutters
+    foreground="#d6d9de",
+    primary="#5aa0d6",      # focus / links: the one cool accent
+    secondary="#2f5d82",
+    accent="#b58900",       # same amber as search matches + the spinner
+    warning="#c9762f",      # burnt orange — distinct from accent, reads as care
+    error="#ff5f5f",        # already used for failure text
+    success="#6a9955",      # already used for comments
+)
+
+
 class IdaCommands(Provider):
     """Fills the Ctrl+P command palette with real ida-tui actions instead of the
     stock Textual system commands (change theme / take screenshot / …).
@@ -3051,13 +3073,13 @@ class IdaTui(App):
     }
     QuitScreen { align: center middle; }
     #quit-box { width: 64; height: auto; border: thick $warning; background: $panel; }
-    #quit-title { dock: top; height: 1; background: $warning; color: $text; padding: 0 1; }
+    #quit-title { dock: top; height: 1; background: $warning; color: $background; text-style: bold; padding: 0 1; }
     #quit-list { height: auto; padding: 1 2 0 2; }
     #quit-help { height: 1; color: $text-muted; padding: 0 2; margin-top: 1; }
     HelpScreen { align: center middle; }
     #help-box { width: auto; max-width: 98%; height: auto; max-height: 90%;
                 border: thick $accent; background: $panel; }
-    #help-title { dock: top; height: 1; background: $accent; color: $text; padding: 0 1; }
+    #help-title { dock: top; height: 1; background: $accent; color: $background; text-style: bold; padding: 0 1; }
     #help-body { height: auto; max-height: 100%; width: auto; padding: 1 1; }
     #help-cols { height: auto; width: auto; }
     .help-col { height: auto; width: auto; margin-right: 1; }
@@ -3066,7 +3088,7 @@ class IdaTui(App):
     #help-foot { dock: bottom; height: 1; color: $text-muted; padding: 0 2; }
     XrefsScreen { align: center middle; }
     #xref-box { width: 84; max-height: 70%; height: auto; border: thick $accent; background: $panel; }
-    #xref-title { dock: top; height: 1; background: $accent; color: $text; padding: 0 1; }
+    #xref-title { dock: top; height: 1; background: $accent; color: $background; text-style: bold; padding: 0 1; }
     #xref-list { height: auto; max-height: 100%; }
     /* every #pal-box palette centres, not just the symbol one */
     SymbolPalette, StringsPalette, ProjectPalette { align: center middle; }
@@ -3076,7 +3098,7 @@ class IdaTui(App):
     CommandPalette #--results { width: 100%; }
     #pal-box { width: 96; max-width: 92%; height: auto; max-height: 80%;
                border: thick $accent; background: $panel; }
-    #pal-title { dock: top; height: 1; background: $accent; color: $text; padding: 0 1; }
+    #pal-title { dock: top; height: 1; background: $accent; color: $background; text-style: bold; padding: 0 1; }
     #pal-input { border: none; height: 1; margin: 0 1; background: $panel; color: $text; }
     #pal-list { height: auto; max-height: 24; }
     StructEditor { align: center middle; }
@@ -3084,7 +3106,7 @@ class IdaTui(App):
     #se-panes { height: 1fr; }
     #se-left { width: 38; border-right: solid $accent; }
     #se-right { width: 1fr; }
-    #se-title, #se-hint { height: 1; background: $accent; color: $text; padding: 0 1; }
+    #se-title, #se-hint { height: 1; background: $accent; color: $background; text-style: bold; padding: 0 1; }
     #se-list { height: 1fr; }
     #se-edit { height: 1fr; border: none; }
     #se-status { height: 1; background: $panel-darken-2; color: $text-muted; padding: 0 1; }
@@ -3233,6 +3255,8 @@ class IdaTui(App):
         yield Static("connecting\u2026", id="status", markup=False)
 
     def on_mount(self) -> None:
+        self.register_theme(IDATUI_THEME)
+        self.theme = IDATUI_THEME.name
         # Keep the hidden command input out of the focus chain until summoned.
         inp = self.query_one("#func-filter", Input)
         inp.can_focus = False
