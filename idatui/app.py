@@ -2048,9 +2048,15 @@ def _fuzzy(name: str, q: str):
     if not name:  # defensive: never assume a symbol has a name
         return None
     nl = name.lower()
+    # Case-insensitive means BOTH sides: the name was lowered but the query
+    # wasn't, so a single capital could never match and any query containing one
+    # returned nothing at all. Invisible on lowercase C symbols (main, strlen),
+    # fatal on libraries that capitalise — "PEM_read_bio" found 0 of 10093
+    # functions in libcrypto while the backend resolved it fine.
+    ql = q.lower()
     pos: list[int] = []
     i = 0
-    for ch in q:
+    for ch in ql:
         j = nl.find(ch, i)
         if j < 0:
             return None
@@ -2058,9 +2064,9 @@ def _fuzzy(name: str, q: str):
         i = j + 1
     span = pos[-1] - pos[0]
     score = -(span * 2.0) - pos[0] - len(name) * 0.01
-    if q in nl:
+    if ql in nl:
         score += 50.0
-    if nl.startswith(q):
+    if nl.startswith(ql):
         score += 100.0
     return (score, tuple(pos))
 

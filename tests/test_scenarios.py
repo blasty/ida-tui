@@ -309,6 +309,15 @@ async def s_palette(c: Ctx):
     c.check("palette matches a fuzzy subsequence",
             any(n == "error" for _, _, n in pal._results),
             f"results={[n for _, _, n in pal._results[:4]]}")
+    # Every other query here is lowercase, which is how a case bug hid for so
+    # long: the name was lowered but the query wasn't, so ONE capital matched
+    # nothing. Invisible on lowercase C symbols, fatal on a library that
+    # capitalises (PEM_read_bio found 0 of 10093 functions in libcrypto).
+    pinp.value = "MAIN"
+    await c.wait(lambda: any(n == "main" for _, _, n in pal._results), 10)
+    c.check("palette matching is case-insensitive in BOTH directions",
+            any(n == "main" for _, _, n in pal._results),
+            f"results={[n for _, _, n in pal._results[:4]]}")
     pinp.value = "main"
     await c.wait(lambda: pal._results and pal._results[0][2] == "main", 10)
     want = pal._results[0][1]
