@@ -123,8 +123,14 @@ class Project:
         """Write a new project file listing ``binaries`` (an ad-hoc project)."""
         if not binaries:
             raise ProjectError("a project needs at least one binary")
-        entries = [{"path": os.path.abspath(os.path.expanduser(b))}
-                   for b in binaries]
+        entries, seen = [], set()
+        for b in binaries:  # the same file twice on one command line is a typo
+            p = os.path.abspath(os.path.expanduser(b))
+            key = os.path.realpath(p)
+            if key in seen:
+                continue
+            seen.add(key)
+            entries.append({"path": p})
         path = os.path.abspath(os.path.expanduser(path))
         proj = cls(path, name or os.path.splitext(os.path.basename(path))[0],
                    entries, memory_pct)
@@ -188,7 +194,23 @@ class Project:
     def by_label(self, label: str) -> BinaryRef | None:
         return next((r for r in self._refs if r.label == label), None)
 
+    def by_source(self, binary: str) -> BinaryRef | None:
+        """The entry for ``binary``, matched by resolved path.
+
+        Identity is the real path, not the file name: a project can legitimately
+        hold two different ``foo.elf`` from different directories (the labels
+        disambiguate them), but the same file must not be listed twice — and
+        ``./a.elf``, ``/abs/a.elf`` and a symlink to it are all the same file.
+        """
+        key = os.path.realpath(os.path.abspath(os.path.expanduser(binary)))
+        return next((r for r in self._refs
+                     if os.path.realpath(r.source) == key), None)
+
     def add(self, binary: str, label: str | None = None) -> BinaryRef:
+        """Add a binary, or return the existing entry if it's already here."""
+        existing = self.by_source(binary)
+        if existing is not None:
+            return existing
         entry = {"path": os.path.abspath(os.path.expanduser(binary))}
         if label:
             entry["label"] = label

@@ -67,10 +67,18 @@ def main(argv: list[str] | None = None) -> int:
         try:
             if os.path.isfile(ppath):
                 project = Project.load(ppath)
-                for b in args.binary:  # extend an existing project
-                    project.add(b)
-                if args.binary:
-                    project.save()
+                if args.binary:  # extend an existing project, skipping repeats
+                    before = len(project.refs)
+                    for b in args.binary:
+                        project.add(b)
+                    added = len(project.refs) - before
+                    dupes = len(args.binary) - added
+                    if added:
+                        project.save()
+                        _log(f"added {added} binary(ies) to {ppath}")
+                    if dupes:
+                        _log(f"{dupes} already in the project (matched by path) "
+                             f"— left alone")
             elif args.binary:
                 project = Project.create(ppath, args.binary)
                 _log(f"created project {ppath} with {len(project.refs)} binaries")

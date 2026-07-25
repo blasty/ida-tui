@@ -124,6 +124,41 @@ def main() -> int:
         extra = _bin(os.path.join(src, "extra"))
         proj2.add(extra, label="extra")
         check("add() appends a binary", proj2.by_label("extra") is not None)
+
+        # -- re-adding must not duplicate (matched by resolved path) --------- #
+        n = len(proj2.refs)
+        proj2.add(extra)
+        check("re-adding the same path is a no-op", len(proj2.refs) == n,
+              f"{[r.label for r in proj2.refs]}")
+        os.chdir(src)
+        proj2.add("./extra")                       # same file, relative
+        proj2.add(os.path.join(src, "..", "src", "extra"))   # same file, messy
+        check("a different spelling of the same path is a no-op",
+              len(proj2.refs) == n, f"{[r.label for r in proj2.refs]}")
+        link = os.path.join(src, "extra_link")
+        os.symlink(extra, link)
+        proj2.add(link)
+        check("a symlink to an existing binary is a no-op",
+              len(proj2.refs) == n, f"{[r.label for r in proj2.refs]}")
+
+        # ...but a DIFFERENT file with the same basename must still be added
+        other_dir = os.path.join(tmp, "other2")
+        os.makedirs(other_dir)
+        twin = _bin(os.path.join(other_dir, "extra"), b"\x7fELF a different extra")
+        proj2.add(twin)
+        check("a same-named file from another directory IS added",
+              len(proj2.refs) == n + 1
+              and proj2.by_source(twin) is not None
+              and proj2.by_source(extra) is not proj2.by_source(twin),
+              f"{[(r.label, r.source) for r in proj2.refs[-2:]]}")
+        check("the twins get distinct labels",
+              len({r.label for r in proj2.refs}) == len(proj2.refs),
+              f"{[r.label for r in proj2.refs]}")
+        check("create() also drops repeats on the command line",
+              len(Project.create(os.path.join(tmp, "dup.json"),
+                                 [extra, "./extra", extra]).refs) == 1)
+        os.chdir(tmp)
+        proj2.remove(proj2.by_source(twin).label)
         check("remove() drops one", proj2.remove("extra")
               and proj2.by_label("extra") is None)
 
