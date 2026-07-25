@@ -2120,7 +2120,10 @@ class SymbolPalette(ModalScreen):
             for h in hits:
                 at = h.text.lower().find(q)
                 scored.append((at if at >= 0 else 1 << 30, len(h.text), h.text, h))
-            scored.sort()
+            # Sort on an explicit key: the same symbol name in two binaries ties
+            # on (position, length, text), and a bare sort() would then fall
+            # through to comparing Hit objects, which aren't orderable.
+            scored.sort(key=lambda t: (t[0], t[1], t[2], t[3].binary, t[3].addr))
             rows = [(h.binary, h.addr, h.text,
                      tuple(range(at, at + len(q))) if at < (1 << 30) else ())
                     for at, _, _, h in scored[:self.LIMIT]]

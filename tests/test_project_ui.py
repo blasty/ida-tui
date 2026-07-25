@@ -138,6 +138,29 @@ async def run(bins):
                   again and app._cur.ea == where,
                   f"cur={app._cur.ea if app._cur else None} want={where}")
 
+            # -- project-wide symbol search ------------------------------- #
+            # 'main' exists in BOTH binaries: identical name, so the rank tuple
+            # ties and a bare sort() would fall through to comparing Hit objects
+            # ('<' not supported between instances of 'Hit').
+            from idatui.app import SymbolPalette
+            await settle(lambda: app._index is not None
+                         and len(app._index.counts()) == 2, 60)
+            check("both binaries got indexed",
+                  len(app._index.counts()) == 2, f"{app._index.counts()}")
+            await pilot.press("ctrl+n")
+            if await settle(lambda: isinstance(app.screen, SymbolPalette), 20):
+                pal = app.screen
+                pal.query_one(Input).value = "main"
+                await pilot.pause(0.3)
+                await pilot.press("f2")          # widen to the whole project
+                await pilot.pause(0.4)
+                names = [(b, n) for b, _, n in pal._results]
+                check("project scope finds a name shared by both binaries",
+                      len({b for b, n in names if n == "main"}) == 2,
+                      f"{names[:6]}")
+                await pilot.press("escape")
+                await pilot.pause(0.2)
+
         # -- the promise: nothing was written next to the sources ---------- #
         left = sorted(os.listdir(src))
         check("the source tree stays pristine (no .i64/scratch beside it)",
