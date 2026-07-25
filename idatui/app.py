@@ -4077,7 +4077,12 @@ class IdaTui(App):
         if len(self._nav) > 1:
             self._nav_seq += 1  # invalidate any navigation still in flight
             self._nav.pop()
-            self._open_entry(self._nav[-1], push=False)
+            # Say something immediately: going back can need a decompile, and
+            # until it lands the panes still show where you were — with no
+            # feedback Esc reads as a no-op.
+            dest = self._nav[-1]
+            self._status(f"\u25c2 back to {dest.name}\u2026")
+            self._open_entry(dest, push=False)
         elif self.query_one("#left", FunctionsPanel).display:
             table.focus()
         else:
