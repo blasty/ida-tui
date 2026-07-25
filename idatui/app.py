@@ -50,16 +50,16 @@ from .worker_client import WorkerClient
 from .domain import DisasmModel, Func, Head, ListingModel, Program, Struct
 
 # Styles for the disassembly listing.
-_S_ADDR = Style(color="grey58")
-_S_LABEL = Style(color="yellow", bold=True)
-_S_INSN = Style(color="white")
-_S_MNEM = Style(color="cyan")
-_S_OPBYTES = Style(color="grey50")  # raw opcode bytes column
-_S_DATA = Style(color="#c8a15a")   # data items in the flat listing (db/dw/strings)
-_S_UNK = Style(color="grey54", italic=True)  # undefined bytes in the flat listing
-_S_MEMBER = Style(color="#9a8a6a")  # struct field rows (expanded, indented)
-_S_SEP = Style(color="grey42")      # function boundary separators / banners
-_S_FUNCHDR = Style(color="#d7a021", bold=True)  # 'name proc'/'endp' headers
+_S_ADDR = Style(color="#6b7684")
+_S_LABEL = Style(color="#7aa2f7", bold=True)
+_S_INSN = Style(color="#c3cad3")
+_S_MNEM = Style(color="#e8ecf2")
+_S_OPBYTES = Style(color="#5e6875")  # raw opcode bytes column
+_S_DATA = Style(color="#d8a657")
+_S_UNK = Style(color="#7c8b9e", italic=True)  # undefined bytes in the flat listing
+_S_MEMBER = Style(color="#93aee0")
+_S_SEP = Style(color="#5e6875")      # function boundary separators / banners
+_S_FUNCHDR = Style(color="#7aa2f7", bold=True)  # 'name proc'/'endp' headers
 
 _LST_INDENT = "    "   # one depth level: function names sit at level 0, code at 1
 _OP_LIMIT = 8         # opcode bytes shown in the 'limited' column mode
@@ -73,19 +73,19 @@ _ASM_KEYWORDS = frozenset({
     "offset", "short", "near", "far", "ptr", "dup", "cs", "ds", "es", "fs",
     "gs", "ss", "align", "public", "assume", "end",
 })
-_S_CURSOR = Style(bgcolor="grey30")
-_S_DIM = Style(color="grey42", italic=True)
+_S_CURSOR = Style(bgcolor="#2a313c")
+_S_DIM = Style(color="#7c8b9e", italic=True)
 _S_MATCH = Style(bgcolor="#7a5c00")  # all search matches
-_S_MATCH_CUR = Style(bgcolor="#b58900", color="black")  # the current match
-_S_NAME_MATCH = Style(bgcolor="#b58900", color="black")  # filter match in a name
-_S_WORD = Style(bgcolor="#264f78")  # identifier under the cursor
+_S_MATCH_CUR = Style(bgcolor="#d0a215", color="#12161c")  # the current match
+_S_NAME_MATCH = Style(bgcolor="#d0a215", color="#12161c")  # filter match in a name
+_S_WORD = Style(bgcolor="#2a3f5f")  # identifier under the cursor
 _S_CELL = Style(reverse=True)      # the block cursor cell
-_S_LINENO = Style(color="grey37")             # pseudocode line-number gutter
-_S_LINENO_CUR = Style(color="grey66", bold=True)  # gutter on the cursor line
-_S_DECOMP_SPIN = Style(color="#b58900", bold=True)   # 'decompiling' spinner glyph
-_S_DECOMP_WAIT = Style(color="grey58", italic=True)  # 'decompiling' label
-_S_DECOMP_DOTS = Style(color="grey37")               # trailing ellipsis
-_S_LINK = Style(bgcolor="#243447")  # split view: rows linked to the other pane's cursor
+_S_LINENO = Style(color="#626c7a")             # pseudocode line-number gutter
+_S_LINENO_CUR = Style(color="#c3cad3", bold=True)  # gutter on the cursor line
+_S_DECOMP_SPIN = Style(color="#d0a215", bold=True)   # 'decompiling' spinner glyph
+_S_DECOMP_WAIT = Style(color="#7c8b9e", italic=True)  # 'decompiling' label
+_S_DECOMP_DOTS = Style(color="#626c7a")               # trailing ellipsis
+_S_LINK = Style(bgcolor="#233044")  # split view: rows linked to the other pane's cursor
 
 # Hex-Rays appends a `/*0xEA*/` address marker to each pseudocode line (we fetch
 # with include_addresses so we have a per-line anchor). Matched here to extract
@@ -1716,9 +1716,9 @@ class DecompView(SearchMixin, NavMixin, ColumnCursor, ScrollView, can_focus=True
 # --------------------------------------------------------------------------- #
 # Hex view (raw bytes of the loaded image, VA-addressed, virtualized)
 # --------------------------------------------------------------------------- #
-_S_HEX = Style(color="grey74")
-_S_ASCII = Style(color="#6a9955")
-_S_FOFF = Style(color="#c586c0")  # file-offset column (distinct from the VA)
+_S_HEX = Style(color="#c3cad3")
+_S_ASCII = Style(color="#9ece6a")
+_S_FOFF = Style(color="#d8a657")
 
 
 class HexView(ScrollView, can_focus=True):
@@ -2952,7 +2952,7 @@ IDATUI_THEME = Theme(
     foreground="#d6d9de",
     primary="#5aa0d6",      # focus / links: the one cool accent
     secondary="#2f5d82",
-    accent="#b58900",       # same amber as search matches + the spinner
+    accent="#d0a215",       # the same amber as a search match — one meaning
     warning="#c9762f",      # burnt orange — distinct from accent, reads as care
     error="#ff5f5f",        # already used for failure text
     success="#6a9955",      # already used for comments
