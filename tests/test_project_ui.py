@@ -168,6 +168,24 @@ async def run(bins):
                 await pilot.press("escape")
                 await pilot.pause(0.2)
 
+            # -- and the same toggle for strings --------------------------- #
+            from idatui.app import StringsPalette
+            await pilot.press("quotation_mark")
+            if await settle(lambda: isinstance(app.screen, StringsPalette), 30):
+                pal = app.screen
+                pal.query_one(Input).value = "usage"
+                await pilot.pause(0.3)
+                local = {b for b, _, _ in pal._results}
+                await pilot.press("f2")
+                await pilot.pause(0.4)
+                wide = {b for b, _, _ in pal._results}
+                check("strings: local scope is this binary only", local == {None},
+                      f"{local}")
+                check("strings: F2 widens across the project",
+                      len(wide) >= 2 and None not in wide, f"{wide}")
+                await pilot.press("escape")
+                await pilot.pause(0.2)
+
         # -- the promise: nothing was written next to the sources ---------- #
         left = sorted(os.listdir(src))
         check("the source tree stays pristine (no .i64/scratch beside it)",

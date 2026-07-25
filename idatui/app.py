@@ -2210,16 +2210,24 @@ class StringsPalette(ModalScreen):
         Binding("escape", "close", "Close"),
         Binding("down,ctrl+n", "cursor_down", show=False),
         Binding("up,ctrl+p", "cursor_up", show=False),
+        Binding("f2", "scope", "This binary / whole project", show=False),
     ]
     LIMIT = 500
+    #: Project scope saturates its cap (every binary contributes); keep the list
+    #: short so arrowing stays snappy.
+    PROJECT_LIMIT = 60
 
-    def __init__(self, strings: list) -> None:
+    def __init__(self, strings: list, index=None, binary=None) -> None:
         super().__init__()
         # Pre-render + pre-lower once: filtering runs on every keystroke and a
         # big binary has tens of thousands of strings.
         self._rows = [(s, d, d.lower())
                       for s in strings for d in (_str_display(s.text),)]
-        self._results: list = []
+        self._index = index      # ProjectIndex, when this is a project
+        self._binary = binary
+        self._project_scope = False
+        #: (binary|None, addr, display text) — binary is None for a local hit
+        self._results: list[tuple] = []
 
     def compose(self) -> ComposeResult:
         with Vertical(id="pal-box"):
@@ -2240,24 +2248,49 @@ class StringsPalette(ModalScreen):
         event.stop()
         self.action_choose()
 
+    def action_scope(self) -> None:
+        if self._index is None:
+            return  # not a project: nothing else to search
+        self._project_scope = not self._project_scope
+        self._apply(self.query_one("#pal-input", Input).value.strip())
+
     def _apply(self, query: str) -> None:
         q = query.lower()
-        rows = []
-        for s, disp, low in self._rows:
-            hit = low.find(q) if q else -1
-            if q and hit < 0:
-                continue
-            rows.append((s, disp, hit))
-            if len(rows) >= self.LIMIT:
-                break
-        self._results = [s for s, _, _ in rows]
+        # rows: (binary|None, addr, length, display text, match offset)
+        if self._project_scope and self._index is not None:
+            from .index import KIND_STRING
+            hits = self._index.search(query, kind=KIND_STRING,
+                                      limit=self.PROJECT_LIMIT * 3) if query else []
+            rows = []
+            for h in hits:
+                disp = _str_display(h.text)
+                rows.append((h.binary, h.addr, len(h.text), disp,
+                             disp.lower().find(q)))
+            # the index already guarantees a match, so ranking only orders them:
+            # earliest match, then shortest, with a stable (binary, addr) tiebreak
+            # (a literal shared by two binaries would otherwise be unordered).
+            rows.sort(key=lambda r: (r[4] if r[4] >= 0 else 1 << 30,
+                                     r[2], r[0], r[1]))
+            rows = rows[:self.PROJECT_LIMIT]
+        else:
+            rows = []
+            for s, disp, low in self._rows:
+                hit = low.find(q) if q else -1
+                if q and hit < 0:
+                    continue
+                rows.append((None, s.addr, s.length, disp, hit))
+                if len(rows) >= self.LIMIT:
+                    break
+        self._results = [(b, a, d) for b, a, _, d, _ in rows]
         ol = self.query_one(OptionList)
         ol.clear_options()
         opts = []
-        for s, disp, hit in rows:
+        for binary, addr, length, disp, hit in rows:
             label = Text()
-            label.append(f"{s.addr:08X}  ", _S_ADDR)
-            label.append(f"{s.length:>5}  ", _S_DIM)
+            if binary:
+                label.append(f"{binary:<14.14} ", _S_LABEL)
+            label.append(f"{addr:08X}  ", _S_ADDR)
+            label.append(f"{length:>5}  ", _S_DIM)
             body = Text(disp)
             if hit >= 0:
                 body.stylize(_S_NAME_MATCH, hit, hit + len(q))
@@ -2266,9 +2299,13 @@ class StringsPalette(ModalScreen):
         ol.add_options(opts)
         if self._results:
             ol.highlighted = 0
-        more = "+" if len(rows) == self.LIMIT else ""
+        scope = "project" if self._project_scope else "this binary"
+        cap = self.PROJECT_LIMIT if self._project_scope else self.LIMIT
+        more = "+" if len(rows) == cap else ""
+        hint = "  (F2: this binary)" if self._project_scope else (
+            "  (F2: whole project)" if self._index is not None else "")
         self.query_one("#pal-title", Static).update(
-            f" strings: {len(self._results)}{more}  of {len(self._rows)}")
+            f" strings [{scope}]: {len(self._results)}{more} of {len(self._rows)}{hint}")
 
     def action_cursor_down(self) -> None:
         ol = self.query_one(OptionList)
@@ -2284,11 +2321,13 @@ class StringsPalette(ModalScreen):
         ol = self.query_one(OptionList)
         i = ol.highlighted
         if i is not None and 0 <= i < len(self._results):
-            self.dismiss(self._results[i].addr)
+            b, a, _ = self._results[i]
+            self.dismiss((b, a))
 
     def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
         if 0 <= event.option_index < len(self._results):
-            self.dismiss(self._results[event.option_index].addr)
+            b, a, _ = self._results[event.option_index]
+            self.dismiss((b, a))
 
     def action_close(self) -> None:
         self.dismiss(None)
@@ -3715,8 +3754,8 @@ class IdaTui(App):
         self._status(f"could not open {label}: {why}")
 
     def action_strings(self) -> None:
-        """'\"' / Shift+F12: browse every string in the binary (filterable);
-        Enter jumps to it in the unified listing."""
+        """'\"' / Shift+F12: browse every string in the binary (filterable, F2
+        widens to the whole project); Enter jumps to it in the unified listing."""
         if self.program is None:
             self._status("not connected yet")
             return
@@ -3742,11 +3781,18 @@ class IdaTui(App):
             self._status("no strings found (needs the list_strings tool)")
             return
         self._status(f"strings: {len(items)}")
-        self.push_screen(StringsPalette(items), self._on_string_chosen)
+        self.push_screen(StringsPalette(items, index=self._index,
+                                        binary=self._binary),
+                         self._on_string_chosen)
 
-    def _on_string_chosen(self, addr: int | None) -> None:
-        if addr is not None:  # land on the literal in the unified listing
-            self._goto_ea(addr, push=True)
+    def _on_string_chosen(self, choice) -> None:  # type: ignore[no-untyped-def]
+        if choice is None:
+            return
+        binary, addr = choice
+        if binary and binary != self._binary:
+            self._switch_then_goto(binary, addr)
+            return
+        self._goto_ea(addr, push=True)  # land on the literal in the listing
 
     def action_toggle_view(self) -> None:
         """Tab: switch the code pane between disassembly and pseudocode (or leave

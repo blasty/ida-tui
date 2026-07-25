@@ -424,10 +424,10 @@ async def s_strings(c: Ctx):
         pal.query_one(Input).value = frag
         await c.pause(0.2)
         ok = (pal._results
-              and all(frag.lower() in s.text.lower() for s in pal._results))
+              and all(frag.lower() in t.lower() for _, _, t in pal._results))
         c.check("filtering narrows to matching strings", bool(ok),
                 f"frag={frag!r} n={len(pal._results)}")
-        want = pal._results[0].addr
+        want = pal._results[0][1]
         await c.press("enter")
         await c.wait(lambda: not isinstance(app.screen, StringsPalette), 10)
         landed = await c.wait(lambda: c.lst._cursor_ea() == want, 20)
