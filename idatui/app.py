@@ -1574,6 +1574,13 @@ class DecompView(SearchMixin, NavMixin, ColumnCursor, ScrollView, can_focus=True
             else:
                 scroll_x = sx
         self._apply_scroll(min(max(scroll_y, 0), max(total - 1, 0)), max(scroll_x, 0))
+        # `cursor` is reactive(repaint=False) and _apply_scroll only repaints via
+        # call_after_refresh, so a jump that lands in the SAME viewport (Esc back
+        # to another spot in the function already on screen) moved the cursor
+        # with nothing to redraw it — the pane kept showing the old highlight
+        # until the next keypress. Repaint here; _move does the same via
+        # _refresh_lines.
+        self.refresh()
         self._after_cursor_move()
 
     def get_loading_widget(self):  # type: ignore[override]
