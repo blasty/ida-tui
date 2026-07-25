@@ -158,23 +158,44 @@ is load-bearing: without it, a name shared by two binaries (`main`, `textdomain`
 most of libc) ties on every other field and Python falls through to comparing the
 hit objects, which raises `TypeError`.
 
-**Phase 3 — cross-binary linking.** Index what each binary *imports* and
-*exports*, then join them: "who in the project calls this export", and following
-an import in A lands on the real implementation in B.
+**Phase 3 — cross-binary linking (done).** Each binary's imports and exports go
+into the project index alongside its functions and strings (`KIND_IMPORT`,
+`KIND_EXPORT`), and following an import resolves it to the binary that provides
+it.
 
-This is where the standing **PLT/import-stub** backlog item mostly goes away.
-Today, following a call to `strcmp` reaches the PLT thunk and stops at
-`extrn strcmp:near` — Hex-Rays has nothing to decompile because the code lives in
-a library the app never opened. With an export index, that stub resolves to
-`libc`'s implementation *when that library is in the project*, so the dead end
-becomes a normal cross-binary jump.
+Following a call to `strcmp` used to reach the PLT/extern entry and stop:
+Hex-Rays has nothing to decompile because the code lives in a library this
+binary only references. Now `_follow_import` checks whether the target address is
+one of this binary's import stubs, asks the index who exports that name, and
+switches there. From an `echo` + `libc` project, Enter on `strrchr(a1, 47)` lands
+on `strrchr` at `0xaf960` in libc.
 
-It does not retire the item completely: a single-binary session, or an import
-whose provider isn't in the project, still lands on a stub, and that case still
-wants the original fix — recognise the thunk and present it as an import
-("strcmp — imported, provider not in project") instead of surfacing a decompiler
-error. So phase 3 covers the valuable half; stub *presentation* stays worth doing
-on its own.
+Three things this depends on:
+
+*ELF symbol versioning.* The importer sees `strrchr@@GLIBC_2.2.5`; the provider
+may export `strrchr`, `strrchr@GLIBC_2.2.5`, or the versioned spelling. Comparing
+raw names resolves almost nothing, so `domain.link_name()` cuts at the first `@`
+and both sides meet on the bare symbol. `Linkage.raw` keeps what IDA reported,
+which is what the listing shows.
+
+*Exact match, not substring.* The join uses `ProjectIndex.exact()`, not
+`search()`: an import must bind to its own name, or `read` picks up `pread`,
+`read_line` and `thread_start`. Exact match also works below the 3-character
+trigram floor, which matters — plenty of real exports are one or two characters.
+
+*Resolution reads the index, not a worker.* A provider resolves while its worker
+is evicted; that is the reason the index is on disk. The switch itself then pages
+the provider in through the normal pool path.
+
+When nothing in the project provides the symbol, `_follow_import` declines and
+the local navigation proceeds — landing on the stub is still the honest answer,
+and a single-binary session behaves exactly as before.
+
+This does not retire the **PLT/import-stub** backlog item. An import whose
+provider isn't in the project still lands on a stub, and that case wants the
+original fix — recognise the thunk and present it as an import ("strcmp —
+imported, provider not in project") rather than surfacing a decompiler error.
+Phase 3 covers the valuable half; stub *presentation* stays worth doing.
 
 **Phase 4 — polish.** Background pre-warm, nav-history policy (per-binary to
 start; a global stack is a later question), RPC/`drive` verbs (`binaries`,

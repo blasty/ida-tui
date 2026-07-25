@@ -733,6 +733,41 @@ def list_strings(
         "total": len(items),
         "next_offset": offset + len(page),
     }
+
+@tool
+@idasync
+def list_linkage(
+    kind: Annotated[str, "'import', 'export' or 'both'"] = "both",
+) -> dict:
+    """What this binary imports from, and exports to, other modules:
+    {imports:[{addr,name,module}], exports:[{addr,name,ordinal}]}. Feeds the
+    project-wide import/export join, which resolves a PLT stub in one binary to
+    the real implementation in another."""
+    import idaapi
+    import idautils
+    import ida_nalt
+    want = str(kind or "both").lower()
+    imports = []
+    exports = []
+    if want in ("import", "both"):
+        n = ida_nalt.get_import_module_qty()
+        for i in range(n):
+            mod = ida_nalt.get_import_module_name(i) or ""
+
+            def _cb(ea, name, ordinal, _mod=mod):
+                # An ordinal-only import has no name; skip rather than invent one.
+                if name:
+                    imports.append({"addr": hex(ea), "name": name, "module": _mod})
+                return True
+
+            ida_nalt.enum_import_names(i, _cb)
+    if want in ("export", "both"):
+        for index, ordinal, ea, name in idautils.Entries():
+            if name:
+                exports.append({"addr": hex(ea), "name": name,
+                                "ordinal": int(ordinal)})
+    return {"imports": imports, "exports": exports,
+            "n_imports": len(imports), "n_exports": len(exports)}
 '''
 
 SNIPPET = f"{BEGIN}\n{BODY.strip()}\n{END}\n"

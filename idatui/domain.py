@@ -176,6 +176,35 @@ class StrLit:
     type: str = ""
 
 
+def link_name(raw: str) -> str:
+    """A linkage name reduced to what actually joins across binaries.
+
+    ELF symbol versioning means the importer sees ``strrchr@@GLIBC_2.2.5`` while
+    the provider may export ``strrchr``, ``strrchr@GLIBC_2.2.5`` or the versioned
+    spelling — comparing raw names silently resolves almost nothing. Cut at the
+    first '@' so both sides meet on the bare symbol.
+    """
+    n = (raw or "").strip()
+    at = n.find("@")
+    return n[:at] if at > 0 else n
+
+
+@dataclass(frozen=True)
+class Linkage:
+    """One import or export: a name this binary takes from, or offers to, other
+    modules. ``module`` is set for imports (the library IDA attributes it to),
+    ``ordinal`` for exports.
+
+    ``name`` is the joinable name; ``raw`` keeps the spelling IDA reported, which
+    is what the user sees in the listing.
+    """
+    addr: int
+    name: str
+    module: str = ""
+    ordinal: int = 0
+    raw: str = ""
+
+
 @dataclass
 class Decompilation:
     ea: int
@@ -818,6 +847,7 @@ class Program:
         self._decomp: dict[int, tuple[Decompilation, int]] = {}
         self._decomp_maps: dict[int, tuple[list[list[int]], int]] = {}  # line->ea sets
         self._strings: list["StrLit"] | None = None  # whole-binary string literals
+        self._linkage: tuple[list["Linkage"], list["Linkage"]] | None = None
         self._name_gen = 0  # bumped on rename; invalidates stale name caches
         self._segments_cache: list[tuple[int, int, int, str]] | None = None
         self._sections: list[tuple[int, int, str]] | None = None
@@ -1310,6 +1340,34 @@ class Program:
             offset += len(rows)
         with self._lock:
             self._strings = out
+        return out
+
+    def linkage(self) -> tuple[list[Linkage], list[Linkage]]:
+        """``(imports, exports)`` for this binary, cached. ``([], [])`` if the
+        tool is unavailable — an old worker must not break the caller."""
+        with self._lock:
+            hit = self._linkage
+        if hit is not None:
+            return hit
+        try:
+            payload = self.client.call("list_linkage", kind="both")
+        except IDAToolError:
+            return ([], [])
+        if not isinstance(payload, dict):
+            return ([], [])
+        imps = [Linkage(addr=_as_int(r.get("addr", 0)),
+                        name=link_name(r.get("name", "")),
+                        module=r.get("module", "") or "",
+                        raw=r.get("name", "") or "")
+                for r in payload.get("imports", []) if isinstance(r, dict)]
+        exps = [Linkage(addr=_as_int(r.get("addr", 0)),
+                        name=link_name(r.get("name", "")),
+                        ordinal=int(r.get("ordinal", 0) or 0),
+                        raw=r.get("name", "") or "")
+                for r in payload.get("exports", []) if isinstance(r, dict)]
+        out = ([i for i in imps if i.name], [e for e in exps if e.name])
+        with self._lock:
+            self._linkage = out
         return out
 
     def decomp_map(self, ea: int) -> list[list[int]]:

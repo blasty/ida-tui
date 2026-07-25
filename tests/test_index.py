@@ -11,7 +11,8 @@ import tempfile
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from idatui.index import KIND_FUNC, KIND_STRING, ProjectIndex  # noqa: E402
+from idatui.index import (KIND_EXPORT, KIND_FUNC, KIND_IMPORT,  # noqa: E402
+                          KIND_STRING, ProjectIndex)
 
 PASS = FAIL = 0
 
@@ -115,6 +116,74 @@ def main() -> int:
         check("forget drops a binary entirely",
               idx.counts() == {"libfoo": 1} and idx.search("socket bind") == [],
               f"{idx.counts()}")
+
+        # -- cross-binary linkage join (phase 3) ------------------------------ #
+        idx.reindex("app", [
+            (KIND_FUNC, 0x1000, "main"),
+            (KIND_IMPORT, 0x2000, "strcmp"),
+            (KIND_IMPORT, 0x2008, "read"),
+            (KIND_IMPORT, 0x2010, "SSL_new"),
+        ])
+        idx.reindex("libc", [
+            (KIND_EXPORT, 0x8000, "strcmp"),
+            (KIND_EXPORT, 0x8100, "read"),
+            (KIND_EXPORT, 0x8200, "pread"),
+            (KIND_EXPORT, 0x8300, "read_line"),
+            (KIND_FUNC, 0x8000, "strcmp"),
+        ])
+        idx.reindex("libssl", [(KIND_EXPORT, 0x9000, "SSL_new")])
+
+        prov = idx.providers("strcmp", exclude="app")
+        check("an import resolves to the binary that exports it",
+              [(h.binary, h.addr) for h in prov] == [("libc", 0x8000)],
+              f"{[(h.binary, hex(h.addr)) for h in prov]}")
+
+        # The whole point of exact(): substring search would drag in pread,
+        # read_line and thread_start, and 'read' is also below the trigram floor
+        # for some engines — an import must bind to its exact name or nothing.
+        prov = idx.providers("read", exclude="app")
+        check("the join is exact, not substring",
+              [(h.binary, h.addr) for h in prov] == [("libc", 0x8100)],
+              f"{[(h.binary, h.text) for h in prov]}")
+
+        check("a short name still resolves (below the trigram floor)",
+              [h.binary for h in idx.providers("SSL_new", exclude="app")] == ["libssl"],
+              f"{idx.providers('SSL_new')}")
+
+        check("an unprovided import resolves to nothing",
+              idx.providers("dlopen", exclude="app") == [])
+
+        check("exclude keeps a binary from resolving to itself",
+              idx.providers("strcmp", exclude="libc") == [],
+              f"{idx.providers('strcmp', exclude='libc')}")
+
+        imp = idx.importers("strcmp")
+        check("the reverse join finds who imports an export",
+              [(h.binary, h.addr) for h in imp] == [("app", 0x2000)],
+              f"{[(h.binary, hex(h.addr)) for h in imp]}")
+
+        check("kind keeps functions out of the linkage join",
+              [h.binary for h in idx.providers("strcmp")] == ["libc"],
+              "a KIND_FUNC row named strcmp must not answer as an export")
+
+        idx.forget("libc")
+        check("forgetting a provider unresolves its imports",
+              idx.providers("strcmp", exclude="app") == [])
+
+        # -- ELF symbol versioning -------------------------------------------- #
+        # The importer sees strrchr@@GLIBC_2.2.5 while the provider may export a
+        # different spelling; raw names would resolve almost nothing. link_name
+        # cuts at the first '@' so both sides meet on the bare symbol.
+        from idatui.domain import link_name
+        check("link_name strips an ELF version suffix",
+              link_name("strrchr@@GLIBC_2.2.5") == "strrchr",
+              link_name("strrchr@@GLIBC_2.2.5"))
+        check("link_name leaves an unversioned name alone",
+              link_name("strrchr") == "strrchr")
+        check("link_name handles a single-@ version",
+              link_name("SSL_new@OPENSSL_3.0.0") == "SSL_new")
+        check("link_name doesn't eat a leading @",
+              link_name("@weird") == "@weird", link_name("@weird"))
 
         # -- persistence ------------------------------------------------------ #
         path = idx.path

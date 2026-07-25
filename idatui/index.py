@@ -32,6 +32,9 @@ MIN_TRIGRAM = 3
 
 KIND_FUNC = "func"
 KIND_STRING = "string"
+#: Cross-binary linkage: what a binary takes from, and offers to, other modules.
+KIND_IMPORT = "import"
+KIND_EXPORT = "export"
 
 
 @dataclass(frozen=True)
@@ -151,6 +154,37 @@ class ProjectIndex:
         except sqlite3.OperationalError:
             return []  # malformed FTS expression: treat as no matches
         return [Hit(binary=b, kind=k, addr=int(a), text=t) for b, k, a, t in rows]
+
+    def exact(self, name: str, kind: str, exclude: str | None = None) -> list[Hit]:
+        """Every entry whose text is EXACTLY ``name``, for the linkage join.
+
+        Deliberately not ``search()``: an import must resolve to the export of
+        that name, not to everything containing it (``read`` would otherwise
+        match ``pread``, ``read_line``, ``thread_start``). Exact match also
+        works below the trigram floor, which matters — plenty of real exports
+        are one or two characters.
+        """
+        n = (name or "").strip()
+        if not n:
+            return []
+        sql = "SELECT binary, kind, addr, text FROM entries WHERE text = ? AND kind = ?"
+        args: list = [n, kind]
+        if exclude:
+            sql += " AND binary <> ?"
+            args.append(exclude)
+        rows = self._db.execute(sql + " ORDER BY binary, addr", args).fetchall()
+        return [Hit(binary=b, kind=k, addr=int(a), text=t) for b, k, a, t in rows]
+
+    def providers(self, name: str, exclude: str | None = None) -> list[Hit]:
+        """Binaries in the project that EXPORT ``name`` (skip ``exclude``, the
+        binary asking). This is the 'follow an import to its implementation'
+        half of the join."""
+        return self.exact(name, KIND_EXPORT, exclude)
+
+    def importers(self, name: str, exclude: str | None = None) -> list[Hit]:
+        """Binaries in the project that IMPORT ``name`` — 'who in the project
+        calls this export'."""
+        return self.exact(name, KIND_IMPORT, exclude)
 
     # -- introspection ------------------------------------------------------ #
     def counts(self) -> dict[str, int]:

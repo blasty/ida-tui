@@ -3495,7 +3495,7 @@ class IdaTui(App):
         ref = self._project.by_label(self._binary)
         if ref is None or not self._index.is_stale(self._binary, ref.source):
             return
-        from .index import KIND_FUNC, KIND_STRING
+        from .index import KIND_EXPORT, KIND_FUNC, KIND_IMPORT, KIND_STRING
         idx = self._func_index
         entries = [(KIND_FUNC, f.addr, f.name) for f in (idx.all_loaded() if idx else [])]
         try:
@@ -3504,12 +3504,18 @@ class IdaTui(App):
         except Exception:  # noqa: BLE001 -- symbols alone are still worth indexing
             pass
         try:
+            imps, exps = self.program.linkage()
+            entries += [(KIND_IMPORT, i.addr, i.name) for i in imps]
+            entries += [(KIND_EXPORT, e.addr, e.name) for e in exps]
+        except Exception:  # noqa: BLE001 -- an old worker has no list_linkage
+            pass
+        try:
             n = self._index.reindex(self._binary, entries, source=ref.source)
         except Exception as e:  # noqa: BLE001
             self.app.call_from_thread(self._status, f"indexing failed: {e}")
             return
         self.app.call_from_thread(
-            self._status, f"indexed {self._binary}: {n} symbols + strings")
+            self._status, f"indexed {self._binary}: {n} symbols, strings + linkage")
 
     # -- initial landing --------------------------------------------------- #
     #: function names tried (in order) as the startup landing spot
@@ -4228,7 +4234,54 @@ class IdaTui(App):
         if tgt is None or tgt.to is None:
             self.app.call_from_thread(self._status, "nothing to follow here")
             return
+        if self._follow_import(tgt.to):
+            return
         self._do_navigate(tgt.to, push=True)
+
+    def _import_stub(self, ea: int) -> str | None:
+        """The import name at ``ea``, if ``ea`` is one of this binary's import
+        stubs. That's the dead end phase 3 exists to open up: a call to strcmp
+        reaches the PLT/extern entry and Hex-Rays has nothing to decompile,
+        because the code lives in a library this binary only references."""
+        try:
+            imps, _ = self.program.linkage()
+        except Exception:  # noqa: BLE001
+            return None
+        for i in imps:
+            if i.addr == ea:
+                return i.name
+        return None
+
+    def _cross_binary_impl(self, name: str) -> tuple[str, int] | None:
+        """``(binary, addr)`` of a project binary that EXPORTS ``name``.
+
+        Reads the on-disk index, so a provider resolves even when its worker was
+        evicted — the whole reason the index exists.
+        """
+        if self._index is None or self._project is None or not name:
+            return None
+        try:
+            hits = self._index.providers(name, exclude=self._binary)
+        except Exception:  # noqa: BLE001
+            return None
+        return (hits[0].binary, hits[0].addr) if hits else None
+
+    def _follow_import(self, ea: int) -> bool:
+        """Follow an import stub into the binary that implements it. True when
+        it was handled (caller must not also navigate locally)."""
+        name = self._import_stub(ea)
+        if not name:
+            return False
+        found = self._cross_binary_impl(name)
+        if found is None:
+            # Leave the local navigation alone: landing on the stub is still the
+            # honest answer when nothing in the project provides the symbol.
+            return False
+        label, addr = found
+        self.app.call_from_thread(
+            self._status, f"{name} \u2192 {label}  (import resolved)")
+        self.app.call_from_thread(self._switch_then_goto, label, addr)
+        return True
 
     @work(thread=True, group="nav")
     def _follow_decomp(self, line: str, word: str | None,
@@ -4256,6 +4309,8 @@ class IdaTui(App):
             addr = next((x.to for x in xr if x.type == "code" and x.to), None)
         if addr is None:
             self.app.call_from_thread(self._status, "nothing to follow on this line")
+            return
+        if self._follow_import(addr):
             return
         # Following FROM pseudocode: keep the reader in the decompiler when the
         # target is decompilable, instead of dropping to the linear listing.
