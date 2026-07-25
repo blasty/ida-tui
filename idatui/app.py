@@ -2566,6 +2566,24 @@ class LoadOptionsScreen(ModalScreen):
         self._apply("")
         self.query_one("#pal-input", Input).focus()
 
+    def focus_next(self, selector="*"):  # type: ignore[override]
+        """Tab moves between the two things you TYPE into.
+
+        DOM order would stop at the option list on the way, which is
+        arrow-driven and has nothing to type — and the address you meant to
+        enter goes into whichever box happened to have focus. Typing an address
+        into the processor filter is then taken as a processor name, IDA rejects
+        it, and the open fails; that is a bad enough outcome to be worth
+        overriding Tab for.
+        """
+        inp = self.query_one("#pal-input", Input)
+        base = self.query_one("#load-base", Input)
+        (inp if self.focused is base else base).focus()
+        return self.focused
+
+    def focus_previous(self, selector="*"):  # type: ignore[override]
+        return self.focus_next()
+
     def on_input_changed(self, event: Input.Changed) -> None:
         event.stop()
         if event.input.id == "pal-input":
@@ -3238,6 +3256,10 @@ class IdaTui(App):
     #pal-input { border: none; height: 1; margin: 0 1; background: $panel; color: $text; }
     #pal-list { height: auto; max-height: 24; }
     #load-note { height: 2; padding: 1 1 0 1; color: $text-muted; }
+    /* Cap the processor list so the ADDRESS FIELD is always on screen: with the
+       palette default (24) the box outgrew the terminal and the field you need
+       was clipped off the bottom, which read as "Tab does nothing". */
+    LoadOptionsScreen #pal-list { max-height: 12; }
     #load-base { border: none; height: 1; margin: 1 1 0 1; background: $panel; color: $text; }
     #load-help { height: 1; padding: 0 1; color: $text-muted; }
     StructEditor { align: center middle; }
@@ -3298,6 +3320,8 @@ class IdaTui(App):
         self._pending_restore = None          # entry to reopen after a switch
         self._goto_after_switch = None        # cross-binary search hit to land on
         self._hops: list[str] = []            # binaries a navigation crossed FROM
+        self._load_for_label = None           # project binary the dialog is for
+        self._pending_switch = None           # switch waiting on that answer
         self._nav_seq = 0                     # bumped per navigation; drops stale ones
         # None = teardown wasn't an explicit quit (crash/kill): save defensively.
         # False = the user chose discard, or we already saved on the way out.
@@ -3412,8 +3436,13 @@ class IdaTui(App):
         # A file no loader recognises has to be described before it can be
         # opened, so ask BEFORE the worker starts — once IDA has made a database
         # the answer is baked in and changing it means deleting the .i64.
-        if self._should_ask_load_options():
-            self._ask_load_options()
+        if self._project is not None:
+            ref = self._pending_load_ref()
+            if ref is not None:
+                self._ask_load_options(ref.source, label=ref.label)
+                return
+        elif self._should_ask_load_options():
+            self._ask_load_options(self._open_path)
             return
         # Show a loading overlay immediately so a slow open/analysis (big binary)
         # isn't just dead air behind empty panes; dismissed once we land.
@@ -3429,8 +3458,8 @@ class IdaTui(App):
         re-passing switches fails the open); or the file is a format IDA
         recognises, which is nearly always.
         """
-        if self._project is not None or not self._open_path:
-            return False   # project mode carries per-binary options already
+        if not self._open_path:
+            return False
         if self._load_args:
             return False
         from .formats import needs_load_options
@@ -3439,21 +3468,66 @@ class IdaTui(App):
             return False
         return needs_load_options(self._open_path)
 
-    def _ask_load_options(self) -> None:
+    def _retry_load_options(self) -> None:
+        """Re-ask after IDA refused what we told it."""
+        path, label = self._open_path, None
+        if self._project is not None and self._binary is not None:
+            ref = self._project.by_label(self._binary)
+            if ref is not None:
+                path, label = ref.source, ref.label
+                # Clear the rejected answer or _pending_load_ref would see the
+                # binary as already described and never ask again.
+                self._project.set_load(label, processor="", base=0)
+                self._project._entries[self._project._refs.index(ref)].pop(
+                    "processor", None)
+                self._project.save()
+        self._load_args = ""
+        if path:
+            self._status("those load options were rejected \u2014 try again")
+            self._ask_load_options(path, label=label)
+
+    def _pending_load_ref(self, label: str | None = None):  # type: ignore[no-untyped-def]
+        """The project binary about to be opened, if it needs describing.
+
+        Checked against the SOURCE: staging may not have happened yet, and the
+        question is about the bytes, not where they were copied to.
+        """
+        if self._project is None:
+            return None
+        label = label or self._binary or self._project.refs[0].label
+        ref = self._project.by_label(label)
+        if ref is None or ref.load_args:
+            return None
+        if os.path.exists(ref.db) or os.path.exists(
+                os.path.splitext(ref.staged)[0] + ".i64"):
+            return None    # already analysed: the .i64 records how
+        from .formats import needs_load_options
+        return ref if needs_load_options(ref.source) else None
+
+    def _ask_load_options(self, path: str, label: str | None = None) -> None:
         try:
-            size = os.path.getsize(self._open_path)
+            size = os.path.getsize(path)
         except OSError:
             size = 0
-        self.push_screen(LoadOptionsScreen(self._open_path, size),
-                         self._on_load_options)
+        self._load_for_label = label
+        self.push_screen(LoadOptionsScreen(path, size), self._on_load_options)
 
     def _on_load_options(self, choice) -> None:  # type: ignore[no-untyped-def]
         from .formats import load_args
         choice = choice or {}
-        if choice.get("processor"):
-            self._load_args = load_args(choice["processor"], choice.get("base", 0))
-            self._status(f"loading as {choice['processor']} "
-                         f"@ {choice.get('base', 0):#x}")
+        label, self._load_for_label = self._load_for_label, None
+        proc, base = choice.get("processor", ""), int(choice.get("base", 0) or 0)
+        if proc:
+            if label is not None and self._project is not None:
+                # Persist it: the answer belongs to the binary, not to this run.
+                self._project.set_load(label, proc, base)
+            else:
+                self._load_args = load_args(proc, base)
+            self._status(f"loading as {proc} @ {base:#x}")
+        if self._pending_switch is not None:
+            label2, self._pending_switch = self._pending_switch, None
+            self._switch_binary(label2)
+            return
         self._loading_screen = LoadingScreen(self._loading_title())
         self.push_screen(self._loading_screen)
         self._connect()
@@ -3600,6 +3674,12 @@ class IdaTui(App):
         except Exception as e:  # noqa: BLE001
             self.app.call_from_thread(self._status, f"connect failed: {e}")
             self.app.call_from_thread(self._dismiss_loading)
+            # A load we described ourselves and IDA refused: offer the dialog
+            # again rather than leaving an empty app with an error in the status
+            # bar. Getting the processor wrong is an ordinary mistake and should
+            # cost one more keypress, not a restart.
+            if "load options" in str(e):
+                self.app.call_from_thread(self._retry_load_options)
             return
         self.client = client
         self.program = program
@@ -3993,6 +4073,13 @@ class IdaTui(App):
             self._switch_binary(label)
 
     def _switch_binary(self, label: str) -> None:
+        # A blob nobody has described yet has to be described before its worker
+        # opens it — same as at boot, just reached by switching instead.
+        ref = self._pending_load_ref(label)
+        if ref is not None and self._load_for_label is None:
+            self._pending_switch = label
+            self._ask_load_options(ref.source, label=label)
+            return
         # Snapshot what we're leaving so coming back restores the view, then let
         # the pool hand us a worker (spawning + evicting as the budget dictates).
         if self._binary is not None:
@@ -4134,6 +4221,16 @@ class IdaTui(App):
     def action_toggle_view(self) -> None:
         """Tab: switch the code pane between disassembly and pseudocode (or leave
         the hex view back to the preferred code view)."""
+        # Tab is a PRIORITY app binding, so it fires even while a modal is up and
+        # nothing inside a dialog could ever be tabbed to. Hand it back to the
+        # dialog: this is the only reason the load dialog's address field was
+        # unreachable, and it was broken the same way in every other modal.
+        if self.screen is not self.screen_stack[0]:
+            try:
+                self.screen.focus_next()
+            except Exception:  # noqa: BLE001 -- screen with nothing focusable
+                pass
+            return
         if self._cur is None:
             return
         if self._split:

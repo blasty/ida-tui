@@ -80,3 +80,33 @@ Hard-won Textual behaviour and the patterns this app relies on. Pairs with
   failures. Re-run on a warm session before trusting a regression.
 - Edits mutate the `.i64` — revert renames (via API) for idempotency; use a
   PID-unique temp name to dodge collisions from a prior crashed run.
+
+
+## A priority app binding fires even under a modal
+
+`Binding("tab,shift+tab", "toggle_view", priority=True)` on the App runs before
+the focus chain, so Tab never reached ANY dialog — nothing in a modal could be
+tabbed to, in this app, ever. It looked like a bug in one dialog (the load
+options address field was unreachable) and was actually app-wide.
+
+The fix is in the action, not the binding: if a modal is up, hand the key back.
+
+```python
+def action_toggle_view(self):
+    if self.screen is not self.screen_stack[0]:
+        self.screen.focus_next()
+        return
+```
+
+Related: DOM order is rarely the tab order you want. In a dialog with a filter
+box, an option list and a second field, `focus_next()` stops at the list — which
+is arrow-driven and has nothing to type — so text meant for the second field
+lands in the filter. Override `focus_next`/`focus_previous` on the screen to
+cycle the fields people actually type into.
+
+## A modal can outgrow the terminal and clip its own controls
+
+`#pal-list { max-height: 24 }` plus a 21-row list pushed the address field and
+help line off the bottom of the screen. Nothing errors; the field is simply not
+there, which reads to the user as "Tab does nothing". Cap the scrollable part
+per-dialog so the controls below it are always visible.

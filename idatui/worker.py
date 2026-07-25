@@ -111,6 +111,15 @@ def _open_and_register(binpath: str, load_args: str = ""):
         args = None
     if idapro.open_database(binpath, run_auto_analysis=True,
                             args=args):  # nonzero == failure
+        if args:
+            # With load switches in play they are the likeliest culprit by far:
+            # IDA refuses an unknown -p name with no diagnostic of its own, so
+            # saying "the database is locked" here sends people hunting a
+            # problem they don't have.
+            raise RuntimeError(
+                f"failed to open {binpath} with load options {args!r}: IDA "
+                f"rejected them \u2014 an unknown processor name is the usual "
+                f"cause (see tools/verify_procs.py for the valid ones)")
         raise RuntimeError(
             f"failed to open {binpath}: the .i64 is likely held by a running "
             f"ida-mcp worker (try: pkill -f idalib) or wedged from a crash "

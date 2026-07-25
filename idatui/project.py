@@ -239,6 +239,29 @@ class Project:
     def refs(self) -> tuple[BinaryRef, ...]:
         return self._refs
 
+    def set_load(self, label: str, processor: str = "", base: int = 0,
+                 ida_args: str = "") -> BinaryRef | None:
+        """Record how ``label`` should be loaded, and persist it.
+
+        Answered once: the dialog that asks writes the answer here, so reopening
+        the project doesn't ask again — and neither does adding the same blob to
+        another project, since it travels with the entry.
+        """
+        ref = self.by_label(label)
+        if ref is None:
+            return None
+        i = self._refs.index(ref)
+        e = self._entries[i]
+        if processor:
+            e["processor"] = processor
+        if base:
+            e["base"] = int(base)
+        if ida_args:
+            e["ida_args"] = ida_args
+        self._refs = self._build_refs()
+        self.save()
+        return self._refs[i]
+
     def by_label(self, label: str) -> BinaryRef | None:
         return next((r for r in self._refs if r.label == label), None)
 

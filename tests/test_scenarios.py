@@ -369,6 +369,31 @@ async def s_load_options(c: Ctx):
     c.check("dialog output converts a base to paragraphs",
             load_args("arm", 0x8000000) == "-parm -b800000")
 
+    # Tab is a PRIORITY app binding (disasm<->pseudocode), so it fired even with
+    # a modal up and nothing in a dialog could be tabbed to. That is why the load
+    # dialog's address field was unreachable — and it was broken in every other
+    # modal too.
+    from idatui.app import LoadOptionsScreen
+    app.push_screen(LoadOptionsScreen("/tmp/probe.bin", 1234))
+    await c.wait(lambda: isinstance(app.screen, LoadOptionsScreen), 10)
+    sc = app.screen
+    first = app.focused
+    await c.press("tab")
+    await c.pause(0.2)
+    c.check("Tab moves focus inside a modal instead of toggling the view",
+            app.focused is not first and isinstance(app.screen, LoadOptionsScreen),
+            f"focus={getattr(app.focused, 'id', None)}")
+    c.check("Tab in the load dialog lands on the address field",
+            getattr(app.focused, "id", None) == "load-base",
+            f"focus={getattr(app.focused, 'id', None)}")
+    await c.press("tab")
+    await c.pause(0.2)
+    c.check("Tab again returns to the processor filter",
+            getattr(app.focused, "id", None) == "pal-input",
+            f"focus={getattr(app.focused, 'id', None)}")
+    await c.press("escape")
+    await c.wait(lambda: not isinstance(app.screen, LoadOptionsScreen), 10)
+
 
 @scenario("command_palette")
 async def s_command_palette(c: Ctx):
