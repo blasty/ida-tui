@@ -853,6 +853,40 @@ async def s_view_toggle(c: Ctx):
     c.check("pseudocode has a numbered gutter (line 1 first)",
             dec._gutter > 0 and row0[:dec._gutter].strip() == "1",
             f"gutter={dec._gutter} row0={row0[:10]!r}")
+    # Home/End move along the line here too (they used to scroll to top/bottom).
+    line = next((i for i, t in enumerate(dec._texts)
+                 if t.startswith("  ") and t.strip()), None)
+    if line is not None:
+        text = dec._texts[line]
+        dec.focus()
+        dec.cursor, dec.cursor_x = line, 0
+        dec.refresh()
+        await c.pause(0.05)
+        top = round(dec.scroll_offset.y)
+        await c.press("end")
+        await c.pause(0.05)
+        c.check("<end> in pseudocode goes to end-of-line, not the bottom",
+                dec.cursor == line and dec.cursor_x == max(len(text) - 1, 0)
+                and round(dec.scroll_offset.y) == top,
+                f"line={dec.cursor} col={dec.cursor_x} len={len(text)}")
+        await c.press("home")
+        await c.pause(0.05)
+        c.check("<home> in pseudocode goes to start-of-line",
+                dec.cursor == line and dec.cursor_x == 0,
+                f"line={dec.cursor} col={dec.cursor_x}")
+        await c.press("shift+home")
+        await c.pause(0.05)
+        c.check("<shift+home> skips the indentation",
+                dec.cursor_x == len(text) - len(text.lstrip()),
+                f"col={dec.cursor_x} indent={len(text) - len(text.lstrip())}")
+        await c.press("ctrl+end")
+        await c.pause(0.1)
+        c.check("<ctrl+end> still goes to the bottom",
+                dec.cursor >= dec.total - 1, f"{dec.cursor}/{dec.total}")
+        await c.press("ctrl+home")
+        await c.pause(0.1)
+        c.check("<ctrl+home> still goes to the top", dec.cursor == 0,
+                f"{dec.cursor}")
 
 
 @scenario("search")

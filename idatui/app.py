@@ -1449,8 +1449,13 @@ class DecompView(SearchMixin, NavMixin, ColumnCursor, ScrollView, can_focus=True
         Binding("ctrl+u", "half_page(-1)", "½↑", show=False),
         Binding("pagedown", "page(1)", "PgDn", show=False),
         Binding("pageup", "page(-1)", "PgUp", show=False),
-        Binding("home", "goto_top", "Top", show=False),
-        Binding("G,end", "goto_bottom", "Bottom", show=False),
+        # Home/End move the cursor along the line (as in the listing); top and
+        # bottom of the function move to the ctrl+ pair (G still works too).
+        Binding("home", "col_home", "bol", show=False),
+        Binding("shift+home", "col_code_home", "code start", show=False),
+        Binding("end", "col_end", "eol", show=False),
+        Binding("ctrl+home", "goto_top", "Top", show=False),
+        Binding("G,ctrl+end", "goto_bottom", "Bottom", show=False),
         *SearchMixin.SEARCH_BINDINGS,
         *NavMixin.NAV_BINDINGS,
         *ColumnCursor.COL_BINDINGS,
@@ -1648,6 +1653,15 @@ class DecompView(SearchMixin, NavMixin, ColumnCursor, ScrollView, can_focus=True
         super().watch_scroll_y(old_value, new_value)
         if round(old_value) != round(new_value):
             self.post_message(DecompView.Scrolled())
+
+    def action_col_code_home(self) -> None:
+        """shift+home: first non-blank column — past the C indentation, the
+        pseudocode analogue of the listing's skip-the-address-gutter."""
+        text = self._line_plain(self.cursor) or ""
+        self.cursor_x = len(text) - len(text.lstrip()) if text.strip() else 0
+        self._hscroll()
+        _refresh_lines(self, self.cursor)
+        self._refresh_hl()
 
     def line_for_ea(self, ea: int) -> int | None:
         """The pseudocode line whose marker ea is the largest <= ``ea`` (the C
