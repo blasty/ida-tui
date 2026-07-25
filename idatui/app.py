@@ -2301,6 +2301,42 @@ _HELP = (
 )
 
 
+class QuitScreen(ModalScreen):
+    """Asked before exiting with unsaved database changes. Dismisses with
+    "save", "discard" or None (stay)."""
+
+    BINDINGS = [
+        Binding("s", "save", "Save & quit"),
+        Binding("d", "discard", "Discard & quit"),
+        Binding("escape,c", "cancel", "Cancel"),
+    ]
+
+    def __init__(self, labels: list[str]) -> None:
+        super().__init__()
+        self._labels = labels
+
+    def compose(self) -> ComposeResult:
+        what = (f"{len(self._labels)} databases have unsaved changes"
+                if len(self._labels) > 1 else "unsaved changes")
+        with Vertical(id="quit-box"):
+            yield Static(f"\u26a0  {what}", id="quit-title")
+            body = Text()
+            for label in self._labels:
+                body.append(f"  \u2022 {label}\n", _S_LABEL)
+            yield Static(body, id="quit-list")
+            yield Static("s  save & quit      d  discard & quit      Esc  cancel",
+                         id="quit-help")
+
+    def action_save(self) -> None:
+        self.dismiss("save")
+
+    def action_discard(self) -> None:
+        self.dismiss("discard")
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+
 class HelpScreen(ModalScreen):
     """F1: the keyboard cheatsheet, replacing the permanent footer."""
 
@@ -2874,6 +2910,11 @@ class IdaTui(App):
         width: 100%; height: 100%; content-align: center middle;
         background: $panel-darken-1;
     }
+    QuitScreen { align: center middle; }
+    #quit-box { width: 64; height: auto; border: thick $warning; background: $panel; }
+    #quit-title { dock: top; height: 1; background: $warning; color: $text; padding: 0 1; }
+    #quit-list { height: auto; padding: 1 2 0 2; }
+    #quit-help { height: 1; color: $text-muted; padding: 0 2; margin-top: 1; }
     HelpScreen { align: center middle; }
     #help-box { width: 76; max-width: 92%; height: auto; max-height: 85%;
                 border: thick $accent; background: $panel; }
@@ -2951,6 +2992,9 @@ class IdaTui(App):
         self._binary: str | None = None       # active project binary (label)
         self._states: dict[str, BinaryState] = {}
         self._pending_restore = None          # entry to reopen after a switch
+        # None = teardown wasn't an explicit quit (crash/kill): save defensively.
+        # False = the user chose discard, or we already saved on the way out.
+        self._save_on_exit: bool | None = None
         if project is not None:
             from .pool import WorkerPool
             self._pool = WorkerPool(project, ttl=ttl)
@@ -3418,6 +3462,59 @@ class IdaTui(App):
         self._open_function(addr, f.name if f else hex(addr))
 
     # -- projects: switching between the binaries of one target ------------ #
+    # -- exit ---------------------------------------------------------------- #
+    def _dirty_labels(self) -> list[str]:
+        """Databases with edits that aren't on disk yet.
+
+        A binary the pool has evicted was saved on the way out, so only the
+        active one and other still-resident binaries can be dirty.
+        """
+        if self._pool is None:
+            return [os.path.basename(self._open_path or "database")] if self._dirty else []
+        out = [self._binary] if (self._dirty and self._binary) else []
+        out += [label for label, st in self._states.items()
+                if st.dirty and label != self._binary
+                and self._pool.is_resident(label)]
+        return out
+
+    async def action_quit(self) -> None:
+        """Never drop edits on the floor: ask before exiting when a database has
+        unsaved changes (IDA/Ghidra behaviour)."""
+        dirty = self._dirty_labels()
+        if not dirty:
+            self._save_on_exit = False  # nothing to write
+            self.exit()
+            return
+        self.push_screen(QuitScreen(dirty), self._on_quit_choice)
+
+    def _on_quit_choice(self, choice: str | None) -> None:
+        if choice == "discard":
+            self._save_on_exit = False
+            self.exit()
+        elif choice == "save":
+            # Save with the overlay up: writing a big .i64 takes seconds, and
+            # doing it during teardown would look like a hang with no UI left.
+            self._loading_screen = LoadingScreen("saving", note="writing databases\u2026")
+            self.push_screen(self._loading_screen)
+            self._save_then_exit()
+        # None: cancel, stay put
+
+    @work(thread=True, exclusive=True, group="save-exit")
+    def _save_then_exit(self) -> None:
+        try:
+            if self._pool is not None:
+                self._pool.close_all(save=True)  # saves each resident worker
+            elif self.program is not None:
+                self.program.client.call("idb_save", timeout=600.0)
+        except Exception as e:  # noqa: BLE001 -- still exit, but say so
+            self.app.call_from_thread(self._status, f"save failed: {e}")
+        self.app.call_from_thread(self._finish_exit)
+
+    def _finish_exit(self) -> None:
+        self._save_on_exit = False  # already written above
+        self._dirty = False
+        self.exit()
+
     def action_help(self) -> None:
         """F1: the keyboard cheatsheet (there's no permanent footer any more)."""
         if self._prompt_active():
@@ -5313,6 +5410,13 @@ class IdaTui(App):
         if self.program is not None:
             self.program.close()
         if self._pool is not None:
-            self._pool.close_all()  # saves each DB, then closes cleanly
+            # _save_on_exit is False only when the user chose discard or we
+            # already saved; an unexpected teardown still writes defensively.
+            self._pool.close_all(save=self._save_on_exit is not False)
         elif self.client is not None:
+            if self._save_on_exit is None and self._dirty:
+                try:  # unexpected teardown with edits: don't drop them
+                    self.client.call("idb_save", timeout=600.0)
+                except Exception:  # noqa: BLE001
+                    pass
             self.client.close()

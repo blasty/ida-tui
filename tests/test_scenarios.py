@@ -26,8 +26,8 @@ import traceback
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from idatui.app import (  # noqa: E402
     ConfirmScreen, DecompView, DisasmView, FunctionsPanel, HexView, IdaTui,
-    HelpScreen, ListingView, StringsPalette, StructEditor, SymbolPalette,
-    XrefsScreen, _str_display, _word_occurrences,
+    HelpScreen, ListingView, QuitScreen, StringsPalette, StructEditor,
+    SymbolPalette, XrefsScreen, _str_display, _word_occurrences,
 )
 from textual.widgets import (  # noqa: E402
     DataTable, Input, OptionList, Static, TextArea,
@@ -173,10 +173,17 @@ class Ctx:
         await self.wait(lambda: self.lst.total > 0
                         and self.lst._cursor_ea() == fn.addr, t)
         if view == "decomp":
-            self.lst.focus()
-            await self.press("tab")  # F5/Tab -> decompile the function at cursor
-            await self.wait(lambda: self.app._active == "decomp"
-                            and self.dec.loaded_ea == fn.addr, t)
+            # F5/Tab only decompiles from a focused code pane, and the listing
+            # may still be settling from the open above — a swallowed Tab used to
+            # surface much later as "pseudocode view shows: active=listing".
+            # Retry rather than assume the first one takes.
+            for _ in range(3):
+                self.lst.focus()
+                await self.pause(0.05)
+                await self.press("tab")
+                if await self.wait(lambda: self.app._active == "decomp"
+                                   and self.dec.loaded_ea == fn.addr, max(t / 3, 5)):
+                    break
         return fn
 
     async def open_biggest(self, view="listing"):
@@ -339,6 +346,29 @@ async def s_command_palette(c: Ctx):
     if landed:
         await c.press("backslash")  # leave hex
         await c.wait(lambda: app._active != "hex", 5)
+
+
+@scenario("quit_guard")
+async def s_quit_guard(c: Ctx):
+    app = c.app
+    c.check("a clean database reports nothing unsaved", app._dirty_labels() == [],
+            f"{app._dirty_labels()}")
+    app._dirty = True  # as an edit would
+    c.check("an edited database is reported unsaved",
+            len(app._dirty_labels()) == 1, f"{app._dirty_labels()}")
+    await c.press("q")
+    asked = await c.wait(lambda: isinstance(app.screen, QuitScreen), 10)
+    c.check("quitting with unsaved changes asks first", asked and app.is_running,
+            f"screen={type(app.screen).__name__} running={app.is_running}")
+    if not asked:
+        return
+    await c.press("escape")
+    await c.wait(lambda: not isinstance(app.screen, QuitScreen), 10)
+    c.check("Esc cancels the quit and stays put",
+            app.is_running and not isinstance(app.screen, QuitScreen))
+    # leave it clean so the rest of the suite (and teardown) isn't affected
+    app._dirty = False
+    app._save_on_exit = False
 
 
 @scenario("help")
