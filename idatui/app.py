@@ -3165,6 +3165,7 @@ class IdaTui(App):
         self._states: dict[str, BinaryState] = {}
         self._pending_restore = None          # entry to reopen after a switch
         self._goto_after_switch = None        # cross-binary search hit to land on
+        self._nav_seq = 0                     # bumped per navigation; drops stale ones
         # None = teardown wasn't an explicit quit (crash/kill): save defensively.
         # False = the user chose discard, or we already saved on the way out.
         self._save_on_exit: bool | None = None
@@ -4074,6 +4075,7 @@ class IdaTui(App):
             self.clear_filter()  # Esc on the list clears an active filter
             return
         if len(self._nav) > 1:
+            self._nav_seq += 1  # invalidate any navigation still in flight
             self._nav.pop()
             self._open_entry(self._nav[-1], push=False)
         elif self.query_one("#left", FunctionsPanel).display:
@@ -4874,6 +4876,10 @@ class IdaTui(App):
     def _do_navigate(self, ea: int, push: bool, focus_name: str | None = None,
                      prefer_decomp: bool = False) -> None:  # worker context
         assert self.program is not None
+        # Which navigation this is. Decompiling below can take a while, and if
+        # you press Esc (or jump again) in the meantime this result is stale —
+        # applying it anyway silently undoes what you just did.
+        seq = self._nav_seq
         fn = self.program.function_of(ea)
         # Jumping FROM the decompiler: stay in pseudocode when the target is a
         # decompilable function, landing on the line that matches ``ea``.
@@ -4893,7 +4899,8 @@ class IdaTui(App):
                     dec_idx, col = self._decomp_locate(fn.addr, ea,
                                                        focus_name or fn.name)
                 self.app.call_from_thread(
-                    self._open_decomp_entry, fn.addr, fn.name, dec_idx, col, push)
+                    self._open_decomp_entry, fn.addr, fn.name, dec_idx, col,
+                    push, seq)
                 return
         # Otherwise: everything opens the one continuous listing at ``ea``. A
         # function name is used for the status label; a region gets a segment
@@ -4905,9 +4912,17 @@ class IdaTui(App):
             self._open_at, ea, name, idx, push, -1, 0, fn is None, focus_name)
 
     def _open_decomp_entry(self, fn_addr: int, fn_name: str, dec_idx: int,
-                           dec_cursor_x: int, push: bool) -> None:
+                           dec_cursor_x: int, push: bool,
+                           seq: int | None = None) -> None:
         """Open ``fn_addr`` in the decompiler as a real navigation (nav history
-        aware), landing on pseudocode line ``dec_idx`` column ``dec_cursor_x``."""
+        aware), landing on pseudocode line ``dec_idx`` column ``dec_cursor_x``.
+
+        ``seq`` is the navigation this result belongs to; if the user has
+        navigated since (Esc, another jump), the result is stale and dropped —
+        otherwise a slow decompile lands afterwards and undoes their Esc.
+        """
+        if seq is not None and seq != self._nav_seq:
+            return
         if push:
             # Snapshot where we jumped from so 'back' returns there. If that was
             # the pseudocode (F5 makes a transient _cur not yet on the stack),
