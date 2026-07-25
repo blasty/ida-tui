@@ -197,9 +197,36 @@ original fix — recognise the thunk and present it as an import ("strcmp —
 imported, provider not in project") rather than surfacing a decompiler error.
 Phase 3 covers the valuable half; stub *presentation* stays worth doing.
 
-**Phase 4 — polish.** Background pre-warm, nav-history policy (per-binary to
-start; a global stack is a later question), RPC/`drive` verbs (`binaries`,
-`switch`), project-level persistence.
+**Phase 4 — polish (mostly done).**
+
+*Nav history is per-binary, with a cross-binary way back.* Each binary keeps its
+own stack in `BinaryState`; switching restores it (addresses outlive the worker,
+so it survives eviction). But phase 3 made a cross-binary jump an ordinary
+action, and arriving in a binary whose history is empty made it a one-way door.
+`_switch_then_goto` now records the binary it came FROM, and `action_back` falls
+through to that hop once local history is spent. So Esc walks back through the
+function you were in, then the binary you were in. Manual switching (Ctrl+O)
+records nothing — that's not navigation.
+
+*Pre-warm follows the linkage graph, not list order.* When a binary finishes
+indexing, `_prewarm_provider` warms the binary that provides the most of its
+imports — where a follow is most likely to take you, so its startup is paid
+before you ask. `WorkerPool.prewarm()` refuses rather than evicting: spending a
+binary you visited on one you haven't is a straight downgrade, and it would throw
+away that binary's caches too. At a tight budget pre-warm simply does nothing. It
+estimates the cost of a not-yet-spawned worker from the largest resident one,
+which is the only evidence available; if the estimate proves wrong, the
+speculative worker is the one that goes.
+
+*Driving a project.* `pane spawn --project FILE [--open BIN]` opens a project
+pane. `binaries` lists the inventory (active / resident / indexed count / where
+Esc returns to) and `switch {binary,addr?}` makes another one active — with an
+address it goes through the same path as a search hit, so it records a hop. The
+state snapshot now carries `binary` and `hops`.
+
+Still open: project-level persistence (remember the active binary and each
+binary's position across sessions — today a fresh launch auto-lands).
+
 
 ## Decisions
 

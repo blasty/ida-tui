@@ -155,6 +155,35 @@ def main() -> int:
         check("default budget is derived, not a fixed worker count",
               pool3.budget_mb >= 256, pool3.budget_mb)
 
+    # -- prewarm: speculative, and never at the cost of a real binary ------ #
+    with tempfile.TemporaryDirectory() as tmp:
+        proj = _mkproject(tmp, n=3)
+        made2 = {}
+
+        def spawn2(ref, ttl):
+            c = FakeClient(ref, mem=100)
+            made2[ref.label] = c
+            return c
+
+        pool = WorkerPool(proj, budget_mb=250, spawn=spawn2,
+                          mem_fn=lambda c: c.mem)
+        labels = [r.label for r in proj.refs]
+        a, b, c_ = labels[0], labels[1], labels[2]
+        pool.get(a)
+        pool.set_active(a)
+        check("prewarm warms a binary when the budget has room",
+              pool.prewarm(b) is True and b in pool.resident(), f"{pool.resident()}")
+        check("prewarm is a no-op for something already resident",
+              pool.prewarm(b) is False)
+        # 2 x 100MB resident, estimate 100 more -> 300 > 250: must refuse
+        check("prewarm refuses rather than making room",
+              pool.prewarm(c_) is False and c_ not in pool.resident(),
+              f"resident={pool.resident()} mem={pool.memory_mb()}/{pool.budget_mb}")
+        check("refusing to prewarm evicts nothing",
+              set(pool.resident()) == {a, b}, f"{pool.resident()}")
+        check("prewarm ignores a label outside the project",
+              pool.prewarm("nope") is False)
+
     print(f"\n{PASS} passed, {FAIL} failed")
     return 1 if FAIL else 0
 

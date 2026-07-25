@@ -72,6 +72,8 @@ METHODS = {
     "search": "{term,direction?=1} incremental search in the code view",
     "select": "{index?} choose the highlighted/nth item in the open modal",
     "save": "persist the .i64 (Ctrl+S)",
+    "binaries": "-> project binaries {label,active,resident,indexed} (project mode)",
+    "switch": "{binary,addr?} make another project binary active (addr also jumps)",
     "close": "dismiss a modal (Escape)",
     "move": "{dir,n?=1} fast movement (down/up/.../pagedown)",
     "cursor": "{line?,col?} set the code-pane cursor directly",
@@ -173,7 +175,9 @@ def snapshot(app) -> dict[str, Any]:
         "cursor": _cursor_info(app, w),
         "status": st,
         "filter": app._filter_term,
+        "binary": app._binary,      # None outside project mode
         "nav_depth": len(app._nav),
+        "hops": list(getattr(app, "_hops", [])),
         "dirty": bool(app._dirty),
         "modal": _modal_snapshot(app),
         **_readiness(app),
@@ -525,6 +529,42 @@ class RpcServer:
             return screen_text(app, str(params.get("format", "text")))
         if method == "functions":
             return functions(app, params.get("filter"), int(params.get("limit", 50)))
+
+        # -- projects ------------------------------------------------------ #
+        if method == "binaries":
+            if app._project is None:
+                raise ValueError("not a project session (launch with --project)")
+            counts = app._index.counts() if app._index is not None else {}
+            resident = set(app._pool.resident()) if app._pool is not None else set()
+            return {"active": app._binary, "hops": list(app._hops),
+                    "binaries": [{"label": r.label, "source": r.source,
+                                  "active": r.label == app._binary,
+                                  "resident": r.label in resident,
+                                  "indexed": int(counts.get(r.label, 0))}
+                                 for r in app._project.refs]}
+
+        if method == "switch":
+            if app._project is None:
+                raise ValueError("not a project session (launch with --project)")
+            label = str(params.get("binary") or params.get("label") or "")
+            if app._project.by_label(label) is None:
+                have = ", ".join(r.label for r in app._project.refs)
+                raise ValueError(f"no such binary {label!r} (have: {have})")
+            addr = params.get("addr")
+            if label == app._binary and addr is None:
+                return snapshot(app)
+            if addr is None:
+                app._switch_binary(label)
+            else:
+                # Same path a project search hit takes, so it records a hop and
+                # Esc comes back here.
+                app._switch_then_goto(label, int(str(addr), 0)
+                                      if isinstance(addr, str) else int(addr))
+            await settle(app, lambda: app._binary == label
+                         and app._func_index is not None
+                         and app._func_index.complete,
+                         timeout=float(params.get("timeout", 300.0)))
+            return snapshot(app)
 
         # -- structured introspection (heavy: run off the UI loop) -------- #
         loop = asyncio.get_running_loop()

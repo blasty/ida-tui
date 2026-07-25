@@ -165,6 +165,31 @@ def cmd_names(c, args):
         or "(no match)"
 
 
+def cmd_binaries(c, args):
+    """Project inventory: which binaries, which is active, which have a live
+    worker, how much of each is indexed."""
+    r = c.call("binaries")
+    out = []
+    for b in r["binaries"]:
+        mark = "*" if b["active"] else ("~" if b["resident"] else " ")
+        out.append(f"  {mark} {b['label']:<28} indexed={b['indexed']:<7} {b['source']}")
+    if r.get("hops"):
+        out.append(f"  (Esc returns to: {' <- '.join(r['hops'])})")
+    return "\n".join(out) + "\n  * active   ~ worker resident"
+
+
+def cmd_switch(c, args):
+    if not args:
+        raise SystemExit("usage: switch <binary> [addr|name]")
+    p = {"binary": args[0]}
+    if len(args) > 1:
+        a = args[1]
+        p["addr"] = a if a.lower().startswith("0x") else c.call("resolve", name=a)["ea"]
+    r = c.call("switch", **p)
+    fn = (r.get("function") or {}).get("name")
+    return f"  now on {r.get('binary') or args[0]}" + (f" @ {fn}" if fn else "")
+
+
 def _rename_one(c, old, new):
     c.call("goto", target=old, delay_ms=0)
     st = c.call("rename", name=new, word=old, delay_ms=0)
@@ -232,6 +257,7 @@ COMMANDS = {
     "callees": cmd_callees, "callers": cmd_callers, "names": cmd_names,
     "rename": cmd_rename, "mv": cmd_mv, "note": cmd_note, "retype": cmd_retype,
     "save": cmd_save, "screen": cmd_screen, "raw": cmd_raw,
+    "binaries": cmd_binaries, "switch": cmd_switch,
 }
 
 

@@ -168,6 +168,39 @@ async def run(bins):
                 await pilot.press("escape")
                 await pilot.pause(0.2)
 
+            # -- a cross-binary jump is not a one-way door ----------------- #
+            # Nav history is per-binary, so arriving in another binary lands you
+            # in an empty history. Esc must fall through to the binary you came
+            # from, or a project search hit (and, since phase 3, following an
+            # import) strands you.
+            here, there = app._binary, (first if app._binary == second else second)
+            hops0 = len(app._hops)
+            target = app._index.search("main", limit=200)
+            tgt = next((h for h in target if h.binary == there), None)
+            if tgt is None:
+                check("cross-binary jump records a hop", False, "no hit in the other binary")
+            else:
+                app._switch_then_goto(tgt.binary, tgt.addr)
+                jumped = await settle(lambda: app._binary == there
+                                      and app._func_index is not None
+                                      and app._func_index.complete, 180)
+                check("a project hit switches to the other binary", jumped,
+                      f"binary={app._binary} want={there}")
+                check("the jump records where it came from",
+                      len(app._hops) == hops0 + 1 and app._hops[-1] == here,
+                      f"hops={app._hops}")
+                # spend the local history first, then Esc must cross back
+                for _ in range(6):
+                    if not app._hops or app._binary != there:
+                        break
+                    await pilot.press("escape")
+                    await pilot.pause(0.6)
+                returned = await settle(lambda: app._binary == here, 180)
+                check("Esc crosses back to the binary the jump came from",
+                      returned, f"binary={app._binary} want={here} hops={app._hops}")
+                check("the hop is consumed, not repeated",
+                      not app._hops, f"hops={app._hops}")
+
             # -- and the same toggle for strings --------------------------- #
             from idatui.app import StringsPalette
             await pilot.press("quotation_mark")

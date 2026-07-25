@@ -131,14 +131,19 @@ def spawn(args) -> int:
     if not os.environ.get("TMUX"):
         print("error: not inside tmux (spawn creates a tmux pane)", file=sys.stderr)
         return 2
-    if not args.open:
-        print("error: pass --open <binary>", file=sys.stderr)
+    if not args.open and not getattr(args, "project", None):
+        print("error: pass --open <binary> or --project <file>", file=sys.stderr)
         return 2
 
     sock = args.sock or os.path.join(_sockdir(), f"idatui-{secrets.token_hex(3)}.sock")
-    target = os.path.abspath(os.path.expanduser(args.open))
-    if not os.path.exists(target):
+    project = (os.path.abspath(os.path.expanduser(args.project))
+               if getattr(args, "project", None) else None)
+    target = os.path.abspath(os.path.expanduser(args.open)) if args.open else None
+    if target is not None and not os.path.exists(target):
         print(f"error: no such binary: {target}", file=sys.stderr)
+        return 2
+    if project is not None and target is None and not os.path.exists(project):
+        print(f"error: no such project: {project}", file=sys.stderr)
         return 2
 
     # Reap workers leaked by previously-stopped/crashed panes so we don't spawn
@@ -151,7 +156,15 @@ def spawn(args) -> int:
 
     # the command the pane runs: the launcher spawns a private idalib worker for
     # this binary and becomes the TUI, so kill-pane tears the whole thing down.
-    inner = [args.python, "-m", "idatui.launch", target, "--rpc", sock]
+    if project is not None:
+        # launch takes: --project FILE [binaries...]; extra binaries are added to
+        # the project (and a missing project file is created from them).
+        inner = [args.python, "-m", "idatui.launch", "--project", project]
+        if target is not None:
+            inner.append(target)
+        inner += ["--rpc", sock]
+    else:
+        inner = [args.python, "-m", "idatui.launch", target, "--rpc", sock]
     cmd = f"cd {REPO!r} && exec " + " ".join(_q(a) for a in inner)
 
     split = ["split-window", "-v" if args.vertical else "-h",
@@ -166,8 +179,8 @@ def spawn(args) -> int:
     split.append(cmd)
     pane = _tmux(*split)
 
-    row = {"sock": sock, "pane": pane, "target": target,
-           "kind": "open", "started": time.time()}
+    row = {"sock": sock, "pane": pane, "target": project or target,
+           "kind": "project" if project else "open", "started": time.time()}
     reg = [r for r in _load_registry() if r.get("sock") != sock]
     reg.append(row)
     _save_registry(reg)
@@ -301,8 +314,11 @@ def main(argv: list[str]) -> int:
     sub = p.add_subparsers(dest="cmd", required=True)
 
     sp = sub.add_parser("spawn", help="open a TUI pane and wait until ready")
-    sp.add_argument("--open", metavar="PATH", required=True,
+    sp.add_argument("--open", metavar="PATH",
                     help="binary to open (its dir must be writable)")
+    sp.add_argument("--project", metavar="FILE",
+                    help="project file to open instead of a single binary; "
+                         "any --open paths are added to it (created if absent)")
     sp.add_argument("--sock", help="RPC socket path (default: auto in $XDG_RUNTIME_DIR)")
     sp.add_argument("--python", default=DEFAULT_PY, help=f"python for the TUI ({DEFAULT_PY})")
     sp.add_argument("--vertical", action="store_true", help="split vertically (stacked)")

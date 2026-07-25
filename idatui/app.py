@@ -3170,6 +3170,7 @@ class IdaTui(App):
         self._states: dict[str, BinaryState] = {}
         self._pending_restore = None          # entry to reopen after a switch
         self._goto_after_switch = None        # cross-binary search hit to land on
+        self._hops: list[str] = []            # binaries a navigation crossed FROM
         self._nav_seq = 0                     # bumped per navigation; drops stale ones
         # None = teardown wasn't an explicit quit (crash/kill): save defensively.
         # False = the user chose discard, or we already saved on the way out.
@@ -3486,6 +3487,41 @@ class IdaTui(App):
         self.app.call_from_thread(self._auto_land)
         self._index_binary()  # project mode: keep the cross-binary index fresh
 
+    @work(thread=True, exclusive=True, group="prewarm")
+    def _prewarm_provider(self) -> None:
+        """Warm the binary this one leans on hardest, once we're idle.
+
+        Not "the next in the list" — phase 3 tells us something better. The
+        binary providing the most of this one's imports is where a follow is
+        most likely to take you, so paying its startup now is the switch you
+        would otherwise wait for. Refuses to evict anything (see pool.prewarm),
+        so at a tight budget this simply does nothing.
+        """
+        if self._pool is None or self._index is None or self._binary is None:
+            return
+        try:
+            imps, _ = self.program.linkage()
+        except Exception:  # noqa: BLE001
+            return
+        if not imps:
+            return
+        from collections import Counter
+        votes: Counter = Counter()
+        for name in {i.name for i in imps}:
+            for h in self._index.providers(name, exclude=self._binary):
+                votes[h.binary] += 1
+        resident = set(self._pool.resident())
+        cand = next((b for b, _ in votes.most_common() if b not in resident), None)
+        if cand is None:
+            return
+        n = votes[cand]
+        try:
+            if self._pool.prewarm(cand):
+                self.app.call_from_thread(
+                    self._status, f"pre-warmed {cand} (provides {n} imports)")
+        except Exception:  # noqa: BLE001 -- speculative work must never surface
+            pass
+
     @work(thread=True, exclusive=True, group="index")
     def _index_binary(self) -> None:
         """Fold this binary's symbols + strings into the project index, so it can
@@ -3516,6 +3552,7 @@ class IdaTui(App):
             return
         self.app.call_from_thread(
             self._status, f"indexed {self._binary}: {n} symbols, strings + linkage")
+        self._prewarm_provider()
 
     # -- initial landing --------------------------------------------------- #
     #: function names tried (in order) as the startup landing spot
@@ -3695,7 +3732,15 @@ class IdaTui(App):
 
     def _switch_then_goto(self, binary: str, addr: int) -> None:
         """A project-wide hit in another binary: switch to it, then jump there
-        once its index has loaded."""
+        once its index has loaded.
+
+        Records the hop so Esc can come back. Nav history is per-binary, so
+        without this a cross-binary jump — a project search hit, or following an
+        import into the library that implements it — is a one-way door: you
+        arrive in a binary whose history is empty and nothing takes you back.
+        """
+        if self._binary is not None and binary != self._binary:
+            self._hops.append(self._binary)
         self._goto_after_switch = addr
         self._switch_binary(binary)
 
@@ -4117,6 +4162,11 @@ class IdaTui(App):
             dest = self._nav[-1]
             self._status(f"\u25c2 back to {dest.name}\u2026")
             self._open_entry(dest, push=False)
+        elif self._hops:
+            # Local history is spent, but we got here from another binary.
+            label = self._hops.pop()
+            self._status(f"\u25c2 back to {label}\u2026")
+            self._switch_binary(label)   # _states restores its nav and position
         elif self.query_one("#left", FunctionsPanel).display:
             table.focus()
         else:

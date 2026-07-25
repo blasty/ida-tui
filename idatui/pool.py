@@ -129,6 +129,37 @@ class WorkerPool:
         self._enforce_budget(protect=label)
         return client
 
+    def prewarm(self, label: str, progress=None) -> bool:
+        """Spawn a worker for ``label`` only if it fits the budget AS IT STANDS.
+
+        Pre-warming must never cost residency: evicting a binary the user
+        actually visited to speculatively load one they haven't is a straight
+        downgrade, and the eviction would also throw away that binary's caches.
+        So this refuses rather than making room, and returns False.
+
+        The cost of a worker that doesn't exist yet can only be estimated; the
+        largest resident one is the best evidence available (they are all the
+        same program with a different database). With nothing resident we have
+        no evidence at all, so we allow one — that is the case where the budget
+        is certainly free.
+        """
+        if label in self._clients:
+            return False
+        if self.project.by_label(label) is None:
+            return False
+        used = self.memory_mb()
+        est = max((self._mem(c) for c in self._clients.values()), default=0)
+        if used + est > self.budget_mb:
+            return False
+        self.get(label, progress=progress)
+        # get() enforces the budget protecting the NEW label; if that had to
+        # evict, our estimate was wrong and the speculative worker is the one
+        # that should go — never a binary the user chose.
+        if self.memory_mb() > self.budget_mb and label != self.active:
+            self.evict(label)
+            return False
+        return True
+
     def _touch(self, label: str) -> None:
         if label in self._lru:
             self._lru.remove(label)
