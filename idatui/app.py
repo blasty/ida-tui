@@ -20,7 +20,7 @@ import asyncio
 import os
 import re
 import subprocess
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from rich.segment import Segment
 from rich.style import Style
@@ -90,6 +90,24 @@ _S_LINK = Style(bgcolor="#243447")  # split view: rows linked to the other pane'
 # the address and strip the marker from the display.
 _ADDR_MARK_RE = re.compile(r"/\*\s*0x([0-9A-Fa-f]+)\s*\*/")
 _ADDR_MARK_STRIP_RE = re.compile(r"\s*/\*\s*0x[0-9A-Fa-f]+\s*\*/")
+
+
+@dataclass
+class BinaryState:
+    """Everything that makes one project binary's session resumable across a
+    switch. Addresses outlive the worker, so nav history survives eviction; the
+    Program/index only survive while that worker is still resident."""
+
+    label: str
+    program: object | None = None
+    func_index: object | None = None
+    nav: list = field(default_factory=list)
+    cur: object | None = None
+    pref: str = "listing"
+    active: str = "listing"
+    split: bool = False
+    filter_term: str = ""
+    dirty: bool = False
 
 
 @dataclass
@@ -2213,6 +2231,93 @@ class StringsPalette(ModalScreen):
         self.dismiss(None)
 
 
+class ProjectPalette(ModalScreen):
+    """The project's binaries; Enter switches to one. Shows which are resident
+    (a live worker, so switching is instant) vs cold (needs an open)."""
+
+    BINDINGS = [
+        Binding("escape", "close", "Close"),
+        Binding("down,ctrl+n", "cursor_down", show=False),
+        Binding("up,ctrl+p", "cursor_up", show=False),
+    ]
+
+    def __init__(self, entries: list[dict]) -> None:
+        super().__init__()
+        self._entries = entries
+        self._results: list[dict] = []
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="pal-box"):
+            yield Static(" binaries", id="pal-title")
+            yield Input(placeholder="filter binaries\u2026  \u2191\u2193 select \u00b7 "
+                                    "Enter switch \u00b7 Esc close", id="pal-input")
+            yield OptionList(id="pal-list")
+
+    def on_mount(self) -> None:
+        self._apply("")
+        self.query_one("#pal-input", Input).focus()
+
+    def on_input_changed(self, event: Input.Changed) -> None:
+        event.stop()
+        self._apply(event.value.strip())
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        event.stop()
+        self.action_choose()
+
+    def _apply(self, query: str) -> None:
+        q = query.lower()
+        rows = [e for e in self._entries
+                if not q or q in e["label"].lower() or q in e["source"].lower()]
+        self._results = rows
+        ol = self.query_one(OptionList)
+        ol.clear_options()
+        opts = []
+        for e in rows:
+            label = Text()
+            label.append("\u25b8 " if e["active"] else "  ",
+                         _S_MNEM if e["active"] else _S_DIM)
+            label.append(f"{e['label']:<22}", _S_LABEL)
+            if e["resident"]:
+                mb = e.get("memory_mb") or 0
+                label.append(f"resident {mb:>4}MB  ", _S_MNEM)
+            elif e["analysed"]:
+                label.append("analysed        ", _S_DIM)
+            else:
+                label.append("not opened      ", _S_DIM)
+            if e["pinned"]:
+                label.append("pin ", _S_ADDR)
+            label.append(e["source"], _S_DIM)
+            opts.append(Option(label))
+        ol.add_options(opts)
+        if rows:
+            ol.highlighted = 0
+        self.query_one("#pal-title", Static).update(
+            f" binaries: {len(rows)} of {len(self._entries)}")
+
+    def action_cursor_down(self) -> None:
+        ol = self.query_one(OptionList)
+        if ol.option_count:
+            ol.highlighted = min((ol.highlighted or 0) + 1, ol.option_count - 1)
+
+    def action_cursor_up(self) -> None:
+        ol = self.query_one(OptionList)
+        if ol.option_count:
+            ol.highlighted = max((ol.highlighted or 0) - 1, 0)
+
+    def action_choose(self) -> None:
+        i = self.query_one(OptionList).highlighted
+        if i is not None and 0 <= i < len(self._results):
+            self.dismiss(self._results[i]["label"])
+
+    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+        if 0 <= event.option_index < len(self._results):
+            self.dismiss(self._results[event.option_index]["label"])
+
+    def action_close(self) -> None:
+        self.dismiss(None)
+
+
 # --------------------------------------------------------------------------- #
 # Confirmation dialog
 # --------------------------------------------------------------------------- #
@@ -2571,6 +2676,8 @@ class IdaCommands(Provider):
             ("Find symbol…", "fuzzy function finder (Ctrl+N)", app.action_symbols),
             ("Strings…", "browse every string in the binary (\")",
              app.action_strings),
+            ("Switch binary…", "another binary in the project (Ctrl+O)",
+             app.action_switch_binary),
             ("Follow symbol under cursor", "jump to the referenced symbol (Enter)",
              lambda: va("follow")),
             ("Show xrefs to symbol", "cross-references to the cursor symbol (x)",
@@ -2713,6 +2820,7 @@ class IdaTui(App):
         Binding("backslash", "hex", "Hex"),
         Binding("s", "toggle_split", "Split", show=False),
         Binding("quotation_mark,shift+f12", "strings", "Strings", show=False),
+        Binding("ctrl+o", "switch_binary", "Binaries", show=False),
         Binding("g", "goto", "Goto"),
         Binding("slash", "filter", "Filter", show=False),
         Binding("ctrl+b", "toggle_functions", "Names", show=False),
@@ -2721,9 +2829,22 @@ class IdaTui(App):
         Binding("escape", "back", "Back"),
     ]
 
-    def __init__(self, open_path: str, keepalive: bool = True,
-                 rpc_path: str | None = None, ttl: int = 1800) -> None:
+    def __init__(self, open_path: str | None = None, keepalive: bool = True,
+                 rpc_path: str | None = None, ttl: int = 1800,
+                 project=None) -> None:
         super().__init__()
+        # Project mode is additive: with no project this is the plain
+        # single-binary app, unchanged.
+        self._project = project
+        self._pool = None
+        self._binary: str | None = None       # active project binary (label)
+        self._states: dict[str, BinaryState] = {}
+        self._pending_restore = None          # entry to reopen after a switch
+        if project is not None:
+            from .pool import WorkerPool
+            self._pool = WorkerPool(project, ttl=ttl)
+            self._binary = project.refs[0].label
+            open_path = project.refs[0].staged
         self._open_path = open_path
         self._ttl = ttl
         self._do_keepalive = keepalive
@@ -2802,7 +2923,11 @@ class IdaTui(App):
         gi.display = False
         gi.can_focus = False
         yield gi
-        yield Static("connecting…", id="status")
+        # markup=False: the status is plain text full of [listing]/[split]/[label]
+        # markers and symbol names that may contain brackets. With Textual markup
+        # on, a single-word marker parses as a style tag and is silently eaten —
+        # which is why [listing] and [pseudocode] never actually rendered.
+        yield Static("connecting\u2026", id="status", markup=False)
         yield Footer()
 
     def on_mount(self) -> None:
@@ -2848,6 +2973,8 @@ class IdaTui(App):
 
     # -- status helper ----------------------------------------------------- #
     def _status(self, text: str) -> None:
+        if self._binary:  # project mode: always say which binary you're in
+            text = f"[{self._binary}] {text}"
         try:
             self.query_one("#status", Static).update(text)
         except Exception:  # noqa: BLE001 -- status bar transiently unavailable
@@ -2969,6 +3096,14 @@ class IdaTui(App):
         """Our idalib-worker path: spawn the worker (it opens + analyzes the
         binary in its own process) and connect. Returns the client, or None."""
         from .worker_client import WorkerClient
+        if self._pool is not None:  # project mode: the pool owns the workers
+            label = self._binary or self._project.refs[0].label
+            client = self._pool.get(label, progress=lambda m:
+                                    self.app.call_from_thread(self._status, m))
+            self._binary = label
+            self._pool.set_active(label)
+            self._open_path = self._project.by_label(label).staged
+            return client
         if not self._open_path:
             self.app.call_from_thread(
                 self._status, "the worker backend needs a binary path")
@@ -3018,6 +3153,13 @@ class IdaTui(App):
         main() if it exists; else open the symbol picker so you're never staring
         at a blank pane. Runs once (guarded by ``_cur``) and never steals focus
         from a user who already navigated."""
+        entry = self._pending_restore
+        if entry is not None:  # switched back to a binary we'd already explored
+            self._pending_restore = None
+            self._did_auto_land = True
+            self._dismiss_loading()
+            self._open_entry(entry, push=False)
+            return
         if self._cur is not None or self._did_auto_land or self._func_index is None:
             return
         self._did_auto_land = True
@@ -3164,6 +3306,95 @@ class IdaTui(App):
             return
         f = self._func_index.by_addr(addr) if self._func_index else None
         self._open_function(addr, f.name if f else hex(addr))
+
+    # -- projects: switching between the binaries of one target ------------ #
+    def action_switch_binary(self) -> None:
+        """Ctrl+O: pick another binary from the project (Ghidra-style)."""
+        if self._pool is None:
+            self._status("not a project — open one with --project")
+            return
+        if self._prompt_active():
+            return
+        self.push_screen(ProjectPalette(self._pool.status()),
+                         self._on_binary_chosen)
+
+    def _on_binary_chosen(self, label: str | None) -> None:
+        if label and label != self._binary:
+            self._switch_binary(label)
+
+    def _switch_binary(self, label: str) -> None:
+        # Snapshot what we're leaving so coming back restores the view, then let
+        # the pool hand us a worker (spawning + evicting as the budget dictates).
+        if self._binary is not None:
+            self._states[self._binary] = BinaryState(
+                label=self._binary, program=self.program,
+                func_index=self._func_index, nav=list(self._nav), cur=self._cur,
+                pref=self._pref, active=self._active, split=self._split,
+                filter_term=self._filter_term, dirty=self._dirty)
+        self._loading_screen = LoadingScreen(label, note="switching\u2026")
+        self.push_screen(self._loading_screen)
+        self._do_switch(label)
+
+    @work(thread=True, exclusive=True, group="switch-binary")
+    def _do_switch(self, label: str) -> None:
+        assert self._pool is not None
+        try:
+            client = self._pool.get(label, progress=lambda m:
+                                    self.app.call_from_thread(self._status, m))
+        except Exception as e:  # noqa: BLE001
+            self.app.call_from_thread(self._switch_failed, label, str(e))
+            return
+        st = self._states.get(label)
+        # The Program (and its caches) only survive while that worker does; a
+        # binary that was evicted comes back with a fresh one. Either way the nav
+        # history is just addresses, so it always survives.
+        reuse = (st is not None and st.program is not None
+                 and getattr(st.program, "client", None) is client)
+        program = st.program if reuse else Program(client)
+        self.app.call_from_thread(self._after_switch, label, client, program,
+                                  st, reuse)
+
+    def _after_switch(self, label, client, program, st, reuse) -> None:  # type: ignore[no-untyped-def]
+        self.client = client
+        self.program = program
+        self._binary = label
+        self._pool.set_active(label)
+        self._open_path = self._project.by_label(label).staged
+        self._pref = st.pref if st else "listing"
+        self._active = st.active if st else "listing"
+        self._split = st.split if st else False
+        self._filter_term = st.filter_term if st else ""
+        self._dirty = st.dirty if st else False
+        self._nav = list(st.nav) if st else []
+        self._decomp_return = None
+        self._split_eamap, self._split_ea2line, self._split_range = [], {}, None
+        self.query_one(DecompView).loaded_ea = None  # belongs to the old binary
+        if reuse and st.func_index is not None:
+            self._cur = st.cur
+            self._func_index = st.func_index
+            self._apply_filter(self._filter_term)  # repopulate the names table
+            self._dismiss_loading()
+            if self._cur is not None:
+                self._open_entry(self._cur, push=False)
+            else:
+                self._did_auto_land = False
+                self._auto_land()
+            return
+        # Cold (first visit, or the worker was evicted): rebuild the index, then
+        # land back where we were via _pending_restore.
+        self._cur = None
+        self._func_index = None
+        self._pending_restore = st.cur if st else None
+        # Landing is per-binary: without this the app-wide "already landed" flag
+        # from the first binary would stop the new one landing at all (and leave
+        # the switch overlay up forever).
+        self._did_auto_land = False
+        self._status("loading functions\u2026")
+        self._load_functions()
+
+    def _switch_failed(self, label: str, why: str) -> None:
+        self._dismiss_loading()
+        self._status(f"could not open {label}: {why}")
 
     def action_strings(self) -> None:
         """'\"' / Shift+F12: browse every string in the binary (filterable);
@@ -4934,5 +5165,7 @@ class IdaTui(App):
             self._ka.stop()
         if self.program is not None:
             self.program.close()
-        if self.client is not None:
+        if self._pool is not None:
+            self._pool.close_all()  # saves each DB, then closes cleanly
+        elif self.client is not None:
             self.client.close()

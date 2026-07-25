@@ -108,10 +108,19 @@ basename and must be unique (it names the staged file).
 
 ## Phases
 
-**Phase 1 — project model + switching.** Project file, staging dir,
-`WorkerPool` (lazy spawn, budget eviction, save-on-evict, clean shutdown),
-`BinaryState` save/restore, switcher palette, active binary in the status bar,
-`--project` CLI. One active binary; no cross-binary search yet.
+**Phase 1 — project model + switching. DONE.** Project file + staging
+(`idatui/project.py`), `WorkerPool` with budget eviction / save-on-evict /
+clean shutdown (`idatui/pool.py`), `BinaryState` snapshot+restore and the switch
+itself, the `Ctrl+O` switcher palette, the active binary in the status line, and
+`--project` (which creates the project when given binaries). One active binary;
+no cross-binary search yet.
+
+Project mode is **additive**: with no `--project` the app is byte-for-byte the
+single-binary tool it was, which is what keeps the 167-check pilot honest.
+Switching reuses the `_after_reconnect` shape — swap client+program, rebuild the
+index, reopen the entry. A binary whose worker is still resident restores
+instantly (its `Program` and index are still in memory); an evicted one comes
+back with a fresh worker but keeps its nav history, since that is just addresses.
 
 **Phase 2 — index cache + project-wide search.** Per-binary index (functions,
 strings) persisted after first open, keyed by source size+mtime. Scope toggle in

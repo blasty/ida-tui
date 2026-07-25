@@ -45,7 +45,12 @@ def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(
         prog="ida-tui",
         description="Open a binary in the IDA TUI (private idalib worker).")
-    p.add_argument("binary", help="binary to open and analyze")
+    p.add_argument("binary", nargs="*",
+                   help="binary to open and analyze (several with --project "
+                        "creates/extends that project)")
+    p.add_argument("--project", metavar="FILE",
+                   help="open a multi-binary project (created from the given "
+                        "binaries if FILE doesn't exist)")
     p.add_argument("--ttl", type=int, default=1800,
                    help="worker idle-TTL seconds (default 1800)")
     p.add_argument("--no-keepalive", action="store_true",
@@ -54,17 +59,49 @@ def main(argv: list[str] | None = None) -> int:
                    help="listen for RPC on this unix socket (puppeteer the TUI)")
     args = p.parse_args(argv)
 
-    binary = os.path.abspath(os.path.expanduser(args.binary))
-    if not os.path.isfile(binary):
-        _log(f"no such file: {binary}")
-        return 2
-    if not os.access(os.path.dirname(binary), os.W_OK):
-        _log(f"directory not writable (IDA writes a .i64 there): "
-             f"{os.path.dirname(binary)}")
-        return 2
-    swept = _sweep_locks(binary)  # a crashed worker can leave the DB wedged
-    if swept:
-        _log(f"cleared {swept} stale lock file(s) from a crashed worker")
+    project = None
+    binary = None
+    if args.project:
+        from .project import Project, ProjectError
+        ppath = os.path.abspath(os.path.expanduser(args.project))
+        try:
+            if os.path.isfile(ppath):
+                project = Project.load(ppath)
+                for b in args.binary:  # extend an existing project
+                    project.add(b)
+                if args.binary:
+                    project.save()
+            elif args.binary:
+                project = Project.create(ppath, args.binary)
+                _log(f"created project {ppath} with {len(project.refs)} binaries")
+            else:
+                _log(f"no such project: {ppath} (pass binaries to create it)")
+                return 2
+        except ProjectError as e:
+            _log(str(e))
+            return 2
+        # Everything IDA writes lives in the project's sidecar, so the source
+        # tree is never touched and never needs to be writable.
+        try:
+            project.stage_all(progress=lambda m: _log(m))
+        except ProjectError as e:
+            _log(str(e))
+            return 2
+    else:
+        if len(args.binary) != 1:
+            _log("give exactly one binary, or use --project for several")
+            return 2
+        binary = os.path.abspath(os.path.expanduser(args.binary[0]))
+        if not os.path.isfile(binary):
+            _log(f"no such file: {binary}")
+            return 2
+        if not os.access(os.path.dirname(binary), os.W_OK):
+            _log(f"directory not writable (IDA writes a .i64 there): "
+                 f"{os.path.dirname(binary)}")
+            return 2
+        swept = _sweep_locks(binary)  # a crashed worker can leave the DB wedged
+        if swept:
+            _log(f"cleared {swept} stale lock file(s) from a crashed worker")
 
     # Hand off to the TUI (imported late so --help works without textual). It
     # spawns the worker behind its loading overlay while auto-analysis runs.
@@ -75,7 +112,7 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     rpc_path = os.path.abspath(os.path.expanduser(args.rpc)) if args.rpc else None
     IdaTui(open_path=binary, keepalive=not args.no_keepalive,
-           rpc_path=rpc_path, ttl=args.ttl).run()
+           rpc_path=rpc_path, ttl=args.ttl, project=project).run()
     return 0
 
 
