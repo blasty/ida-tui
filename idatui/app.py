@@ -2775,7 +2775,8 @@ class IdaTui(App):
     #xref-box { width: 84; max-height: 70%; height: auto; border: thick $accent; background: $panel; }
     #xref-title { dock: top; height: 1; background: $accent; color: $text; padding: 0 1; }
     #xref-list { height: auto; max-height: 100%; }
-    SymbolPalette { align: center middle; }
+    /* every #pal-box palette centres, not just the symbol one */
+    SymbolPalette, StringsPalette, ProjectPalette { align: center middle; }
     /* Give the stock Ctrl+P command palette side padding instead of full width;
        the input + results inherit this width (results is an overlay, so pin it). */
     CommandPalette > Vertical { width: 80%; max-width: 120; }
