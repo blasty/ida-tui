@@ -30,7 +30,7 @@ from textual import work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.command import DiscoveryHit, Hit, Provider
-from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.containers import Grid, Horizontal, Vertical, VerticalScroll
 from textual.geometry import Region, Size
 from textual.message import Message
 from textual.reactive import reactive
@@ -2348,7 +2348,7 @@ _HELP = (
     )),
     ("Views", (
         ("Tab / F5", "disassembly \u21c4 pseudocode"),
-        ("s", "split view (listing + pseudocode, synced)"),
+        ("s", "split view: listing + pseudocode"),
         ("Tab", "in split: switch the driving pane"),
         ("\\", "hex view"),
         ("o", "cycle the opcode-bytes column"),
@@ -2429,24 +2429,73 @@ class HelpScreen(ModalScreen):
 
     BINDINGS = [Binding("escape,f1,q,question_mark", "close", "Close")]
 
+    #: widest cell content, +2 for the card's border, +2 for its padding
+    _CARD_PAD = 4
+
     def compose(self) -> ComposeResult:
+        # Fluid: as many columns as the terminal can hold. Textual CSS has no
+        # media queries, so the split is computed here from the real width.
+        avail = max(self.app.size.width - 6, 20)
+        cols = self._columns(avail)
+        per = -(-len(_HELP) // cols)  # ceil, so the columns stay balanced
         with Vertical(id="help-box"):
-            yield Static(" keys", id="help-title")
+            yield Static(" keys", id="help-title", markup=False)
+            # Still inside a scroll container, so a genuinely tiny terminal
+            # degrades to scrolling rather than clipping — but spread across the
+            # width it shouldn't come to that.
             with VerticalScroll(id="help-body"):
-                yield Static(self._cheatsheet(), id="help-text")
+                with Horizontal(id="help-cols"):
+                    for c in range(cols):
+                        chunk = _HELP[c * per:(c + 1) * per]
+                        if not chunk:
+                            continue
+                        with Vertical(classes="help-col"):
+                            for title, rows in chunk:
+                                card = Static(self._card(rows),
+                                              classes="help-card", markup=False)
+                                card.border_title = title
+                                yield card
             yield Static("Esc / F1 to close", id="help-foot")
 
     @staticmethod
-    def _cheatsheet() -> Text:  # NB: not _render — that's a Widget internal
-        width = max(len(k) for _, rows in _HELP for k, _ in rows)
+    def _section_widths() -> list[int]:
+        """Rendered width of each section's card (keys right-aligned per card)."""
+        out = []
+        for _, rows in _HELP:
+            kw = max(len(k) for k, _ in rows)
+            out.append(max(kw + 2 + len(d) for _, d in rows) + HelpScreen._CARD_PAD)
+        return out
+
+    @classmethod
+    def _columns(cls, avail: int) -> int:
+        """Most columns that actually fit in ``avail``.
+
+        Sizing off the widest section would let one long row (Move's
+        "Ctrl+Home / Ctrl+End") inflate every column and cost a column that would
+        otherwise fit. Each column hugs its own content, so measure the real
+        layout: chunk the sections and sum the per-chunk maxima.
+        """
+        ws = cls._section_widths()
+        n = len(ws)
+        for cols in range(min(n, 4), 1, -1):
+            per = -(-n // cols)
+            chunks = [ws[c * per:(c + 1) * per] for c in range(cols)]
+            total = sum(max(c) for c in chunks if c) + (cols - 1)
+            if total <= avail:
+                return cols
+        return 1
+
+    @staticmethod
+    def _card(rows) -> Text:  # NB: not _render — that's a Widget internal
+        """One section's keys. The key column is sized per section, so a card of
+        short keys stays narrow instead of padding out to the global maximum."""
+        width = max(len(k) for k, _ in rows)
         out = Text()
-        for i, (title, rows) in enumerate(_HELP):
+        for i, (key, desc) in enumerate(rows):
             if i:
                 out.append("\n")
-            out.append(f"{title}\n", _S_FUNCHDR)
-            for key, desc in rows:
-                out.append(f"  {key:>{width}}", _S_MNEM)
-                out.append(f"  {desc}\n", _S_INSN)
+            out.append(f"{key:>{width}}", _S_MNEM)
+            out.append(f"  {desc}", _S_INSN)
         return out
 
     def action_close(self) -> None:
@@ -3006,10 +3055,14 @@ class IdaTui(App):
     #quit-list { height: auto; padding: 1 2 0 2; }
     #quit-help { height: 1; color: $text-muted; padding: 0 2; margin-top: 1; }
     HelpScreen { align: center middle; }
-    #help-box { width: 76; max-width: 92%; height: auto; max-height: 85%;
+    #help-box { width: auto; max-width: 98%; height: auto; max-height: 90%;
                 border: thick $accent; background: $panel; }
     #help-title { dock: top; height: 1; background: $accent; color: $text; padding: 0 1; }
-    #help-body { height: auto; max-height: 100%; padding: 1 2; }
+    #help-body { height: auto; max-height: 100%; width: auto; padding: 1 1; }
+    #help-cols { height: auto; width: auto; }
+    .help-col { height: auto; width: auto; margin-right: 1; }
+    .help-card { height: auto; width: auto; padding: 0 1;
+                 border: round $panel-lighten-2; }
     #help-foot { dock: bottom; height: 1; color: $text-muted; padding: 0 2; }
     XrefsScreen { align: center middle; }
     #xref-box { width: 84; max-height: 70%; height: auto; border: thick $accent; background: $panel; }

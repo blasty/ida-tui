@@ -384,12 +384,17 @@ async def s_help(c: Ctx):
             f"screen={type(app.screen).__name__}")
     if not opened:
         return
-    txt = str(app.screen.query_one("#help-text", Static).render())
-    c.check("it lists the key groups",
-            all(s in txt for s in ("Navigate", "Views", "Move", "Edit", "Search")),
-            txt[:70])
+    cards = app.screen.query(".help-card")
+    titles = {str(w.border_title) for w in cards}
+    txt = " ".join(str(w.render()) for w in cards)
+    c.check("each key group gets its own card",
+            titles == {"Navigate", "Views", "Move", "Edit", "Search"}, f"{titles}")
     c.check("it documents real bindings",
             "set type" in txt and "split view" in txt and "cross-references" in txt)
+    body = app.screen.query_one("#help-body")
+    c.check("the cards fit without a scrollbar at a normal size",
+            body.virtual_size.height <= body.size.height,
+            f"content={body.virtual_size.height} view={body.size.height}")
     await c.press("escape")
     await c.wait(lambda: not isinstance(app.screen, HelpScreen), 10)
     c.check("Esc closes it", not isinstance(app.screen, HelpScreen))
