@@ -1373,6 +1373,14 @@ class Program:
         if res.get("error"):
             raise IDAToolError("define_code", f"@ {ea:#x}: {res['error']}")
 
+    def set_thumb(self, ea: int, mode: str = "toggle") -> dict:
+        """Switch ARM/Thumb decoding at ``ea``. Returns the resulting state."""
+        r = self.client.call("set_thumb", addr=hex(ea), mode=mode)
+        if not isinstance(r, dict) or r.get("error"):
+            raise IDAToolError("set_thumb",
+                               f"@ {ea:#x}: {(r or {}).get('error', 'failed')}")
+        return r
+
     def define_code_run(self, ea: int, limit: int = 20000) -> dict:
         """Disassemble consecutively from ``ea`` until something stops it.
 

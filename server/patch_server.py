@@ -967,6 +967,63 @@ def define_code_run(
 
     return {"start": hex(start), "end": hex(ea), "count": count,
             "stopped": stopped}
+
+@tool
+@idasync
+def set_thumb(
+    addr: Annotated[str, "Address to change the ARM decoding mode at"],
+    mode: Annotated[str, "'toggle', 'on' (Thumb) or 'off' (ARM)"] = "toggle",
+    end: Annotated[str, "Optional exclusive end address (default: this item)"] = "",
+) -> dict:
+    """Switch ARM/Thumb decoding at ``addr`` (IDA's T segment register).
+
+    Thumb is not a property of the bytes, it's a mode the CPU is in, so a raw
+    image gives IDA no way to know: at a Thumb entry point it decodes 16-bit
+    instructions as 32-bit ARM and produces confident nonsense
+    (``push {r3,lr}`` reads as ``SVCLT 0xBF00``).
+
+    Also forces the segment to 32-bit when turning Thumb ON. Thumb does not
+    exist in AArch64, and a headerless blob loaded with -parm defaults to
+    64-bit — so setting T alone changes nothing and looks broken. Asking for
+    Thumb IS asking for ARM32."""
+    import ida_bytes
+    import ida_idp
+    import ida_segment
+    import ida_segregs
+
+    try:
+        ea = parse_address(addr)
+    except Exception as e:
+        return {"addr": str(addr), "error": str(e)}
+    treg = ida_idp.str2reg("T")
+    if treg is None or treg < 0:
+        return {"addr": hex(ea), "error": "no T register (not an ARM database)"}
+    seg = ida_segment.getseg(ea)
+    if not seg:
+        return {"addr": hex(ea), "error": "no segment"}
+
+    cur = ida_segregs.get_sreg(ea, treg)
+    cur = 0 if cur in (None, 0xFFFFFFFF, -1) else int(cur)
+    want = {"on": 1, "off": 0}.get(str(mode).lower(), 0 if cur else 1)
+
+    changed_bits = False
+    if want and seg.bitness != 1:
+        ida_segment.set_segm_addressing(seg, 1)
+        changed_bits = True
+
+    try:
+        stop = parse_address(end) if end else 0
+    except Exception:
+        stop = 0
+    size = max(int(stop) - ea, 0) or max(ida_bytes.get_item_size(ea), 2)
+    # The bytes are currently decoded in the OLD mode; leaving that item defined
+    # pins the wrong instruction length and the new mode has nothing to apply to.
+    ida_bytes.del_items(ea, 0, size)
+    ok = bool(ida_segregs.split_sreg_range(ea, treg, want, ida_segregs.SR_user))
+    now = ida_segregs.get_sreg(ea, treg)
+    return {"addr": hex(ea), "thumb": bool(now), "was": bool(cur), "ok": ok,
+            "bitness": ida_segment.getseg(ea).bitness,
+            "forced_32bit": changed_bits}
 '''
 
 SNIPPET = f"{BEGIN}\n{BODY.strip()}\n{END}\n"

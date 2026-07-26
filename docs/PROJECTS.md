@@ -297,6 +297,26 @@ conversion happens in `BinaryRef.load_args`, and a base that isn't 16-byte
 aligned is rejected rather than silently landing somewhere else. `ida_args`
 passes anything else through untouched.
 
+### ARM/Thumb
+
+Thumb is not a property of the bytes — it's a mode the CPU is in — so a raw image
+gives IDA nothing to detect. At a Thumb entry point it decodes 16-bit
+instructions as 32-bit ARM and produces confident nonsense: `push {r3,lr}`
+(`08 b5`) reads as `SVCLT 0xBF00`, and `c` either refuses or carves garbage.
+
+`t` on the listing switches the mode at the cursor and disassembles in it:
+
+    Thumb @ 0x0 (segment set to 32-bit; Thumb needs ARM32) — 10 instructions
+
+It sets IDA's `T` segment register, and forces the segment to 32-bit when
+turning Thumb on. That second part isn't optional: Thumb doesn't exist in
+AArch64, and a headerless blob loaded with `-parm` comes up 64-bit, so setting
+`T` alone changes nothing and looks broken. Asking for Thumb *is* asking for
+ARM32.
+
+`t` again toggles back — the mode is a guess, and guesses get revised. Both
+states are saved in the `.i64`.
+
 ### When analysis finds nothing
 
 Zero functions is what a raw image described wrongly looks like — right file,

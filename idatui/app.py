@@ -738,6 +738,7 @@ class ListingView(SearchMixin, NavMixin, ColumnCursor, ScrollView, can_focus=Tru
         Binding("a", "make_string", "Str", show=False),
         Binding("p", "define_func", "Func", show=False),
         Binding("u", "undefine", "Undef", show=False),
+        Binding("t", "toggle_thumb", "ARM/Thumb", show=False),
         *SearchMixin.SEARCH_BINDINGS,
         *NavMixin.NAV_BINDINGS,
         *ColumnCursor.COL_BINDINGS,
@@ -1125,6 +1126,9 @@ class ListingView(SearchMixin, NavMixin, ColumnCursor, ScrollView, can_focus=Tru
 
     def action_undefine(self) -> None:
         self.post_message(EditItemRequested(self, "undef"))
+
+    def action_toggle_thumb(self) -> None:
+        self.post_message(EditItemRequested(self, "thumb"))
 
     def action_make_data(self) -> None:
         self.post_message(MakeDataRequested(self))
@@ -5150,7 +5154,8 @@ class IdaTui(App):
                       anchor: ViewAnchor | None = None) -> None:  # worker context
         assert self.program is not None
         verb = {"code": "defined code", "func": "created function",
-                "undef": "undefined", "string": "made string"}[kind]
+                "undef": "undefined", "string": "made string",
+                "thumb": "switched decoding"}[kind]
         try:
             if kind == "code":
                 # Keep going until something stops it: one instruction is rarely
@@ -5175,6 +5180,22 @@ class IdaTui(App):
                           "limit": "instruction limit"}.get(why, why)
                 verb = (f"defined {n} instruction{'s' if n != 1 else ''} "
                         f"({ea:#x}\u2013{end:#x}) \u2014 {reason}")
+            elif kind == "thumb":
+                # Switch the mode, then disassemble in it: flipping T and
+                # leaving the bytes undefined shows nothing, and the reason you
+                # flipped it was to read the code.
+                r = self.program.set_thumb(ea)
+                run = self.program.define_code_run(ea)
+                n = int(run.get("count", 0))
+                mode = "Thumb" if r.get("thumb") else "ARM"
+                verb = f"{mode} @ {ea:#x}"
+                if r.get("forced_32bit"):
+                    verb += " (segment set to 32-bit; Thumb needs ARM32)"
+                verb += (f" \u2014 {n} instruction{'s' if n != 1 else ''}"
+                         if n else " \u2014 still doesn't decode")
+                # falls through to the shared reload: same cache bump, same
+                # anchor restore, same flash. That is the whole point of having
+                # one path.
             elif kind == "func":
                 self.program.define_func(ea)
             elif kind == "string":

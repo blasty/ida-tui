@@ -98,6 +98,10 @@ nothing:
 ./ida-tui fw.bin --processor arm --base 0x8000000
 ```
 
+ARM images that use Thumb need one more thing: press `t` on the listing to switch
+ARM/Thumb decoding at the cursor (it sets IDA's `T` register, and the segment to
+32-bit, since Thumb doesn't exist in AArch64).
+
 `--base` is a real address (IDA's own `-b` is in paragraphs; the conversion is
 done for you). In a project the options are recorded per binary, which is what a
 multi-image firmware wants. They apply to the first open only — after that the
