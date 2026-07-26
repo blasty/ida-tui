@@ -305,10 +305,135 @@ def _idatui_head_row(ea):
         "size": int(ida_bytes.get_item_size(ea)),
         "text": text,
     }
+    if line:
+        # Keep IDA's own token classification for syntax highlighting. Built from
+        # the SAME line as `text`, then whitespace-collapsed identically so the
+        # two never disagree about what the row says.
+        spans = _idatui_spans(line)
+        joined = "".join(t for _k, t in spans)
+        if " ".join(joined.split()) == text:
+            row["spans"] = spans
     nm = ida_name.get_ea_name(ea)
     if nm:
         row["name"] = nm
     return row
+
+
+#: IDA colour tag -> the semantic kind the TUI styles. IDA already classifies
+#: every token in a disassembly line, for every processor it supports, so there
+#: is nothing to lex: generate_disasm_line emits \x01<tag>text\x02<tag> and the
+#: tag says what the text IS. A pygments assembly lexer would be a worse guess at
+#: this and would need one dialect per architecture.
+_IDATUI_SPAN_KINDS = {
+    "insn": ("SCOLOR_INSN", "SCOLOR_KEYWORD", "SCOLOR_ASMDIR", "SCOLOR_MACRO"),
+    "reg": ("SCOLOR_REG",),
+    "num": ("SCOLOR_NUMBER", "SCOLOR_CHAR", "SCOLOR_BINPREF"),
+    "str": ("SCOLOR_STRING",),
+    # NB the real constant names: DATNAME/CODNAME, not "DNAME". Guessing here
+    # fails silently — an unmapped tag renders as plain body text, so symbols
+    # just quietly aren't blue and nothing tells you why.
+    "name": ("SCOLOR_DATNAME", "SCOLOR_CODNAME", "SCOLOR_LOCNAME",
+             "SCOLOR_IMPNAME", "SCOLOR_DEMNAME", "SCOLOR_LIBNAME",
+             "SCOLOR_CNAME", "SCOLOR_DNAME",
+             "SCOLOR_CREF", "SCOLOR_DREF", "SCOLOR_CREFTAIL", "SCOLOR_DREFTAIL"),
+    "seg": ("SCOLOR_SEGNAME",),
+    "cmt": ("SCOLOR_AUTOCMT", "SCOLOR_REGCMT", "SCOLOR_RPTCMT", "SCOLOR_VOIDOP"),
+    "punct": ("SCOLOR_SYMBOL", "SCOLOR_ALTOP", "SCOLOR_HIDNAME"),
+    "err": ("SCOLOR_ERROR",),
+}
+
+
+def _idatui_tag_map():
+    """{tag character: kind}, built once from whatever this IDA actually has."""
+    import ida_lines
+    out = {}
+    for kind, names in _IDATUI_SPAN_KINDS.items():
+        for n in names:
+            v = getattr(ida_lines, n, None)
+            if isinstance(v, str) and v:
+                out[v[0]] = kind
+            elif isinstance(v, int):
+                out[chr(v)] = kind
+    return out
+
+
+_IDATUI_TAGS = None
+
+
+def _idatui_spans(line):
+    """A tagged disasm line as [[kind, text], ...], colour tags resolved.
+
+    Unknown tags become 'text' rather than being dropped: a processor module can
+    emit a colour we don't classify, and losing the characters would corrupt the
+    line."""
+    global _IDATUI_TAGS
+    import ida_lines
+    if _IDATUI_TAGS is None:
+        _IDATUI_TAGS = _idatui_tag_map()
+    on, off, esc = "\x01", "\x02", "\x03"
+    addr_tag = chr(getattr(ida_lines, "COLOR_ADDR", 0x28))
+    addr_len = int(getattr(ida_lines, "COLOR_ADDR_SIZE", 16))
+    spans, stack, buf = [], [], []
+    i, n = 0, len(line)
+
+    def flush():
+        if buf:
+            spans.append([stack[-1] if stack else "text", "".join(buf)])
+            del buf[:]
+
+    while i < n:
+        ch = line[i]
+        if ch == on and i + 1 < n:
+            tag = line[i + 1]
+            if tag == addr_tag:
+                # An embedded target address, not display text: 16 hex digits
+                # that must not reach the screen.
+                i += 2 + addr_len
+                continue
+            flush()
+            stack.append(_IDATUI_TAGS.get(tag, "text"))
+            i += 2
+            continue
+        if ch == off and i + 1 < n:
+            flush()
+            if stack:
+                stack.pop()
+            i += 2
+            continue
+        if ch == esc and i + 1 < n:      # escaped literal
+            buf.append(line[i + 1])
+            i += 2
+            continue
+        buf.append(ch)
+        i += 1
+    flush()
+    # Collapse IDA's column padding EXACTLY as the plain text does. A run of
+    # spaces can straddle two spans, so this walks characters rather than
+    # collapsing each span on its own — otherwise the spans and `text` disagree
+    # about the line and the row silently loses its highlighting.
+    out, prev_space = [], False
+    for kind, txt in spans:
+        acc = []
+        for ch in txt:
+            if ch.isspace():
+                if prev_space:
+                    continue
+                acc.append(" ")
+                prev_space = True
+            else:
+                acc.append(ch)
+                prev_space = False
+        if acc:
+            out.append([kind, "".join(acc)])
+    while out and out[0][1] == " ":
+        out.pop(0)
+    while out and out[-1][1] == " ":
+        out.pop()
+    if out and out[0][1].startswith(" "):
+        out[0][1] = out[0][1].lstrip()
+    if out and out[-1][1].endswith(" "):
+        out[-1][1] = out[-1][1].rstrip()
+    return [[k, t] for k, t in out if t]
 
 
 def _idatui_unknown_row(ea, size):

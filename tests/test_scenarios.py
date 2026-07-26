@@ -395,6 +395,53 @@ async def s_load_options(c: Ctx):
     await c.wait(lambda: not isinstance(app.screen, LoadOptionsScreen), 10)
 
 
+@scenario("asm_highlight")
+async def s_asm_highlight(c: Ctx):
+    """Assembly is highlighted from IDA's OWN token tags.
+
+    generate_disasm_line() emits \x01<tag>text\x02<tag>, and the tag says what
+    the text is — for every processor IDA supports. Nothing is lexed here, so
+    what this pins is that the tags survive the trip: parsed server-side, agreed
+    with the plain text, carried on the Head, and mapped to a style.
+    """
+    from idatui.app import _S_SPAN
+    app = c.app
+    await c.open_biggest("listing")
+    lst = c.lst
+    ok = await c.wait(lambda: lst.model is not None and lst.total > 20, 25)
+    if not ok:
+        c.check("a listing to highlight", False, f"total={lst.total}")
+        return
+    lst.model.ensure(400)
+    rows = [lst.model.get(i) for i in range(min(lst.model.loaded(), 400))]
+    rows = [h for h in rows if h is not None]
+    code = [h for h in rows if h.kind == "code"]
+    c.check("code rows carry IDA's token spans",
+            code and sum(1 for h in code if h.spans) > len(code) * 0.9,
+            f"{sum(1 for h in code if h.spans)}/{len(code)} have spans")
+
+    kinds = {k for h in rows for k, _ in (h.spans or ())}
+    # If a tag isn't mapped it renders as body text and nothing says why, so the
+    # ones that carry real meaning are worth asserting explicitly.
+    for want in ("insn", "reg", "punct"):
+        c.check(f"the palette sees {want} tokens", want in kinds, f"{sorted(kinds)}")
+    c.check("every span kind has a style",
+            all(k in _S_SPAN for k in kinds), f"unstyled: {sorted(kinds - set(_S_SPAN))}")
+
+    # Spans must describe the SAME text the row shows, or the row renders
+    # different characters than search/width calculations think it has.
+    bad = [h for h in rows if h.spans
+           and "".join(t for _k, t in h.spans) != h.text]
+    c.check("spans reconstruct the row text exactly", not bad,
+            f"{[(hex(h.ea), h.text) for h in bad[:2]]}")
+
+    # And the mnemonic must be the loudest thing on the line (the column you
+    # scan), not just any styled token.
+    mn = next((h for h in code if h.spans and h.spans[0][0] == "insn"), None)
+    c.check("the mnemonic is the first span",
+            mn is not None, f"{code[0].spans if code else None}")
+
+
 @scenario("command_palette")
 async def s_command_palette(c: Ctx):
     app = c.app
@@ -1949,9 +1996,16 @@ async def s_listing_view(c: Ctx):
     try:
         c.prog.undefine(dea, size=4)
         c.prog.bump_items()
-        # reopen the listing so the model reflects the new undefined run
+        # Reopen the listing so the model reflects the new undefined run, and
+        # wait for the model to be REPLACED. Waiting on index_of_ea(dea) >= 0 is
+        # no test at all: dea is in the OLD model too (it's the head we just
+        # undefined), so the predicate passes instantly and we then assert
+        # against pre-edit rows. It only ever passed because the swap happened to
+        # win the race, and it started failing the moment page loads got bigger.
+        stale = c.lst.model
         await c.goto_ui(hex(dea))
         await c.wait(lambda: app._active == "listing" and c.lst.total > 0
+                     and c.lst.model is not stale
                      and c.lst.model.index_of_ea(dea) >= 0, 25)
         ui = c.lst.model.index_of_ea(dea)
         c.check("undefining a data head yields an unknown run in the listing",

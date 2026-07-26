@@ -91,42 +91,13 @@ before trusting a failure that appeared without a code change.
 Coverage for "an edit must not move the view" lives in tests/test_blob_ui.py,
 which builds its own throwaway binary and can mutate freely.
 
-## Assembly syntax highlighting (WIP, patch in docs/wip-asm-spans.patch)
+## DisasmView looks like dead code
 
-The listing shows the mnemonic bright and everything after it in one body
-colour. IDA already classifies every token, for every processor, so there is
-nothing to lex — generate_disasm_line() emits \x01<tag>text\x02<tag> and the tag
-says what the text IS. A pygments asm lexer would be a worse guess and would
-need a dialect per architecture.
+idatui/app.py defines DisasmView (Line-based, function-scoped) but the app never
+instantiates or queries it — the unified ListingView replaced it, and even the
+test harness's `Ctx.dis` returns ListingView. DisasmModel is still used, but only
+to compute indices in _do_edit_item, never to render.
 
-The patch: _idatui_spans() in patch_server parses those tags into
-[[kind, text], ...] (insn/reg/num/str/name/seg/cmt/punct), heads rows carry
-"spans", Head.spans holds them, and ListingView renders via _span_segments()
-with a fallback to today's mnemonic/rest split. Verified working on echo:
-
-  lea rcx, function; "usage"  ->  insn text reg punct text name cmt
-  coverage over 400 rows: insn 344, reg 402, punct 397, name 156, num 47, cmt 44
-
-Palette rule used: NEUTRALS for the machine (mnemonic brightest, registers at
-body weight since they are most of the text), HUES only where they carry meaning
-(numbers, strings, symbols), structure recedes so commas and brackets stop
-competing with operands.
-
-Two things learned that the patch encodes:
-* The constants are SCOLOR_DATNAME / SCOLOR_CODNAME — there is no SCOLOR_DNAME.
-  Guessing fails SILENTLY: an unmapped tag renders as body text, so symbols just
-  aren't blue and nothing says why.
-* Spans must be whitespace-collapsed exactly as `text` is, walking characters
-  rather than per-span, because a run of spaces straddles spans. The row only
-  gets spans when the two agree, so a mismatch degrades instead of corrupting.
-
-NOT MERGED because it breaks one check: listing_view "undefining a data head
-yields an unknown run" now reports kind=data. Reproducible, and bisected to this
-change (10/0 with it stashed, 9/1 with it applied) on a fresh .i64. Cause not yet
-found — the span code doesn't touch `kind`, which is computed from the flags
-before spans are attached, so the suspicion is that adding "spans" to the row
-dict perturbs something in the undefine path's re-read (caching keyed on the row
-shape?). Find that before merging.
-
-Also still plain: DisasmView (the function-scoped view) renders Line objects from
-the `disasm` tool, which doesn't emit spans. Same treatment needed there.
+Worth confirming and deleting: it's ~180 lines carrying its own rendering,
+search and cursor logic that no longer runs, and it misled me into thinking
+assembly highlighting needed doing twice.

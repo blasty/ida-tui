@@ -100,6 +100,10 @@ class Head:
     text: str
     name: str | None = None
     raw: bytes | None = None  # opcode/item bytes (filled in for code by the model)
+    #: [(kind, text)] from IDA's own colour tags — mnem/reg/num/name/str/punct/…
+    #: None when the worker didn't provide them (older worker, or the spans
+    #: disagreed with the plain text, in which case the text wins).
+    spans: tuple[tuple[str, str], ...] | None = None
 
     @property
     def label(self) -> str | None:  # Line-compatible alias
@@ -107,12 +111,15 @@ class Head:
 
     @classmethod
     def from_raw(cls, d: dict) -> "Head":
+        sp = d.get("spans")
         return cls(
             ea=_as_int(d["ea"]),
             kind=d.get("kind", "unknown"),
             size=int(d.get("size", 0) or 0),
             text=d.get("text", ""),
             name=d.get("name"),
+            spans=(tuple((str(k), str(t)) for k, t in sp)
+                   if isinstance(sp, list) and sp else None),
         )
 
 

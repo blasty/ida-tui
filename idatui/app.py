@@ -53,6 +53,23 @@ from .domain import DisasmModel, Func, Head, ListingModel, Program, Struct
 _S_ADDR = Style(color="#6b7684")
 _S_LABEL = Style(color="#7aa2f7", bold=True)
 _S_INSN = Style(color="#c3cad3")
+#: IDA's token kinds -> the measured palette. The rule that keeps a dense
+#: disassembly readable: NEUTRALS for the machine (mnemonic brightest because you
+#: scan down that column, registers at body weight because they're most of the
+#: text), HUES only where they mean something (numbers, strings, symbols),
+#: structure recedes so brackets and commas stop competing with operands.
+_S_SPAN = {
+    "insn": Style(color="#e8ecf2"),      # 15.3:1  mnemonic / directive
+    "reg": Style(color="#c3cad3"),       # 11.0:1  registers = body weight
+    "num": Style(color="#d8a657"),       #  8.2:1  immediates, offsets
+    "str": Style(color="#9ece6a"),       #  9.9:1  string literals
+    "name": Style(color="#7aa2f7"),      #  7.2:1  symbols / xref targets
+    "seg": Style(color="#93aee0"),       #  8.1:1  segment names
+    "cmt": Style(color="#7c8b9e", italic=True),   # 5.2:1
+    "punct": Style(color="#626c7a"),     #  3.4:1  brackets, commas, +/-
+    "err": Style(color="#c9762f"),       #         IDA's own error marker
+    "text": Style(color="#c3cad3"),      # 11.0:1  anything unclassified
+}
 _S_MNEM = Style(color="#e8ecf2")
 _S_OPBYTES = Style(color="#5e6875")  # raw opcode bytes column
 _S_DATA = Style(color="#d8a657")
@@ -1077,6 +1094,24 @@ class ListingView(SearchMixin, NavMixin, ColumnCursor, ScrollView, can_focus=Tru
             return " ".join(f"{b:02X}" for b in raw[:_OP_LIMIT]) + "\u2026"
         return " ".join(f"{b:02X}" for b in raw)
 
+    @staticmethod
+    def _span_segments(h: Head, fallback: Style):
+        """Segments for a row's disassembly text.
+
+        Uses IDA's own token classification when the worker supplied it; falls
+        back to the old mnemonic/rest split so an older worker (or a row whose
+        spans didn't match the text) still renders.
+        """
+        if h.spans:
+            return [Segment(t, _S_SPAN.get(k, fallback)) for k, t in h.spans]
+        if h.kind == "code":
+            mnem, _, rest = h.text.partition(" ")
+            segs = [Segment(mnem, _S_MNEM)]
+            if rest:
+                segs.append(Segment(" " + rest, fallback))
+            return segs
+        return [Segment(h.text, fallback)]
+
     def _op_field(self, h: Head) -> str:
         """The padded opcode-bytes column (empty when hidden). Shared format so
         cursor/search offsets line up."""
@@ -1301,17 +1336,11 @@ class ListingView(SearchMixin, NavMixin, ColumnCursor, ScrollView, can_focus=Tru
                 segs.append(Segment(_LST_INDENT, _S_MEMBER))
             if h.name:
                 segs.append(Segment(f"{h.name}  ", _S_LABEL))
-            if h.kind == "code":
-                mnem, _, rest = h.text.partition(" ")
-                segs.append(Segment(mnem, _S_MNEM))
-                if rest:
-                    segs.append(Segment(" " + rest, _S_INSN))
-            elif h.kind == "data":
-                segs.append(Segment(h.text, _S_DATA))
-            elif h.kind == "member":
+            if h.kind == "member":
                 segs.append(Segment(h.text, _S_MEMBER))
             else:
-                segs.append(Segment(h.text, _S_UNK))
+                base = {"code": _S_INSN, "data": _S_DATA}.get(h.kind, _S_UNK)
+                segs.extend(self._span_segments(h, base))
             strip = Strip(segs)
         linked = idx in self._link_rows
         if linked:
