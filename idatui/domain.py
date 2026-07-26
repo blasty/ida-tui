@@ -583,6 +583,16 @@ class ListingModel:
         self.name = name or f"seg @ {seg_start:#x}"
         self._heads: list[Head] = []
         self._by_ea: dict[int, int] = {}
+        # Logical rows != physical heads. A run of undefined bytes arrives as ONE
+        # head ("db 2044 dup(?)") because materialising millions of one-byte rows
+        # for a .bss would be absurd — but you must still be able to put the
+        # cursor on any byte in it and press `c`, exactly as in IDA. So a run of
+        # N bytes PRESENTS as N rows and the text for each is synthesised on
+        # demand. _row_at[i] is the logical row where physical head i starts.
+        self._row_at: list[int] = []
+        self._head_eas: list[int] = []      # parallel to _heads, for bisect
+        self._rows = 0                      # total logical rows loaded
+        self._ubytes: dict[int, bytes] = {}  # lazily-read bytes for those rows
         self._next: int | None = seg_start  # next address to fetch from
         self._done = False
         self._max_raw = 0  # widest opcode length (bytes) seen, for the op column
@@ -649,14 +659,16 @@ class ListingModel:
                 continue
         page = self._attach_opcode_bytes(page)
         with self._lock:
-            base = len(self._heads)
-            for i, h in enumerate(page):
+            for h in page:
                 # Banner/label rows (function headers, separators, code labels)
                 # are display-only; don't index them so navigation lands on the
                 # real code/data head at that address.
                 if h.kind not in ("sep", "funchdr", "label"):
-                    self._by_ea.setdefault(h.ea, base + i)
+                    self._by_ea.setdefault(h.ea, self._rows)
+                self._row_at.append(self._rows)
+                self._head_eas.append(h.ea)
                 self._heads.append(h)
+                self._rows += self._span(h)
             nxt = cur.get("next")
             if nxt is None:
                 self._done = True
@@ -665,9 +677,67 @@ class ListingModel:
                 self._next = _as_int(nxt)
             return len(rows)
 
+    @staticmethod
+    def _span(h: Head) -> int:
+        """How many logical rows head ``h`` occupies."""
+        return h.size if (h.kind == "unknown" and h.size > 1) else 1
+
+    def _phys(self, row: int) -> tuple[int, int]:
+        """(physical head index, byte offset into it) for logical ``row``."""
+        import bisect
+        i = bisect.bisect_right(self._row_at, row) - 1
+        if i < 0:
+            return (-1, 0)
+        return (i, row - self._row_at[i])
+
+    def _unknown_bytes(self, ea: int, n: int) -> bytes:
+        """Bytes behind an undefined run, read in blocks and cached.
+
+        Undefined rows are the ones you carve, so their VALUES are the whole
+        point — "db ?" with no byte tells you nothing about where an instruction
+        stream might start.
+        """
+        BLK = 1024
+        out = bytearray()
+        a = ea
+        while len(out) < n:
+            b0 = (a // BLK) * BLK
+            blk = self._ubytes.get(b0)
+            if blk is None:
+                try:
+                    blk = self._prog.read_bytes(b0, BLK)
+                except Exception:  # noqa: BLE001
+                    blk = b""
+                self._ubytes[b0] = blk
+            off = a - b0
+            take = min(BLK - off, n - len(out))
+            chunk = blk[off:off + take] if blk else b""
+            if not chunk:
+                break
+            out += chunk
+            a += len(chunk)
+        return bytes(out)
+
+    def _row_head(self, i: int, off: int) -> Head:
+        """The Head for one logical row: the physical head, or a synthesised
+        single-byte row inside an undefined run.
+
+        The run's FIRST row is synthesised too. Leaving "db 2044 dup(?)" there
+        would say the row covers 2044 bytes when it now covers one, and the
+        column of byte values would start an address late.
+        """
+        h = self._heads[i]
+        if self._span(h) == 1:
+            return h
+        ea = h.ea + off
+        b = self._unknown_bytes(ea, 1)
+        text = f"db {b[0]:02X}h" if b else "db ?"
+        return Head(ea=ea, kind="unknown", size=1, text=text,
+                    name=h.name if off == 0 else None)
+
     def ensure(self, n: int) -> None:
-        """Ensure at least ``n`` heads are loaded (or all, if fewer exist)."""
-        while not self._done and len(self._heads) < n:
+        """Ensure at least ``n`` logical rows are loaded (or all, if fewer)."""
+        while not self._done and self._rows < n:
             if self._load_next_page() == 0:
                 break
 
@@ -679,8 +749,9 @@ class ListingModel:
             if idx >= 0:
                 return idx
             with self._lock:
-                have = len(self._heads)
-                last_ea = self._heads[-1].ea if self._heads else -1
+                have = self._rows
+                last_ea = (self._heads[-1].ea + max(self._heads[-1].size, 1) - 1
+                           if self._heads else -1)
                 done = self._done
             if done or (have and last_ea >= ea):
                 # Loaded past ea without an exact head hit: return the first head
@@ -691,12 +762,19 @@ class ListingModel:
 
     def _first_at_or_after(self, ea: int) -> int:
         with self._lock:
-            heads = self._heads
-            for i, h in enumerate(heads):
+            j = self._head_index_at(ea)
+            if j >= 0:
+                h = self._heads[j]
                 if h.ea <= ea < h.ea + max(h.size, 1):
-                    return i
+                    off = (ea - h.ea) if self._span(h) > 1 else 0
+                    return self._row_at[j] + off
+            for i, h in enumerate(self._heads):
+                if h.ea <= ea < h.ea + max(h.size, 1):
+                    # Inside an undefined run, land on the exact BYTE.
+                    off = (ea - h.ea) if self._span(h) > 1 else 0
+                    return self._row_at[i] + off
                 if h.ea > ea:
-                    return i
+                    return self._row_at[i]
         return -1
 
     def load_all(self, progress: Callable[[int], None] | None = None) -> None:
@@ -704,7 +782,7 @@ class ListingModel:
             if self._load_next_page() == 0:
                 break
             if progress:
-                progress(len(self._heads))
+                progress(self._rows)
 
     @property
     def complete(self) -> bool:
@@ -713,23 +791,58 @@ class ListingModel:
 
     def loaded(self) -> int:
         with self._lock:
-            return len(self._heads)
+            return self._rows
 
     def __len__(self) -> int:
         return self.loaded()
 
     def get(self, i: int) -> Head | None:
         with self._lock:
-            return self._heads[i] if 0 <= i < len(self._heads) else None
+            if not (0 <= i < self._rows):
+                return None
+            j, off = self._phys(i)
+            if j < 0:
+                return None
+            span = self._span(self._heads[j])
+            h = self._heads[j]
+        # Synthesis reads bytes, so do it OUTSIDE the lock: an RPC under the
+        # model lock deadlocks the page loader that is filling it.
+        return self._row_head(j, off) if span > 1 else h
 
     def window(self, start: int, count: int) -> list[Head]:
+        """``count`` logical rows from ``start`` (synthesising undefined ones)."""
         self.ensure(start + count)
         with self._lock:
-            return list(self._heads[start:start + count])
+            rows = min(self._rows, start + count)
+            spans = [self._phys(i) for i in range(max(start, 0), max(rows, 0))]
+            heads = self._heads
+            plain = [(j, off, heads[j]) for j, off in spans if j >= 0]
+        return [self._row_head(j, off) if self._span(h) > 1 else h
+                for j, off, h in plain]
 
     def index_of_ea(self, ea: int) -> int:
         with self._lock:
-            return self._by_ea.get(ea, -1)
+            hit = self._by_ea.get(ea)
+            if hit is not None:
+                return hit
+            # An address INSIDE an undefined run is a real row now, not a
+            # mid-item address: that is what makes `g <addr>` + `c` work
+            # anywhere in a blob. Heads are address-ordered, so bisect rather
+            # than scan — a big listing has hundreds of thousands of them and
+            # this is on the navigation path.
+            j = self._head_index_at(ea)
+            if j >= 0:
+                h = self._heads[j]
+                if self._span(h) > 1 and h.ea <= ea < h.ea + h.size:
+                    return self._row_at[j] + (ea - h.ea)
+        return -1
+
+    def _head_index_at(self, ea: int) -> int:
+        """Index of the physical head containing ``ea`` (caller holds the lock)."""
+        import bisect
+        eas = self._head_eas
+        i = bisect.bisect_right(eas, ea) - 1
+        return i if 0 <= i < len(self._heads) else -1
 
     # -- DisasmModel-compatible accessors (unified model) ------------------ #
     def cached_line(self, idx: int) -> Head | None:
@@ -741,7 +854,7 @@ class ListingModel:
 
     def is_cached(self, start: int, count: int) -> bool:
         with self._lock:
-            return start + count <= len(self._heads)
+            return start + count <= self._rows
 
     def ensure_async(self, start: int, count: int) -> None:
         pass  # the background grower streams the rest in; nothing to prefetch
@@ -1251,14 +1364,14 @@ class Program:
         res = self._first_result(
             self.client.call("define_code", items=[{"addr": hex(ea)}]))
         if res.get("error"):
-            raise IDAToolError(f"define code @ {ea:#x}: {res['error']}")
+            raise IDAToolError("define_code", f"@ {ea:#x}: {res['error']}")
 
     def define_func(self, ea: int) -> None:
         """Create a function starting at ``ea`` (IDA's 'p')."""
         res = self._first_result(
             self.client.call("define_func", items=[{"addr": hex(ea)}]))
         if res.get("error"):
-            raise IDAToolError(f"create function @ {ea:#x}: {res['error']}")
+            raise IDAToolError("define_func", f"@ {ea:#x}: {res['error']}")
 
     def undefine(self, ea: int, size: int | None = None) -> None:
         """Undefine the item at ``ea`` back to raw bytes (IDA's 'u')."""
@@ -1267,7 +1380,7 @@ class Program:
             item["size"] = int(size)
         res = self._first_result(self.client.call("undefine", items=[item]))
         if res.get("error"):
-            raise IDAToolError(f"undefine @ {ea:#x}: {res['error']}")
+            raise IDAToolError("undefine", f"@ {ea:#x}: {res['error']}")
 
     def make_data(self, ea: int, type_decl: str, name: str | None = None) -> None:
         """Create a typed data item at ``ea`` (IDA's 'd', but typed). ``type_decl``
@@ -1278,7 +1391,7 @@ class Program:
         res = self._first_result(self.client.call("make_data", items=[item]))
         if res.get("ok") is False or res.get("error"):
             raise IDAToolError(
-                f"make data @ {ea:#x}: {res.get('error') or 'rejected'}")
+                "make_data", f"@ {ea:#x}: {res.get('error') or 'rejected'}")
 
     def make_string(self, ea: int, length: int = 0, kind: str = "c") -> str:
         """Create a string literal at ``ea`` (IDA's 'A'); auto-length when 0.
@@ -1287,7 +1400,7 @@ class Program:
         res = r if isinstance(r, dict) else {}
         if not res.get("ok"):
             raise IDAToolError(
-                f"make string @ {ea:#x}: {res.get('error') or 'rejected'}")
+                "make_string", f"@ {ea:#x}: {res.get('error') or 'rejected'}")
         return res.get("text", "")
 
     def region_label(self, ea: int) -> str:

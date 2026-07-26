@@ -44,9 +44,22 @@ async def wait(pred, pilot, t=240.0):
 
 async def run() -> int:
     with tempfile.TemporaryDirectory() as tmp:
+        # Random bytes so IDA finds no functions... but with REAL AArch64
+        # instructions planted at a known offset. Whether arbitrary random bytes
+        # happen to decode is chance, and a test that depends on chance tells you
+        # nothing on the run where it fails.
+        data = bytearray(os.urandom(64 * 1024))
+        # -parm puts IDA in AArch64 mode, so these are A64 encodings; the ARM32
+        # spelling of a nop (0xE1A00000) is NOT decodable there and made this
+        # test fail for a reason that had nothing to do with what it checks.
+        planted = 0x40                       # file offset -> ea 0x4040
+        for k, insn in enumerate((0xD503201F,   # nop
+                                  0xD503201F,   # nop
+                                  0xD65F03C0)):  # ret
+            data[planted + k * 4:planted + k * 4 + 4] = insn.to_bytes(4, "little")
         blob = os.path.join(tmp, "rnd.bin")
         with open(blob, "wb") as f:
-            f.write(os.urandom(64 * 1024))     # random: IDA will find no code
+            f.write(bytes(data))
 
         # Skip the dialog by answering up front; this test is about what
         # happens AFTER a described blob turns out to contain nothing.
@@ -84,6 +97,55 @@ async def run() -> int:
             status2 = str(app.query_one("#status", Static).render())
             check("the hint survives navigating", "no functions" in status2,
                   status2[:90])
+
+            # -- byte-granular carving ---------------------------------- #
+            # An undefined run arrives as ONE head ("db N dup(?)"). It has to
+            # PRESENT as one row per byte or there is no cursor position to
+            # press `c` at, which is how IDA works and the only way to find an
+            # instruction stream that doesn't start at the run's first byte.
+            m = lst.model
+            check("an undefined run presents one row per byte",
+                  m.loaded() >= 4096 and len(m._heads) < 64,
+                  f"rows={m.loaded()} physical heads={len(m._heads)}")
+            rows = m.window(0, 4)
+            check("each row is a single addressable byte",
+                  [h.ea for h in rows] == [0x4000, 0x4001, 0x4002, 0x4003]
+                  and all(h.size == 1 for h in rows),
+                  f"{[(hex(h.ea), h.size) for h in rows]}")
+            check("and shows its value, not a placeholder",
+                  all(h.text.startswith("db ") and "dup" not in h.text
+                      for h in rows), f"{[h.text for h in rows]}")
+
+            # The point of all this: land on an arbitrary byte and convert it.
+            i = m.index_of_ea(0x4021)
+            check("an address inside the run resolves to its own row",
+                  i >= 0 and m.get(i).ea == 0x4021,
+                  f"row={i} ea={m.get(i).ea if i >= 0 else None}")
+
+            target = 0x4000 + planted        # a NOP we put there ourselves
+            lst.cursor = m.index_of_ea(target)
+            lst._scroll_cursor_into_view()
+            await pilot.pause(0.1)
+            check("the cursor sits on the byte we aimed at",
+                  lst._cursor_ea() == target,
+                  f"{lst._cursor_ea():#x} want {target:#x}")
+            await pilot.press("c")
+            await pilot.pause(2.0)
+            # Defining an item REBUILDS the listing model, so re-read it from the
+            # view: holding the old object shows the pre-edit rows and looks
+            # exactly like the edit silently failing.
+            m = lst.model
+            h = m.get(m.index_of_ea(target))
+            check("`c` on a chosen byte carves an instruction there",
+                  h is not None and h.kind == "code",
+                  f"kind={h.kind if h else None} text={h.text if h else None!r}")
+            if h is not None and h.kind == "code":
+                print(f"       carved {target:#x}: {h.text}")
+                check("the carved row spans the instruction, not one byte",
+                      h.size == 4, f"size={h.size}")
+                check("bytes before it stay individually addressable",
+                      m.get(m.index_of_ea(target - 1)).size == 1
+                      and m.get(m.index_of_ea(target - 1)).ea == target - 1)
 
             await pilot.press("ctrl+l")
             opened = await wait(lambda: isinstance(app.screen, ConfirmScreen), pilot, 20)

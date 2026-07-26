@@ -783,13 +783,24 @@ class DisasmView(SearchMixin, NavMixin, ColumnCursor, ScrollView, can_focus=True
             return
         texts: list[str] = []
         off, total = 0, self.total
+        # A freshly-loaded blob is one row per undefined byte, so "all lines" can
+        # be millions of `db 4Ah` that nobody searches for. Index a bounded
+        # prefix rather than hang; say so instead of silently finding nothing.
+        LIMIT = 400_000
+        capped = total > LIMIT
+        total = min(total, LIMIT)
         while off < total:
-            lines = model.lines(off, DisasmModel.BLOCK, prefetch=False)
+            lines = model.lines(off, min(DisasmModel.BLOCK, total - off),
+                                prefetch=False)
             if not lines:
                 break
             texts.extend(self._fmt(ln) for ln in lines)
             off += len(lines)
         self._search_texts = texts
+        if capped:
+            self.app.call_from_thread(
+                self._app_status,
+                f"search covers the first {LIMIT:,} lines of {self.total:,}")
         self.app.call_from_thread(done)
 
     @work(thread=True, exclusive=True, group="disasm-prime")
