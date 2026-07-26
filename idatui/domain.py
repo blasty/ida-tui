@@ -1383,8 +1383,14 @@ class Program:
             return ""
         reason = str(r.get("reason") or "")
         if reason and r.get("bitness") == 64 and "64-bit" in reason:
-            # Unfixable in place: the database's bitness is decided at load.
-            reason += " \u2014 Ctrl+L and pick arm:ARMv7-A"
+            # Say the FIX, not the diagnosis. Hex-Rays' own sentence ("only
+            # 64-bit functions can be decompiled in the current database") is
+            # accurate and useless: it describes the database, not what to do,
+            # and it's long enough that a status bar cuts off the end — which is
+            # exactly where an appended hint would live. This is unfixable in
+            # place (bitness is decided at load), so the whole message is the
+            # instruction.
+            return "this database is 64-bit \u2014 Ctrl+L, pick arm:ARMv7-A"
         return reason
 
     def set_thumb(self, ea: int, mode: str = "toggle") -> dict:

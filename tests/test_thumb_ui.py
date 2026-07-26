@@ -161,10 +161,16 @@ async def run() -> int:
         await wait(lambda: "cannot decompile" in
                    str(app.query_one("#status", Static).render()), pilot, 90)
         status = str(app.query_one("#status", Static).render())
-        check("a failed decompile says why, in Hex-Rays' own words",
-              "only 64-bit functions" in status, status[:130])
+        # The message must say what to DO. Hex-Rays' own sentence ("only 64-bit
+        # functions can be decompiled in the current database") describes the
+        # database, not the fix, and is long enough that a status bar cuts off
+        # the end — which is where an appended hint would have lived.
+        check("a failed decompile names the fix, not just the diagnosis",
+              "Ctrl+L" in status and "ARMv7-A" in status, status[:130])
         check("and the reason survives the view reloading under it",
               "cannot decompile" in status, status[:130])
+        check("the message fits a narrow status bar",
+              len(status) < 110, f"{len(status)} chars: {status[:130]}")
 
     # -- the whole point: a 32-bit database decompiles ---------------------- #
     for ext in (".i64", ".id0", ".id1", ".id2", ".nam", ".til"):
