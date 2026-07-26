@@ -5394,15 +5394,27 @@ class IdaTui(App):
 
     # -- item structure edits (IDA c/p/u) --------------------------------- #
     def on_edit_item_requested(self, msg: EditItemRequested) -> None:
-        ea = (msg.view._cursor_ea()
-              if isinstance(msg.view, (DisasmView, ListingView)) else None)
+        view = msg.view
+        ea = (view._cursor_ea()
+              if isinstance(view, (DisasmView, ListingView)) else None)
         if ea is None:
             self._status("no address on this line to (re)define")
             return
-        self._do_edit_item(msg.kind, ea)
+        # Remember the TOP VISIBLE ADDRESS, not the row index: defining code
+        # collapses rows (four undefined bytes become one instruction), so the
+        # row that was at the top afterwards is a different place entirely. The
+        # view should not appear to move just because you carved in it.
+        top_ea = None
+        model = getattr(view, "model", None)
+        if model is not None:
+            top = round(view.scroll_offset.y)
+            h = model.cached_line(top) or model.get(top)
+            top_ea = getattr(h, "ea", None)
+        self._do_edit_item(msg.kind, ea, top_ea)
 
     @work(thread=True, exclusive=True, group="edititem")
-    def _do_edit_item(self, kind: str, ea: int) -> None:  # worker context
+    def _do_edit_item(self, kind: str, ea: int,
+                      top_ea: int | None = None) -> None:  # worker context
         assert self.program is not None
         verb = {"code": "defined code", "func": "created function",
                 "undef": "undefined", "string": "made string"}[kind]
@@ -5448,14 +5460,18 @@ class IdaTui(App):
         if fn is not None:
             model = self.program.disasm(fn.addr, fn.name)
             idx = 0 if ea == fn.addr else model.index_of_ea(ea)
+            top = model.index_of_ea(top_ea) if top_ea is not None else -1
             self.app.call_from_thread(
-                self._open_at, fn.addr, fn.name, idx, False, -1, 0, False)
+                self._open_at, fn.addr, fn.name, idx, False, -1, 0, False,
+                None, max(top, -1))
         else:
             name = self.program.region_label(ea)
             lm = self.program.listing(ea)
             idx = max(lm.ensure_ea(ea), 0) if lm is not None else 0
+            top = lm.index_of_ea(top_ea) if (lm is not None and top_ea is not None) else -1
             self.app.call_from_thread(
-                self._open_at, ea, name, idx, False, -1, 0, True)
+                self._open_at, ea, name, idx, False, -1, 0, True,
+                None, max(top, -1))
         self.app.call_from_thread(self._edit_item_done, verb, ea)
 
     def _edit_item_done(self, verb: str, ea: int) -> None:
@@ -5657,7 +5673,8 @@ class IdaTui(App):
 
     def _open_at(self, ea: int, name: str, cursor: int, push: bool,
                  dec_cursor: int = -1, dec_cursor_x: int = 0,
-                 is_region: bool = False, focus_name: str | None = None) -> None:
+                 is_region: bool = False, focus_name: str | None = None,
+                 scroll_y: int = -1) -> None:
         if push:
             self._save_current_pos()
         self._decomp_return = None  # a real navigation abandons the F5 return
@@ -5665,6 +5682,8 @@ class IdaTui(App):
         # the row is loaded, instead of column 0.
         self._pending_focus_name = focus_name
         entry = NavEntry(ea=ea, name=name, cursor=cursor, is_region=is_region)
+        if scroll_y >= 0:
+            entry.scroll_y = scroll_y
         if dec_cursor >= 0:
             entry.dec_cursor = dec_cursor
             entry.dec_cursor_x = dec_cursor_x

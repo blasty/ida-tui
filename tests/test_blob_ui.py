@@ -163,6 +163,30 @@ async def run() -> int:
                       m.get(m.index_of_ea(target - 1)).size == 1
                       and m.get(m.index_of_ea(target - 1)).ea == target - 1)
 
+            # -- carving must not move the view -------------------------- #
+            # Defining code collapses rows (four byte rows become one
+            # instruction), so anything that remembers a row INDEX puts you
+            # somewhere else afterwards. Scroll down far enough that there is a
+            # viewport to lose, then check the top ADDRESS is unchanged.
+            far = 0x4000 + 0x600
+            lst.cursor = lst.model.index_of_ea(far)
+            lst._scroll_cursor_into_view()
+            await pilot.pause(0.4)
+            top_before = lst.model.get(round(lst.scroll_offset.y)).ea
+            cur_before = lst._cursor_ea()
+            check("scrolled somewhere with rows above us",
+                  round(lst.scroll_offset.y) > 0, f"top={lst.scroll_offset.y}")
+            await pilot.press("c")
+            await pilot.pause(2.5)
+            m2 = lst.model
+            top_after = m2.get(round(lst.scroll_offset.y)).ea
+            check("carving leaves the scroll position where it was",
+                  top_after == top_before,
+                  f"{top_before:#x} -> {top_after:#x}")
+            check("and leaves the cursor on the same address",
+                  lst._cursor_ea() == cur_before,
+                  f"{cur_before:#x} -> {lst._cursor_ea():#x}")
+
             await pilot.press("ctrl+l")
             opened = await wait(lambda: isinstance(app.screen, ConfirmScreen), pilot, 20)
             check("Ctrl+L offers to reload with different options", opened,
