@@ -90,14 +90,3 @@ before trusting a failure that appeared without a code change.
 
 Coverage for "an edit must not move the view" lives in tests/test_blob_ui.py,
 which builds its own throwaway binary and can mutate freely.
-
-## DisasmView looks like dead code
-
-idatui/app.py defines DisasmView (Line-based, function-scoped) but the app never
-instantiates or queries it — the unified ListingView replaced it, and even the
-test harness's `Ctx.dis` returns ListingView. DisasmModel is still used, but only
-to compute indices in _do_edit_item, never to render.
-
-Worth confirming and deleting: it's ~180 lines carrying its own rendering,
-search and cursor logic that no longer runs, and it misled me into thinking
-assembly highlighting needed doing twice.
