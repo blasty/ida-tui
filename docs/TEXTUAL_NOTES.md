@@ -15,7 +15,7 @@ Hard-won Textual behaviour and the patterns this app relies on. Pairs with
   isn't recomputed until layout. Apply the scroll now AND again via
   `call_after_refresh` with `refresh(layout=True)`; don't zero `virtual_size` on
   load (snaps scroll to 0 → visible flash). See `ColumnCursor._apply_scroll`,
-  `DisasmView._on_primed`, `DecompView.show`.
+  `ListingView._on_primed`, `DecompView.show`.
 - **Scrolling on already-laid-out content (no reload) leaves a stale frame.** A
   plain `scroll_to` moves `scroll_offset` but Textual only repaints on a
   *rounded* scroll change, and with no virtual_size/content change there's no

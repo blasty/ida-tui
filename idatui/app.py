@@ -710,316 +710,12 @@ class SearchMixin:
 # --------------------------------------------------------------------------- #
 # Virtualized disassembly view
 # --------------------------------------------------------------------------- #
-class DisasmView(SearchMixin, NavMixin, ColumnCursor, ScrollView, can_focus=True):
-    """A line-virtualized disassembly listing for a single function."""
-
-    BINDINGS = [
-        Binding("j,down", "cursor_down", "Down", show=False),
-        Binding("k,up", "cursor_up", "Up", show=False),
-        Binding("ctrl+d", "half_page(1)", "½↓", show=False),
-        Binding("ctrl+u", "half_page(-1)", "½↑", show=False),
-        Binding("pagedown", "page(1)", "PgDn", show=False),
-        Binding("pageup", "page(-1)", "PgUp", show=False),
-        Binding("home", "goto_top", "Top", show=False),
-        Binding("G,end", "goto_bottom", "Bottom", show=False),
-        Binding("o", "toggle_opcodes", "Opcodes", show=False),
-        Binding("c", "define_code", "Code", show=False),
-        Binding("p", "define_func", "Func", show=False),
-        Binding("u", "undefine", "Undef", show=False),
-        Binding("tab,shift+tab", "app.toggle_view", "Pseudocode", priority=True),
-        Binding("f5", "app.toggle_view", "Decompile", priority=True),
-        Binding("L", "app.continuous_here", "Listing"),
-        *SearchMixin.SEARCH_BINDINGS,
-        *NavMixin.NAV_BINDINGS,
-        *ColumnCursor.COL_BINDINGS,
-    ]
-
-    cursor = reactive(0, repaint=False)
-    cursor_x = reactive(0, repaint=False)
-
-    class CursorMoved(Message):
-        """Posted when the disasm cursor moves; carries the instruction ea."""
-
-        def __init__(self, index: int, ea: int | None) -> None:
-            super().__init__()
-            self.index = index
-            self.ea = ea
-
-    def __init__(self) -> None:
-        super().__init__()
-        self.model: DisasmModel | None = None
-        self.total = 0
-        self._name = ""
-        self._pending_scroll_y: int | None = None
-        self._term = ""
-        self._matches: list[int] = []
-        self._ranges: dict[int, list[tuple[int, int]]] = {}
-        self._search_texts: list[str] | None = None
-        self._show_ops = True
-        self._op_w = 0  # char width of the hex-bytes field (excl. trailing gap)
-
-    def _op_field(self, line) -> str:  # type: ignore[no-untyped-def]
-        """The padded opcode-bytes column (empty when hidden). Kept identical
-        between the rendered strip and the plain text so cursor/search offsets
-        line up."""
-        if not self._show_ops or self._op_w <= 0:
-            return ""
-        raw = line.raw or b""
-        return " ".join(f"{b:02X}" for b in raw).ljust(self._op_w) + "  "
-
-    def _line_plain(self, idx: int) -> str | None:
-        if self.model is None:
-            return None
-        line = self.model.cached_line(idx)
-        if line is None:
-            return None
-        s = f"{line.ea:08X}  " + self._op_field(line)
-        if line.label:
-            s += f"{line.label}: "
-        return s + line.text
-
-    # -- public API -------------------------------------------------------- #
-    def load(self, model: DisasmModel, name: str, cursor: int = 0,
-             cursor_x: int = 0, scroll_y: int | None = None) -> None:
-        self.model = model
-        self._name = name
-        self.total = 0
-        self.cursor = cursor
-        self.cursor_x = cursor_x
-        self._pending_scroll_y = scroll_y
-        # NB: don't zero virtual_size here — that snaps the scroll to 0 and
-        # causes a visible jump before _on_primed restores the target scroll.
-        self._matches = []
-        self._ranges = {}
-        self._search_texts = None
-        self._prime()
-
-    # -- search hooks ------------------------------------------------------ #
-    def _fmt(self, line) -> str:  # type: ignore[no-untyped-def]
-        s = f"{line.ea:08X}  " + self._op_field(line)
-        if line.label:
-            s += f"{line.label}: "
-        return s + line.text
-
-    def _search_line_count(self) -> int:
-        return self.total
-
-    def _search_line_text(self, i: int) -> str | None:
-        t = self._search_texts
-        return t[i] if t is not None and 0 <= i < len(t) else None
-
-    def _search_ensure(self, done) -> None:
-        if self._search_texts is not None:
-            done()
-            return
-        self._app_status(f"/{self._term}/  indexing {self.total} lines…")
-        self._index_for_search(done)
-
-    @work(thread=True, exclusive=True, group="search-index")
-    def _index_for_search(self, done) -> None:
-        model = self.model
-        if model is None:
-            self.app.call_from_thread(done)
-            return
-        texts: list[str] = []
-        off, total = 0, self.total
-        # A freshly-loaded blob is one row per undefined byte, so "all lines" can
-        # be millions of `db 4Ah` that nobody searches for. Index a bounded
-        # prefix rather than hang; say so instead of silently finding nothing.
-        LIMIT = 400_000
-        capped = total > LIMIT
-        total = min(total, LIMIT)
-        while off < total:
-            lines = model.lines(off, min(DisasmModel.BLOCK, total - off),
-                                prefetch=False)
-            if not lines:
-                break
-            texts.extend(self._fmt(ln) for ln in lines)
-            off += len(lines)
-        self._search_texts = texts
-        if capped:
-            self.app.call_from_thread(
-                self._app_status,
-                f"search covers the first {LIMIT:,} lines of {self.total:,}")
-        self.app.call_from_thread(done)
-
-    @work(thread=True, exclusive=True, group="disasm-prime")
-    def _prime(self) -> None:
-        model = self.model
-        if model is None:
-            return
-        total = model.total()
-        height = max(self.size.height, 1)
-        model.lines(0, min(total, height + DisasmModel.BLOCK), prefetch=True)
-        if self.cursor:
-            model.lines(max(self.cursor - 2, 0), height, prefetch=True)
-        self.app.call_from_thread(self._on_primed, total)
-
-    def _on_primed(self, total: int) -> None:
-        self.total = total
-        self.virtual_size = Size(0, total)
-        self._update_op_w()  # provisional width from the primed window
-        self._scan_op_width()  # settle it against the whole function
-        self._clamp_x()  # cursor line is now cached; keep the column in range
-        if self._pending_scroll_y is not None and self._pending_scroll_y >= 0:
-            self._apply_scroll(min(self._pending_scroll_y, max(total - 1, 0)))
-        else:
-            self._scroll_cursor_into_view()
-        self._pending_scroll_y = None
-        self.refresh()
-
-    # -- rendering --------------------------------------------------------- #
-    def render_line(self, y: int) -> Strip:
-        model = self.model
-        width = self.size.width
-        if model is None or self.total == 0:
-            return Strip([Segment("".ljust(width), _S_DIM)])
-        top = round(self.scroll_offset.y)
-        if y == 0:  # once per refresh: warm the visible window + a little ahead
-            self._ensure_window(top)
-        idx = top + y
-        if idx >= self.total:
-            return Strip([Segment("".ljust(width), _S_INSN)])
-        line = model.cached_line(idx)
-        is_cursor = idx == self.cursor
-        if line is None:
-            strip = Strip([Segment(f"  {idx:>8}  …", _S_DIM)])
-        else:
-            segs: list[Segment] = [Segment(f"{line.ea:08X}  ", _S_ADDR)]
-            op = self._op_field(line)
-            if op:
-                segs.append(Segment(op, _S_OPBYTES))
-            if line.label:
-                segs.append(Segment(f"{line.label}: ", _S_LABEL))
-            mnem, _, rest = line.text.partition(" ")
-            segs.append(Segment(mnem, _S_MNEM))
-            if rest:
-                segs.append(Segment(" " + rest, _S_INSN))
-            strip = Strip(segs)
-        if idx in self._ranges:
-            strip = _overlay_ranges(strip, self._ranges[idx], self._match_style(idx))
-        if is_cursor:
-            strip = _cursor_decorate(strip, self._line_plain(idx) or "", self.cursor_x)
-        return strip.adjust_cell_length(width, _S_INSN)
-
-    def _update_op_w(self) -> bool:
-        """Recompute the opcode column width from the model's widest instruction.
-        Returns True if it changed."""
-        w = 0
-        if self.model is not None and self._show_ops:
-            mx = self.model.max_raw_len()
-            w = max(mx * 3 - 1, 0) if mx > 0 else 0
-        if w != self._op_w:
-            self._op_w = w
-            return True
-        return False
-
-    @work(thread=True, exclusive=True, group="disasm-opwidth")
-    def _scan_op_width(self) -> None:
-        model = self.model
-        if model is None:
-            return
-        model.scan_bytes()  # fetch all blocks -> stable widest instruction
-        self.app.call_from_thread(self._settle_op_w)
-
-    def _settle_op_w(self) -> None:
-        if self._update_op_w():
-            self._search_texts = None  # layout changed -> stale offsets
-            self.refresh()
-
-    def action_toggle_opcodes(self) -> None:
-        self._show_ops = not self._show_ops
-        self._update_op_w()
-        self._search_texts = None  # column layout changed -> reindex on next search
-        self._ranges = {}
-        self._clamp_x()
-        self.refresh()
-        self._app_status("opcodes " + ("on" if self._show_ops else "off"))
-
-    def _ensure_window(self, top: int) -> None:
-        if self.model is None:
-            return
-        height = max(self.size.height, 1)
-        start = max(top - DisasmModel.BLOCK, 0)
-        count = height + 2 * DisasmModel.BLOCK
-        if not self.model.is_cached(top, height):
-            self._fetch_window(start, count)
-        else:
-            self.model.ensure_async(start, count)  # warm neighbors
-
-    @work(thread=True, exclusive=False, group="disasm-fetch")
-    def _fetch_window(self, start: int, count: int) -> None:
-        model = self.model
-        if model is None:
-            return
-        model.lines(start, count, prefetch=True)
-        self.app.call_from_thread(self.refresh)
-
-    # -- navigation -------------------------------------------------------- #
-    def _visible_height(self) -> int:
-        return max(self.size.height, 1)
-
-    def _scroll_cursor_into_view(self) -> None:
-        height = self._visible_height()
-        top = round(self.scroll_offset.y)
-        if self.cursor < top:
-            self.scroll_to(y=self.cursor, animate=False)
-        elif self.cursor >= top + height:
-            self.scroll_to(y=max(self.cursor - height + 1, 0), animate=False)
-
-    def _move(self, delta: int) -> None:
-        if self.total == 0:
-            return
-        old = self.cursor
-        before = round(self.scroll_offset.y)
-        self.cursor = max(0, min(self.total - 1, self.cursor + delta))
-        self._clamp_x()
-        self._scroll_cursor_into_view()
-        if round(self.scroll_offset.y) != before:
-            self.refresh()  # scrolled: the whole viewport shifted
-        else:
-            _refresh_lines(self, old, self.cursor)  # only the two changed rows
-        self._refresh_hl()
-        self.post_message(DisasmView.CursorMoved(self.cursor, self._cursor_ea()))
-
-    def _after_cursor_move(self) -> None:
-        self.post_message(DisasmView.CursorMoved(self.cursor, self._cursor_ea()))
-
-    def _cursor_ea(self) -> int | None:
-        if self.model is None:
-            return None
-        line = self.model.cached_line(self.cursor)
-        return line.ea if line else None
-
-    # -- item structure edits (IDA c/p/u) --------------------------------- #
-    def action_define_code(self) -> None:
-        self.post_message(EditItemRequested(self, "code"))
-
-    def action_define_func(self) -> None:
-        self.post_message(EditItemRequested(self, "func"))
-
-    def action_undefine(self) -> None:
-        self.post_message(EditItemRequested(self, "undef"))
-
-    def action_cursor_down(self) -> None:
-        self._move(1)
-
-    def action_cursor_up(self) -> None:
-        self._move(-1)
-
-    def action_goto_top(self) -> None:
-        self._move(-self.total)
-
-    def action_goto_bottom(self) -> None:
-        self._move(self.total)
-
-
 # --------------------------------------------------------------------------- #
 # Virtualized flat listing view (code + data + undefined, per segment)
 # --------------------------------------------------------------------------- #
 class ListingView(SearchMixin, NavMixin, ColumnCursor, ScrollView, can_focus=True):
     """A line-virtualized *flat* listing over one segment: code, data and
-    undefined heads interleaved (IDA's disassembly view), unlike ``DisasmView``
+    undefined heads interleaved (IDA's disassembly view), unlike ``DisasmModel``
     which is bounded to one function. Backed by ``ListingModel`` (the ``heads``
     server tool). Used for non-function regions and raw segment browsing.
     """
@@ -1742,7 +1438,7 @@ class DecompView(SearchMixin, NavMixin, ColumnCursor, ScrollView, can_focus=True
                 best, best_ea = i, e
         return best
 
-    # -- navigation (mirrors DisasmView) ---------------------------------- #
+    # -- navigation -------------------------------------------------------- #
     def _visible_height(self) -> int:
         return max(self.size.height, 1)
 
@@ -3256,7 +2952,6 @@ class IdaTui(App):
     #left { width: 30%; min-width: 42; max-width: 44; border-right: solid $panel; }
     #func-table { height: 1fr; }
     #func-filter { dock: top; }
-    DisasmView { width: 1fr; padding: 0 1; }
     DecompView { width: 1fr; }
     ListingView { width: 1fr; padding: 0 1; }
     #panes.split ListingView { border-right: tall $panel-lighten-2; }
@@ -3454,8 +3149,8 @@ class IdaTui(App):
             fp = FunctionsPanel(id="left")
             fp.display = False  # overlay-first: reveal the docked pane with Ctrl+B
             yield fp
-            # The unified continuous listing is the one code view; DisasmView is
-            # deprecated (kept only for DisasmModel, still used by the domain).
+            # The unified continuous listing is the one code view. (DisasmModel
+            # is still used by the domain to index a function's instructions.)
             lst = ListingView()
             yield lst
             yield DecompView()
@@ -4653,17 +4348,12 @@ class IdaTui(App):
     def on_follow_requested(self, msg: FollowRequested) -> None:
         view = msg.view
         word = view.word_under_cursor()
-        if isinstance(view, DisasmView):
-            ea = view._cursor_ea()
-            # The instruction's ordinary fall-through edge (to the next line) is
-            # an indistinguishable 'code' xref; pass it so follow can skip it and
-            # land on a call/jump's real target instead of the next instruction.
-            nxt = view.model.cached_line(view.cursor + 1) if view.model else None
-            if ea is not None:
-                self._follow_disasm(ea, word, nxt.ea if nxt else None)
-        elif isinstance(view, ListingView):
+        if isinstance(view, ListingView):
             ea = view._cursor_ea()
             if ea is not None:
+                # _next_ea() is the following item: follow uses it to skip the
+                # ordinary fall-through edge, which is an indistinguishable
+                # 'code' xref, and land on a call/jump's real target instead.
                 self._follow_disasm(ea, word, view._next_ea())
         elif isinstance(view, DecompView) and view._texts:
             self._follow_decomp(view._texts[view.cursor], word,
@@ -4674,17 +4364,11 @@ class IdaTui(App):
             return
         view = msg.view
         word = view.word_under_cursor()
-        if isinstance(view, DisasmView):
+        if isinstance(view, ListingView):
             ea = view._cursor_ea()
             if ea is not None:
                 # span = this instruction .. the next, to pre-select the dialog
                 # entry for the site we invoked xrefs from.
-                nxt = view.model.cached_line(view.cursor + 1) if view.model else None
-                self._push_busy("finding xrefs\u2026")
-                self._xrefs_disasm(ea, word, ea, nxt.ea if nxt else None)
-        elif isinstance(view, ListingView):
-            ea = view._cursor_ea()
-            if ea is not None:
                 self._push_busy("finding xrefs\u2026")
                 self._xrefs_disasm(ea, word, ea, view._next_ea())
         elif isinstance(view, DecompView) and view._texts:
@@ -5076,7 +4760,7 @@ class IdaTui(App):
     # -- comments ---------------------------------------------------------- #
     def _line_ea_for(self, view) -> int | None:  # type: ignore[no-untyped-def]
         """Address of the line under the cursor in either code view."""
-        if isinstance(view, (DisasmView, ListingView)):
+        if isinstance(view, ListingView):
             return view._cursor_ea()
         if isinstance(view, DecompView):
             return view._line_ea(view.cursor)
@@ -5455,8 +5139,7 @@ class IdaTui(App):
     # -- item structure edits (IDA c/p/u) --------------------------------- #
     def on_edit_item_requested(self, msg: EditItemRequested) -> None:
         view = msg.view
-        ea = (view._cursor_ea()
-              if isinstance(view, (DisasmView, ListingView)) else None)
+        ea = view._cursor_ea() if isinstance(view, ListingView) else None
         if ea is None:
             self._status("no address on this line to (re)define")
             return

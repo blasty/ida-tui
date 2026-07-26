@@ -25,7 +25,7 @@ import traceback
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from idatui.app import (  # noqa: E402
-    ConfirmScreen, DecompView, DisasmView, FunctionsPanel, HexView, IdaTui,
+    ConfirmScreen, DecompView, FunctionsPanel, HexView, IdaTui,
     HelpScreen, ListingView, QuitScreen, StringsPalette, StructEditor,
     SymbolPalette, XrefsScreen, _str_display, _word_occurrences,
 )
@@ -1907,7 +1907,7 @@ async def s_region_define(c: Ctx):
         c.check("listing spans the whole segment (more heads than one function)",
                 seg is not None and c.lst.total > 1, f"total={c.lst.total} seg={seg}")
 
-        # 'p' on the entry head (re)creates the function and UPGRADES to DisasmView
+        # 'p' on the entry head (re)creates the function
         c.lst.focus()
         c.lst.cursor, c.lst.cursor_x = c.lst.model.index_of_ea(addr), 0
         await c.pause(0.05)
