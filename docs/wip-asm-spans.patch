@@ -1,0 +1,247 @@
+diff --git a/idatui/app.py b/idatui/app.py
+index dd7c222..6506016 100644
+--- a/idatui/app.py
++++ b/idatui/app.py
+@@ -53,6 +53,23 @@ from .domain import DisasmModel, Func, Head, ListingModel, Program, Struct
+ _S_ADDR = Style(color="#6b7684")
+ _S_LABEL = Style(color="#7aa2f7", bold=True)
+ _S_INSN = Style(color="#c3cad3")
++#: IDA's token kinds -> the measured palette. The rule that keeps a dense
++#: disassembly readable: NEUTRALS for the machine (mnemonic brightest because you
++#: scan down that column, registers at body weight because they're most of the
++#: text), HUES only where they mean something (numbers, strings, symbols),
++#: structure recedes so brackets and commas stop competing with operands.
++_S_SPAN = {
++    "insn": Style(color="#e8ecf2"),      # 15.3:1  mnemonic / directive
++    "reg": Style(color="#c3cad3"),       # 11.0:1  registers = body weight
++    "num": Style(color="#d8a657"),       #  8.2:1  immediates, offsets
++    "str": Style(color="#9ece6a"),       #  9.9:1  string literals
++    "name": Style(color="#7aa2f7"),      #  7.2:1  symbols / xref targets
++    "seg": Style(color="#93aee0"),       #  8.1:1  segment names
++    "cmt": Style(color="#7c8b9e", italic=True),   # 5.2:1
++    "punct": Style(color="#626c7a"),     #  3.4:1  brackets, commas, +/-
++    "err": Style(color="#c9762f"),       #         IDA's own error marker
++    "text": Style(color="#c3cad3"),      # 11.0:1  anything unclassified
++}
+ _S_MNEM = Style(color="#e8ecf2")
+ _S_OPBYTES = Style(color="#5e6875")  # raw opcode bytes column
+ _S_DATA = Style(color="#d8a657")
+@@ -1077,6 +1094,24 @@ class ListingView(SearchMixin, NavMixin, ColumnCursor, ScrollView, can_focus=Tru
+             return " ".join(f"{b:02X}" for b in raw[:_OP_LIMIT]) + "\u2026"
+         return " ".join(f"{b:02X}" for b in raw)
+ 
++    @staticmethod
++    def _span_segments(h: Head, fallback: Style):
++        """Segments for a row's disassembly text.
++
++        Uses IDA's own token classification when the worker supplied it; falls
++        back to the old mnemonic/rest split so an older worker (or a row whose
++        spans didn't match the text) still renders.
++        """
++        if h.spans:
++            return [Segment(t, _S_SPAN.get(k, fallback)) for k, t in h.spans]
++        if h.kind == "code":
++            mnem, _, rest = h.text.partition(" ")
++            segs = [Segment(mnem, _S_MNEM)]
++            if rest:
++                segs.append(Segment(" " + rest, fallback))
++            return segs
++        return [Segment(h.text, fallback)]
++
+     def _op_field(self, h: Head) -> str:
+         """The padded opcode-bytes column (empty when hidden). Shared format so
+         cursor/search offsets line up."""
+@@ -1301,17 +1336,11 @@ class ListingView(SearchMixin, NavMixin, ColumnCursor, ScrollView, can_focus=Tru
+                 segs.append(Segment(_LST_INDENT, _S_MEMBER))
+             if h.name:
+                 segs.append(Segment(f"{h.name}  ", _S_LABEL))
+-            if h.kind == "code":
+-                mnem, _, rest = h.text.partition(" ")
+-                segs.append(Segment(mnem, _S_MNEM))
+-                if rest:
+-                    segs.append(Segment(" " + rest, _S_INSN))
+-            elif h.kind == "data":
+-                segs.append(Segment(h.text, _S_DATA))
+-            elif h.kind == "member":
++            if h.kind == "member":
+                 segs.append(Segment(h.text, _S_MEMBER))
+             else:
+-                segs.append(Segment(h.text, _S_UNK))
++                base = {"code": _S_INSN, "data": _S_DATA}.get(h.kind, _S_UNK)
++                segs.extend(self._span_segments(h, base))
+             strip = Strip(segs)
+         linked = idx in self._link_rows
+         if linked:
+diff --git a/idatui/domain.py b/idatui/domain.py
+index e4fbec9..606cf42 100644
+--- a/idatui/domain.py
++++ b/idatui/domain.py
+@@ -100,6 +100,10 @@ class Head:
+     text: str
+     name: str | None = None
+     raw: bytes | None = None  # opcode/item bytes (filled in for code by the model)
++    #: [(kind, text)] from IDA's own colour tags — mnem/reg/num/name/str/punct/…
++    #: None when the worker didn't provide them (older worker, or the spans
++    #: disagreed with the plain text, in which case the text wins).
++    spans: tuple[tuple[str, str], ...] | None = None
+ 
+     @property
+     def label(self) -> str | None:  # Line-compatible alias
+@@ -107,12 +111,15 @@ class Head:
+ 
+     @classmethod
+     def from_raw(cls, d: dict) -> "Head":
++        sp = d.get("spans")
+         return cls(
+             ea=_as_int(d["ea"]),
+             kind=d.get("kind", "unknown"),
+             size=int(d.get("size", 0) or 0),
+             text=d.get("text", ""),
+             name=d.get("name"),
++            spans=(tuple((str(k), str(t)) for k, t in sp)
++                   if isinstance(sp, list) and sp else None),
+         )
+ 
+ 
+diff --git a/server/patch_server.py b/server/patch_server.py
+index 4c806a7..6601a0f 100644
+--- a/server/patch_server.py
++++ b/server/patch_server.py
+@@ -305,12 +305,137 @@ def _idatui_head_row(ea):
+         "size": int(ida_bytes.get_item_size(ea)),
+         "text": text,
+     }
++    if line:
++        # Keep IDA's own token classification for syntax highlighting. Built from
++        # the SAME line as `text`, then whitespace-collapsed identically so the
++        # two never disagree about what the row says.
++        spans = _idatui_spans(line)
++        joined = "".join(t for _k, t in spans)
++        if " ".join(joined.split()) == text:
++            row["spans"] = spans
+     nm = ida_name.get_ea_name(ea)
+     if nm:
+         row["name"] = nm
+     return row
+ 
+ 
++#: IDA colour tag -> the semantic kind the TUI styles. IDA already classifies
++#: every token in a disassembly line, for every processor it supports, so there
++#: is nothing to lex: generate_disasm_line emits \x01<tag>text\x02<tag> and the
++#: tag says what the text IS. A pygments assembly lexer would be a worse guess at
++#: this and would need one dialect per architecture.
++_IDATUI_SPAN_KINDS = {
++    "insn": ("SCOLOR_INSN", "SCOLOR_KEYWORD", "SCOLOR_ASMDIR", "SCOLOR_MACRO"),
++    "reg": ("SCOLOR_REG",),
++    "num": ("SCOLOR_NUMBER", "SCOLOR_CHAR", "SCOLOR_BINPREF"),
++    "str": ("SCOLOR_STRING",),
++    # NB the real constant names: DATNAME/CODNAME, not "DNAME". Guessing here
++    # fails silently — an unmapped tag renders as plain body text, so symbols
++    # just quietly aren't blue and nothing tells you why.
++    "name": ("SCOLOR_DATNAME", "SCOLOR_CODNAME", "SCOLOR_LOCNAME",
++             "SCOLOR_IMPNAME", "SCOLOR_DEMNAME", "SCOLOR_LIBNAME",
++             "SCOLOR_CNAME", "SCOLOR_DNAME",
++             "SCOLOR_CREF", "SCOLOR_DREF", "SCOLOR_CREFTAIL", "SCOLOR_DREFTAIL"),
++    "seg": ("SCOLOR_SEGNAME",),
++    "cmt": ("SCOLOR_AUTOCMT", "SCOLOR_REGCMT", "SCOLOR_RPTCMT", "SCOLOR_VOIDOP"),
++    "punct": ("SCOLOR_SYMBOL", "SCOLOR_ALTOP", "SCOLOR_HIDNAME"),
++    "err": ("SCOLOR_ERROR",),
++}
++
++
++def _idatui_tag_map():
++    """{tag character: kind}, built once from whatever this IDA actually has."""
++    import ida_lines
++    out = {}
++    for kind, names in _IDATUI_SPAN_KINDS.items():
++        for n in names:
++            v = getattr(ida_lines, n, None)
++            if isinstance(v, str) and v:
++                out[v[0]] = kind
++            elif isinstance(v, int):
++                out[chr(v)] = kind
++    return out
++
++
++_IDATUI_TAGS = None
++
++
++def _idatui_spans(line):
++    """A tagged disasm line as [[kind, text], ...], colour tags resolved.
++
++    Unknown tags become 'text' rather than being dropped: a processor module can
++    emit a colour we don't classify, and losing the characters would corrupt the
++    line."""
++    global _IDATUI_TAGS
++    import ida_lines
++    if _IDATUI_TAGS is None:
++        _IDATUI_TAGS = _idatui_tag_map()
++    on, off, esc = "\x01", "\x02", "\x03"
++    addr_tag = chr(getattr(ida_lines, "COLOR_ADDR", 0x28))
++    addr_len = int(getattr(ida_lines, "COLOR_ADDR_SIZE", 16))
++    spans, stack, buf = [], [], []
++    i, n = 0, len(line)
++
++    def flush():
++        if buf:
++            spans.append([stack[-1] if stack else "text", "".join(buf)])
++            del buf[:]
++
++    while i < n:
++        ch = line[i]
++        if ch == on and i + 1 < n:
++            tag = line[i + 1]
++            if tag == addr_tag:
++                # An embedded target address, not display text: 16 hex digits
++                # that must not reach the screen.
++                i += 2 + addr_len
++                continue
++            flush()
++            stack.append(_IDATUI_TAGS.get(tag, "text"))
++            i += 2
++            continue
++        if ch == off and i + 1 < n:
++            flush()
++            if stack:
++                stack.pop()
++            i += 2
++            continue
++        if ch == esc and i + 1 < n:      # escaped literal
++            buf.append(line[i + 1])
++            i += 2
++            continue
++        buf.append(ch)
++        i += 1
++    flush()
++    # Collapse IDA's column padding EXACTLY as the plain text does. A run of
++    # spaces can straddle two spans, so this walks characters rather than
++    # collapsing each span on its own — otherwise the spans and `text` disagree
++    # about the line and the row silently loses its highlighting.
++    out, prev_space = [], False
++    for kind, txt in spans:
++        acc = []
++        for ch in txt:
++            if ch.isspace():
++                if prev_space:
++                    continue
++                acc.append(" ")
++                prev_space = True
++            else:
++                acc.append(ch)
++                prev_space = False
++        if acc:
++            out.append([kind, "".join(acc)])
++    while out and out[0][1] == " ":
++        out.pop(0)
++    while out and out[-1][1] == " ":
++        out.pop()
++    if out and out[0][1].startswith(" "):
++        out[0][1] = out[0][1].lstrip()
++    if out and out[-1][1].endswith(" "):
++        out[-1][1] = out[-1][1].rstrip()
++    return [[k, t] for k, t in out if t]
++
++
+ def _idatui_unknown_row(ea, size):
+     """One collapsed row for a run of ``size`` undefined bytes starting at
+     ``ea``. A single byte is rendered normally (shows its value); a longer run
