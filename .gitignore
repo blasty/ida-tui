@@ -14,3 +14,4 @@ build/
 # large analysis targets (copied in, not source)
 targets/
 bin/
+*.pristine.i64
