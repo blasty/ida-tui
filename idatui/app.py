@@ -2757,13 +2757,16 @@ class ConfirmScreen(ModalScreen):
         Binding("escape,n", "cancel", "Cancel"),
     ]
 
-    def __init__(self, message: str) -> None:
+    def __init__(self, message: str, note: str = "") -> None:
         super().__init__()
         self._message = message
+        self._note = note
 
     def compose(self) -> ComposeResult:
         with Vertical(id="confirm-box"):
-            yield Static(self._message, id="confirm-msg")
+            yield Static(self._message, id="confirm-msg", markup=False)
+            if self._note:
+                yield Static(self._note, id="confirm-note", markup=False)
             yield Static("[Enter/y] confirm      [Esc/n] cancel", id="confirm-help")
 
     def action_confirm(self) -> None:
@@ -3262,6 +3265,7 @@ class IdaTui(App):
     LoadOptionsScreen #pal-list { max-height: 12; }
     #load-base { border: none; height: 1; margin: 1 1 0 1; background: $panel; color: $text; }
     #load-help { height: 1; padding: 0 1; color: $text-muted; }
+    #confirm-note { height: auto; padding: 0 1; color: $text-muted; }
     StructEditor { align: center middle; }
     #se-box { width: 90%; height: 84%; border: thick $accent; background: $panel; }
     #se-panes { height: 1fr; }
@@ -3298,6 +3302,7 @@ class IdaTui(App):
         Binding("s", "toggle_split", "Split", show=False),
         Binding("quotation_mark,shift+f12", "strings", "Strings", show=False),
         Binding("ctrl+o", "switch_binary", "Binaries", show=False),
+        Binding("ctrl+l", "load_options", "Reload as…", show=False),
         Binding("f1", "help", "Keys", show=False),
         Binding("g", "goto", "Goto"),
         Binding("slash", "filter", "Filter", show=False),
@@ -3321,6 +3326,7 @@ class IdaTui(App):
         self._goto_after_switch = None        # cross-binary search hit to land on
         self._hops: list[str] = []            # binaries a navigation crossed FROM
         self._load_for_label = None           # project binary the dialog is for
+        self._no_functions = False            # analysis produced nothing at all
         self._pending_switch = None           # switch waiting on that answer
         self._nav_seq = 0                     # bumped per navigation; drops stale ones
         # None = teardown wasn't an explicit quit (crash/kill): save defensively.
@@ -3468,6 +3474,91 @@ class IdaTui(App):
             return False
         return needs_load_options(self._open_path)
 
+    def action_load_options(self) -> None:
+        """Ctrl+L: re-open this binary with different load options.
+
+        The database IDA already built has the old processor and base baked into
+        it and takes precedence over any switches, so re-loading means throwing
+        it away. That destroys names and comments, hence the confirmation — but
+        for the case this exists for (a blob loaded as the wrong architecture,
+        which analysed to nothing) there is nothing to lose and no other way
+        forward.
+        """
+        if not self._can_reload():
+            self._status("nothing to reload")
+            return
+        n = len(self._func_index) if self._func_index else 0
+        note = ("this image has no functions, so nothing is lost"
+                if n == 0 else
+                f"discards the database for this binary \u2014 {n} functions, "
+                f"plus any names and comments you've added")
+        self.push_screen(ConfirmScreen("Reload with different options?", note),
+                         self._on_reload_confirmed)
+
+    def _on_reload_confirmed(self, yes) -> None:  # type: ignore[no-untyped-def]
+        if not yes:
+            return
+        path, label = self._open_path, None
+        if self._project is not None and self._binary is not None:
+            ref = self._project.by_label(self._binary)
+            if ref is not None:
+                path, label = ref.source, ref.label
+        # Drop the worker first: it holds the database open, and the .i64 can't
+        # be removed (or rebuilt) underneath a live one.
+        self._release_worker()
+        self._drop_database()
+        self._reset_for_reload()
+        self._load_args = ""
+        if label is not None and self._project is not None:
+            self._project.set_load(label, processor="", base=0)
+            i = self._project._refs.index(self._project.by_label(label))
+            self._project._entries[i].pop("processor", None)
+            self._project._entries[i].pop("base", None)
+            self._project.save()
+            self._pending_switch = None
+        self._ask_load_options(path, label=label)
+
+    def _release_worker(self) -> None:
+        if self._pool is not None and self._binary is not None:
+            try:
+                self._pool.evict(self._binary, save=False)
+            except Exception:  # noqa: BLE001
+                pass
+        elif self.client is not None:
+            try:
+                self.client.close()
+            except Exception:  # noqa: BLE001
+                pass
+        self.client = None
+        self.program = None
+
+    def _drop_database(self) -> None:
+        """Remove the .i64 (and any unpacked scratch) so the next open re-reads
+        the raw image with new options."""
+        base = self._open_path
+        if self._project is not None and self._binary is not None:
+            ref = self._project.by_label(self._binary)
+            if ref is not None:
+                base = ref.staged
+        if not base:
+            return
+        for suffix in (".i64", ".id0", ".id1", ".id2", ".nam", ".til"):
+            for cand in (base + suffix, os.path.splitext(base)[0] + suffix):
+                try:
+                    os.remove(cand)
+                except OSError:
+                    pass
+
+    def _reset_for_reload(self) -> None:
+        self._no_functions = False
+        self._func_index = None
+        self._cur = None
+        self._nav = []
+        self._did_auto_land = False
+        self._pending_restore = None
+        self._split = False
+        self.query_one(DecompView).loaded_ea = None
+
     def _retry_load_options(self) -> None:
         """Re-ask after IDA refused what we told it."""
         path, label = self._open_path, None
@@ -3562,6 +3653,11 @@ class IdaTui(App):
     def _status(self, text: str) -> None:
         if self._binary:  # project mode: always say which binary you're in
             text = f"[{self._binary}] {text}"
+        # An image with no functions at all is nearly always a blob described
+        # wrongly, and that stays true as you scroll around — so it belongs in
+        # the status bar, not in a one-off message the next write clobbers.
+        if self._no_functions:
+            text += "   \u2014 no functions: wrong processor/base? Ctrl+L to reload"
         try:
             self.query_one("#status", Static).update(text)
         except Exception:  # noqa: BLE001 -- status bar transiently unavailable
@@ -3837,8 +3933,42 @@ class IdaTui(App):
         fn = self._entry_func()
         if fn is not None:
             self._open_function(fn.addr, fn.name)
-        else:
+        elif len(self._func_index):
             self.action_symbols()
+        else:
+            self._land_without_functions()
+
+    def _land_without_functions(self) -> None:
+        """Analysis found nothing. Show the bytes and say so.
+
+        Falling through to the symbol picker here left two empty panes and
+        "functions still loading…" — which is a lie, loading had finished. There
+        is always something to look at: the segments exist even when IDA
+        recognised no code in them, so open the listing at the start of the image.
+
+        Zero functions is also the signal that a blob was described wrongly. It's
+        exactly what a good image loaded as the wrong processor looks like, so
+        the status says so rather than leaving you to guess.
+        """
+        start = None
+        try:
+            regions = self.program.file_regions()
+            if regions:
+                start = regions[0][0]
+        except Exception:  # noqa: BLE001
+            pass
+        self._no_functions = self._can_reload()
+        if start is None:
+            self._status("no functions and no segments \u2014 nothing to show")
+            return
+        self._open_at(start, self.program.section_of(start) or "image",
+                      cursor=0, push=True, is_region=True)
+
+    def _can_reload(self) -> bool:
+        """Whether we're able to re-open this binary with different options."""
+        if self._project is not None and self._binary is not None:
+            return True
+        return bool(self._open_path)
 
     def _entry_func(self) -> Func | None:
         """The best startup landing function (exact-name match against

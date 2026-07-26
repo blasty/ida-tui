@@ -297,6 +297,25 @@ conversion happens in `BinaryRef.load_args`, and a base that isn't 16-byte
 aligned is rejected rather than silently landing somewhere else. `ida_args`
 passes anything else through untouched.
 
+### When analysis finds nothing
+
+Zero functions is what a raw image described wrongly looks like — right file,
+wrong architecture, and IDA has no complaint to make about it. The app used to
+fall through to the symbol picker, which had nothing to show, so you got empty
+panes and a status reading "functions still loading…" long after loading had
+finished.
+
+Now it opens the listing at the start of the image (the bytes are there even when
+no code was recognised) and the status bar carries the diagnosis for as long as
+it's true:
+
+    seg000 @ 0x0  [listing]  — no functions: wrong processor/base? Ctrl+L to reload
+
+`Ctrl+L` re-asks. The database IDA already built has the old processor and base
+baked into it and wins over any switches, so reloading means deleting it — hence
+the confirmation, which tells you what you'd lose (and, in this case, that you'd
+lose nothing).
+
 Two things worth knowing:
 
 * The options apply to the **first** open only. Afterwards the `.i64` records how
