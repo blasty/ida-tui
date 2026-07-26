@@ -17,7 +17,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from textual.widgets import Static  # noqa: E402
 
-from idatui.app import IdaTui, ListingView  # noqa: E402
+from idatui.app import DecompView, IdaTui, ListingView  # noqa: E402
 
 PASS = FAIL = 0
 BIN = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
@@ -114,6 +114,67 @@ async def run() -> int:
         await pilot.pause(0.5)
         status = str(app.query_one("#status", Static).render())
         check("`t` toggles back to ARM", "ARM @" in status, status[:80])
+
+    # -- and the reason a carved function wouldn't decompile ---------------- #
+    # Bare 'arm' gives a 64-BIT database. Thumb doesn't exist there, and
+    # Hex-Rays refuses a 32-bit function outright ("only 64-bit functions can be
+    # decompiled in the current database") — so `t` produces correct-looking
+    # disassembly that F5 can never turn into pseudocode. The database's bitness
+    # is fixed at load and cannot be corrected afterwards, so the only honest
+    # thing is to say so.
+    for ext in (".i64", ".id0", ".id1", ".id2", ".nam", ".til"):
+        try:
+            os.remove(BIN + ext)
+        except OSError:
+            pass
+    app = IdaTui(open_path=BIN, keepalive=False, load_args="-parm")   # 64-bit
+    async with app.run_test(size=(140, 44)) as pilot:
+        await wait(lambda: app._func_index is not None
+                   and app._func_index.complete, pilot)
+        await wait(lambda: app._cur is not None, pilot, 60)
+        lst = app.query_one(ListingView)
+        lst.focus()
+        lst.cursor = lst.model.index_of_ea(0)
+        lst._scroll_cursor_into_view()
+        await pilot.pause(0.3)
+        m = lst.model
+        await pilot.press("t")
+        await wait(lambda: lst.model is not m and lst.model is not None, pilot, 60)
+        await pilot.pause(0.5)
+        status = str(app.query_one("#status", Static).render())
+        check("a 64-bit database warns that Hex-Rays won't decompile",
+              "64-bit" in status and "decompile" in status, status[:120])
+        check("and names the fix", "ARMv7-A" in status, status[:120])
+
+    # -- the whole point: a 32-bit database decompiles ---------------------- #
+    for ext in (".i64", ".id0", ".id1", ".id2", ".nam", ".til"):
+        try:
+            os.remove(BIN + ext)
+        except OSError:
+            pass
+    app = IdaTui(open_path=BIN, keepalive=False, load_args="-parm:ARMv7-A")
+    async with app.run_test(size=(140, 44)) as pilot:
+        await wait(lambda: app._func_index is not None
+                   and app._func_index.complete, pilot)
+        # A 32-bit ARM database also lets auto-analysis do its job on Thumb code,
+        # which is why this one lands in the symbol picker rather than nowhere.
+        check("a 32-bit ARM database finds functions by itself",
+              len(app._func_index) > 5, f"n={len(app._func_index)}")
+        await pilot.press("escape")
+        await pilot.pause(0.5)
+        f = app._func_index.all_loaded()[0]
+        app._goto_ea(f.addr, push=True)
+        await wait(lambda: app._cur is not None
+                   and app.query_one(ListingView).model is not None, pilot, 60)
+        app.query_one(ListingView).focus()
+        await pilot.press("tab")
+        dec = app.query_one(DecompView)
+        got = await wait(lambda: dec.display and dec._texts, pilot, 90)
+        check("Tab decompiles a Thumb function", got and len(dec._texts) > 3,
+              f"lines={len(dec._texts or [])}")
+        check("and it reads like C",
+              any("(" in t and ")" in t for t in (dec._texts or [])[:3]),
+              f"{(dec._texts or [])[:3]}")
 
     print(f"\n{PASS} passed, {FAIL} failed")
     return 1 if FAIL else 0

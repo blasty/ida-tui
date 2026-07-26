@@ -77,8 +77,21 @@ def main() -> int:
           load_args("arm", 0, "-T binary") == "-parm -T binary")
 
     check("the processor list leads with the common targets",
-          [n for n, _ in PROCESSORS[:3]] == ["arm", "armb", "metapc"],
+          [n for n, _ in PROCESSORS[:2]] == ["arm", "arm:ARMv7-A"],
           f"{[n for n, _ in PROCESSORS[:3]]}")
+
+    # 32-bit ARM has to be offered SEPARATELY from bare 'arm', which gives a
+    # 64-bit database. That isn't cosmetic: Hex-Rays refuses a 32-bit function
+    # in a 64-bit database, and Thumb doesn't exist in AArch64 at all, so a
+    # firmware image loaded as plain 'arm' can never be decompiled — and the
+    # database's bitness cannot be corrected after load.
+    check("a 32-bit ARM variant is offered",
+          any(n.startswith("arm:ARMv") for n, _ in PROCESSORS),
+          f"{[n for n, _ in PROCESSORS if n.startswith('arm')]}")
+    check("and the labels say which is 32- vs 64-bit",
+          all(("32-bit" in d or "64-bit" in d)
+              for n, d in PROCESSORS if n == "arm" or n.startswith("arm:")),
+          f"{[(n, d) for n, d in PROCESSORS if n.startswith('arm')]}")
 
     # Every offered name must have been checked against a real IDA, because a
     # wrong one is REJECTED (rc=4) with nothing useful said — handing the user a
@@ -89,6 +102,9 @@ def main() -> int:
         "arm", "armb", "metapc", "mipsl", "mipsb", "ppc", "ppcl", "sh4", "68k",
         "riscv", "tricore", "xtensa", "avr", "z80", "tms320c6", "m32r", "arc",
         "h8300", "sparcb", "sparcl", "s390",
+        # variants: tools/verify_procs.py checks these report the base module
+        # AND change the database bitness, which is the reason they exist
+        "arm:ARMv7-A", "arm:ARMv7-M", "arm:ARMv6-M", "arm:ARMv5TE",
     }
     offered = {n for n, _ in PROCESSORS}
     check("every offered processor name is IDA-verified",

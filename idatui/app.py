@@ -5191,13 +5191,22 @@ class IdaTui(App):
                 verb = f"{mode} @ {ea:#x}"
                 if r.get("forced_32bit"):
                     verb += " (segment set to 32-bit; Thumb needs ARM32)"
+                if r.get("db_64bit"):
+                    # Disassembly will look right and F5 will never work.
+                    verb += ("  \u26a0 this database is 64-bit, so Hex-Rays "
+                             "won't decompile it \u2014 Ctrl+L and pick "
+                             "arm:ARMv7-A")
                 verb += (f" \u2014 {n} instruction{'s' if n != 1 else ''}"
                          if n else " \u2014 still doesn't decode")
                 # falls through to the shared reload: same cache bump, same
                 # anchor restore, same flash. That is the whole point of having
                 # one path.
             elif kind == "func":
-                self.program.define_func(ea)
+                r = self.program.define_func(ea)
+                if r.get("start") and r.get("end"):
+                    verb = (f"created function {r['start']}\u2013{r['end']}"
+                            + (" (end worked out from the code)"
+                               if r.get("how") == "explicit-end" else ""))
             elif kind == "string":
                 s = self.program.make_string(ea)
                 verb = f"made string ({s[:24]!r})" if s else verb

@@ -1397,12 +1397,24 @@ class Program:
                                f"@ {ea:#x}: {(r or {}).get('error', 'failed')}")
         return r
 
-    def define_func(self, ea: int) -> None:
-        """Create a function starting at ``ea`` (IDA's 'p')."""
-        res = self._first_result(
-            self.client.call("define_func", items=[{"addr": hex(ea)}]))
-        if res.get("error"):
-            raise IDAToolError("define_func", f"@ {ea:#x}: {res['error']}")
+    def define_func(self, ea: int) -> dict:
+        """Create a function starting at ``ea`` (IDA's 'p').
+
+        Prefers the injected tool, which works out the end when IDA can't;
+        falls back to the plain one for an older worker.
+        """
+        try:
+            r = self.client.call("define_func_run", addr=hex(ea))
+        except IDAToolError:
+            res = self._first_result(
+                self.client.call("define_func", items=[{"addr": hex(ea)}]))
+            if res.get("error"):
+                raise IDAToolError("define_func", f"@ {ea:#x}: {res['error']}")
+            return {"ok": True, "how": "legacy"}
+        if not isinstance(r, dict) or not r.get("ok"):
+            raise IDAToolError("define_func",
+                               f"@ {ea:#x}: {(r or {}).get('error', 'failed')}")
+        return r
 
     def undefine(self, ea: int, size: int | None = None) -> None:
         """Undefine the item at ``ea`` back to raw bytes (IDA's 'u')."""

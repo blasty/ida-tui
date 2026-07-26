@@ -1002,6 +1002,8 @@ def set_thumb(
     if not seg:
         return {"addr": hex(ea), "error": "no segment"}
 
+    import ida_ida
+    db64 = ida_ida.inf_get_app_bitness() == 64
     cur = ida_segregs.get_sreg(ea, treg)
     cur = 0 if cur in (None, 0xFFFFFFFF, -1) else int(cur)
     want = {"on": 1, "off": 0}.get(str(mode).lower(), 0 if cur else 1)
@@ -1023,7 +1025,64 @@ def set_thumb(
     now = ida_segregs.get_sreg(ea, treg)
     return {"addr": hex(ea), "thumb": bool(now), "was": bool(cur), "ok": ok,
             "bitness": ida_segment.getseg(ea).bitness,
-            "forced_32bit": changed_bits}
+            "forced_32bit": changed_bits,
+            # The DATABASE's bitness is fixed at load and can't be corrected
+            # here (setting it post-hoc makes the decompiler INTERR). In a
+            # 64-bit database a 32-bit function disassembles but Hex-Rays
+            # refuses it outright, so say so instead of leaving the user to
+            # discover that F5 does nothing.
+            "db_64bit": bool(db64 and want)}
+
+@tool
+@idasync
+def define_func_run(
+    addr: Annotated[str, "Entry point of the function to create"],
+) -> dict:
+    """Create a function at ``addr``, working out its end if IDA can't.
+
+    ida_funcs.add_func(ea) asks IDA to find the end itself, and on hand-carved
+    code it often can't — a run that ends in a tail call, or whose last
+    instruction isn't recognised as a return, simply fails with no reason given.
+    You then have a disassembled routine that refuses to become a function, and
+    F5 has nothing to work with.
+
+    So: try IDA's way, and if that fails, use the end of the contiguous
+    instruction run starting at ``addr``."""
+    import ida_bytes
+    import ida_funcs
+    import ida_segment
+    import idaapi
+
+    try:
+        ea = parse_address(addr)
+    except Exception as e:
+        return {"addr": str(addr), "error": str(e), "ok": False}
+    fn = idaapi.get_func(ea)
+    if fn is not None and fn.start_ea == ea:
+        return {"addr": hex(ea), "ok": True, "start": hex(fn.start_ea),
+                "end": hex(fn.end_ea), "how": "existed"}
+    if ida_funcs.add_func(ea):
+        f = idaapi.get_func(ea)
+        return {"addr": hex(ea), "ok": True, "start": hex(f.start_ea),
+                "end": hex(f.end_ea), "how": "auto"}
+
+    seg = ida_segment.getseg(ea)
+    hi = seg.end_ea if seg else ea
+    end = ea
+    while end < hi and ida_bytes.is_code(ida_bytes.get_flags(end)):
+        nxt = ida_bytes.get_item_end(end)
+        if nxt <= end:
+            break
+        end = nxt
+    if end <= ea:
+        return {"addr": hex(ea), "ok": False,
+                "error": "no code here to make a function from"}
+    if not ida_funcs.add_func(ea, end):
+        return {"addr": hex(ea), "ok": False,
+                "error": f"IDA refused a function at {ea:#x}..{end:#x}"}
+    f = idaapi.get_func(ea)
+    return {"addr": hex(ea), "ok": True, "start": hex(f.start_ea),
+            "end": hex(f.end_ea), "how": "explicit-end"}
 '''
 
 SNIPPET = f"{BEGIN}\n{BODY.strip()}\n{END}\n"

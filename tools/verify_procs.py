@@ -48,9 +48,18 @@ def main() -> int:
         if rc == 0:
             ida_auto.auto_wait()
             got = ida_ida.inf_get_procname()
+        # "arm:ARMv7-A" selects a VARIANT: inf_get_procname() reports the base
+        # module ("ARM"), so compare that and check the bitness separately —
+        # the variant is only worth offering if it actually changes something.
+        base = name.split(":", 1)[0]
+        bits = ""
+        if rc == 0:
+            import ida_ida
+            bits = f" bitness={ida_ida.inf_get_app_bitness()}"
+        ok = rc == 0 and got.lower() == base.lower()
+        print(f"  {'ok  ' if ok else 'BAD '} {name:<14} rc={rc} -> {got!r}{bits}   {desc}")
+        if rc == 0:
             idapro.close_database(save=False)
-        ok = rc == 0 and got.lower() == name.lower()
-        print(f"  {'ok  ' if ok else 'BAD '} {name:<12} rc={rc} -> {got!r}   {desc}")
         if not ok:
             bad.append((name, rc, got))
 

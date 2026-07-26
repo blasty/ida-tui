@@ -92,9 +92,18 @@ def needs_load_options(path: str) -> bool:
 #: reach for first — arm64, aarch64, mips, m68k — are all invalid. Re-run the
 #: script before adding to this list.
 PROCESSORS: tuple[tuple[str, str], ...] = (
-    # 'arm' covers AArch64 too; arm64/aarch64 are NOT valid -p names, so they
-    # live in the label where the filter can still find them.
-    ("arm", "ARM / AArch64 / arm64 — little-endian"),
+    # Bare 'arm' gives a 64-BIT database in IDA 9 (AArch64). That matters far
+    # more than it looks: Hex-Rays refuses a 32-bit function in a 64-bit database
+    # ("only 64-bit functions can be decompiled in the current database"), and
+    # Thumb doesn't exist in AArch64 at all — so a 32-bit ARM image loaded as
+    # plain 'arm' disassembles wrongly and can never be decompiled. The database
+    # bitness is fixed at load; it cannot be corrected afterwards (setting it
+    # post-hoc makes the decompiler INTERR). Pick the right one here.
+    ("arm", "ARM64 / AArch64 / arm64 — 64-bit, little-endian"),
+    ("arm:ARMv7-A", "ARM 32-bit (ARMv7-A) — Thumb capable, most firmware"),
+    ("arm:ARMv7-M", "ARM 32-bit (ARMv7-M) — Cortex-M, Thumb only"),
+    ("arm:ARMv6-M", "ARM 32-bit (ARMv6-M) — Cortex-M0/M0+"),
+    ("arm:ARMv5TE", "ARM 32-bit (ARMv5TE) — older SoCs"),
     ("armb", "ARM — big-endian"),
     ("metapc", "x86 / x86-64"),
     ("mipsl", "MIPS — little-endian"),

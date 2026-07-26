@@ -317,6 +317,24 @@ ARM32.
 `t` again toggles back — the mode is a guess, and guesses get revised. Both
 states are saved in the `.i64`.
 
+**Pick a 32-bit processor at load, or none of this decompiles.** Bare `arm`
+gives a 64-BIT database (AArch64), and that is decided at load time and cannot be
+changed afterwards — setting the bitness post-hoc makes the decompiler INTERR.
+In a 64-bit database:
+
+* Thumb doesn't exist, so `t` sets a segment flag that means nothing; and
+* Hex-Rays refuses a 32-bit function outright — *"only 64-bit functions can be
+  decompiled in the current database"* — so the disassembly looks right and F5
+  silently produces nothing.
+
+So the list offers `arm:ARMv7-A` (most firmware), `arm:ARMv7-M` / `arm:ARMv6-M`
+(Cortex-M, Thumb only) and `arm:ARMv5TE` alongside 64-bit `arm`. `t` warns when
+it notices the database is 64-bit and points at `Ctrl+L`.
+
+Worth knowing: a correctly-chosen 32-bit ARM database also lets IDA's own
+auto-analysis find Thumb functions — `experiments/fibonacci.bin` yields 54
+functions on load with `arm:ARMv7-A` and none with `arm`.
+
 ### When analysis finds nothing
 
 Zero functions is what a raw image described wrongly looks like — right file,
