@@ -149,6 +149,8 @@ class ViewAnchor:
     top_ea: int | None = None      # first visible address
     cursor_x: int = 0
     flash: str | None = None
+    #: The edit changed which functions exist, so the index must be rebuilt.
+    refresh_functions: bool = False
 
 
 @dataclass
@@ -3253,8 +3255,9 @@ class IdaTui(App):
         n = len(self._func_index) if self._func_index else 0
         note = ("this image has no functions, so nothing is lost"
                 if n == 0 else
-                f"discards the database for this binary \u2014 {n} functions, "
-                f"plus any names and comments you've added")
+                f"discards the database for this binary \u2014 {n} "
+                f"function{'s' if n != 1 else ''}, plus any names and comments "
+                f"you've added")
         self.push_screen(ConfirmScreen("Reload with different options?", note),
                          self._on_reload_confirmed)
 
@@ -3419,6 +3422,11 @@ class IdaTui(App):
         # An image with no functions at all is nearly always a blob described
         # wrongly, and that stays true as you scroll around — so it belongs in
         # the status bar, not in a one-off message the next write clobbers.
+        # It stops being true the moment a function exists, though: latching it
+        # meant the warning survived defining one with `p` and kept telling you
+        # the load was wrong when it no longer was.
+        if self._no_functions and self._func_index is not None and len(self._func_index):
+            self._no_functions = False
         if self._no_functions:
             text += "   \u2014 no functions: wrong processor/base? Ctrl+L to reload"
         try:
@@ -5202,6 +5210,7 @@ class IdaTui(App):
                 # anchor restore, same flash. That is the whole point of having
                 # one path.
             elif kind == "func":
+                anchor.refresh_functions = True
                 r = self.program.define_func(ea)
                 if r.get("start") and r.get("end"):
                     verb = (f"created function {r['start']}\u2013{r['end']}"
@@ -5211,6 +5220,8 @@ class IdaTui(App):
                 s = self.program.make_string(ea)
                 verb = f"made string ({s[:24]!r})" if s else verb
             else:
+                # Undefining can destroy a function as easily as `p` creates one.
+                anchor.refresh_functions = True
                 self.program.undefine(ea)
         except Exception as e:  # noqa: BLE001 -- surface soft/hard tool errors
             self.app.call_from_thread(self._status, f"{kind}: {e}")
@@ -5249,6 +5260,34 @@ class IdaTui(App):
         self._flash = anchor.flash
         if anchor.flash:
             self._status(anchor.flash)
+        if anchor.refresh_functions:
+            # Creating (or destroying) a function changes the index that the
+            # names pane, Ctrl+N and the "no functions" hint all read. Without
+            # this, `p` gave you a function the rest of the app couldn't see.
+            self._reindex_functions()
+
+    @work(thread=True, exclusive=True, group="load-funcs")
+    def _reindex_functions(self) -> None:
+        """Rebuild the function index in place after an edit changed it.
+
+        Deliberately not _load_functions(): that one is the BOOT path — it
+        clears the table, streams progress and then auto-lands, which would
+        yank the view away from the function you just made.
+        """
+        if self.program is None:
+            return
+        idx = self.program.functions()
+        idx.load_all()
+        self._func_index = idx
+        self.app.call_from_thread(self._after_reindex)
+
+    def _after_reindex(self) -> None:
+        idx = self._func_index
+        if idx is None:
+            return
+        if len(idx):
+            self._no_functions = False
+        self._apply_filter(self._filter_term)   # repopulate the names pane
 
     @work(thread=True, exclusive=True, group="save")
     def _save(self) -> None:

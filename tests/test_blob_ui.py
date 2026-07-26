@@ -214,14 +214,43 @@ async def run() -> int:
                   lst._cursor_ea() == cur_before,
                   f"{cur_before:#x} -> {lst._cursor_ea():#x}")
 
+            # -- `p` after carving: the rest of the app must notice ------ #
+            # The "no functions" hint was latched at load and only cleared on a
+            # reload, so it kept telling you the processor/base were wrong long
+            # after you'd defined a function. The function index was never
+            # rebuilt either, which meant Ctrl+N couldn't find what `p` made.
+            check("no functions yet, and the hint says so",
+                  len(app._func_index) == 0
+                  and "no functions" in str(app.query_one("#status", Static).render()),
+                  f"n={len(app._func_index)}")
+            lst.cursor = lst.model.index_of_ea(target)
+            lst._scroll_cursor_into_view()
+            await pilot.pause(0.3)
+            mp = lst.model
+            await pilot.press("p")
+            await wait(lambda: lst.model is not mp and lst.model is not None,
+                       pilot, 40)
+            await wait(lambda: app._func_index is not None
+                       and len(app._func_index) > 0, pilot, 60)
+            check("`p` creates a function the index can see",
+                  len(app._func_index) == 1, f"n={len(app._func_index)}")
+            status = str(app.query_one("#status", Static).render())
+            check("and the stale 'no functions' hint is gone",
+                  "no functions" not in status, status[:90])
+            check("the status names the function it made",
+                  "created function" in status, status[:90])
+
             await pilot.press("ctrl+l")
             opened = await wait(lambda: isinstance(app.screen, ConfirmScreen), pilot, 20)
             check("Ctrl+L offers to reload with different options", opened,
                   f"screen={type(app.screen).__name__}")
             if opened:
                 note = str(app.screen.query_one("#confirm-note", Static).render())
-                check("and says nothing is lost when there's nothing to lose",
-                      "nothing is lost" in note, note[:70])
+                # We just made a function, so it must NOT claim nothing is lost —
+                # reloading throws the database away and that is now a real cost.
+                check("the confirmation counts what would be lost",
+                      "1 function," in note and "nothing is lost" not in note,
+                      note[:80])
                 await pilot.press("escape")
                 await pilot.pause(0.3)
                 check("declining leaves the binary open",
