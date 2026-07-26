@@ -335,6 +335,20 @@ Worth knowing: a correctly-chosen 32-bit ARM database also lets IDA's own
 auto-analysis find Thumb functions — `experiments/fibonacci.bin` yields 54
 functions on load with `arm:ARMv7-A` and none with `arm`.
 
+### Thumb entry points from a vector table
+
+`Shift+T` scans forward from the cursor for **odd pointers** — an ARM function
+pointer carries the mode in bit 0, so a Cortex-M vector table is a list of Thumb
+entry points. IDA won't follow them on a headerless image, because nothing tells
+it those words are pointers at all:
+
+    3 Thumb entries found, 3 disassembled
+
+A word only counts when it is odd, lands inside a loaded segment, and its target
+is executable and not already data. The even words in a vector table (the initial
+stack pointer) fail the first test, which is the point — marking a data word as
+code corrupts the listing, so a false positive costs more than a miss.
+
 ### When analysis finds nothing
 
 Zero functions is what a raw image described wrongly looks like — right file,

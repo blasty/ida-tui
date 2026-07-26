@@ -741,6 +741,7 @@ class ListingView(SearchMixin, NavMixin, ColumnCursor, ScrollView, can_focus=Tru
         Binding("p", "define_func", "Func", show=False),
         Binding("u", "undefine", "Undef", show=False),
         Binding("t", "toggle_thumb", "ARM/Thumb", show=False),
+        Binding("T", "thumb_scan", "Scan vectors", show=False),
         *SearchMixin.SEARCH_BINDINGS,
         *NavMixin.NAV_BINDINGS,
         *ColumnCursor.COL_BINDINGS,
@@ -1131,6 +1132,9 @@ class ListingView(SearchMixin, NavMixin, ColumnCursor, ScrollView, can_focus=Tru
 
     def action_toggle_thumb(self) -> None:
         self.post_message(EditItemRequested(self, "thumb"))
+
+    def action_thumb_scan(self) -> None:
+        self.post_message(EditItemRequested(self, "thumbscan"))
 
     def action_make_data(self) -> None:
         self.post_message(MakeDataRequested(self))
@@ -3092,6 +3096,7 @@ class IdaTui(App):
         self._load_for_label = None           # project binary the dialog is for
         self._no_functions = False            # analysis produced nothing at all
         self._flash: str | None = None        # message a pending reload must keep
+        self._flash_until = 0.0               # ...until this monotonic time
         self._pending_switch = None           # switch waiting on that answer
         self._nav_seq = 0                     # bumped per navigation; drops stale ones
         # None = teardown wasn't an explicit quit (crash/kill): save defensively.
@@ -3416,7 +3421,23 @@ class IdaTui(App):
             await self._rpc.stop()
 
     # -- status helper ----------------------------------------------------- #
-    def _status(self, text: str) -> None:
+    def _status(self, text: str, priority: bool = False) -> None:
+        """Write the status bar. ``priority`` marks the RESULT of something the
+        user did.
+
+        An action's result is written, and then the reload it triggered writes
+        its own idle status on top — cursor moved, filter re-applied, functions
+        re-counted. I patched that at five separate call sites before admitting
+        it's one problem: routine chatter must not outrank an answer. A priority
+        message holds the bar briefly and is cleared by the next keypress, i.e.
+        when the user has read it and moved on.
+        """
+        import time as _time
+        if priority:
+            self._flash = text
+            self._flash_until = _time.monotonic() + 8.0
+        elif self._flash and _time.monotonic() < self._flash_until:
+            text = self._flash
         if self._binary:  # project mode: always say which binary you're in
             text = f"[{self._binary}] {text}"
         # An image with no functions at all is nearly always a blob described
@@ -5163,7 +5184,7 @@ class IdaTui(App):
         assert self.program is not None
         verb = {"code": "defined code", "func": "created function",
                 "undef": "undefined", "string": "made string",
-                "thumb": "switched decoding"}[kind]
+                "thumb": "switched decoding", "thumbscan": "scanned"}[kind]
         try:
             if kind == "code":
                 # Keep going until something stops it: one instruction is rarely
@@ -5188,6 +5209,19 @@ class IdaTui(App):
                           "limit": "instruction limit"}.get(why, why)
                 verb = (f"defined {n} instruction{'s' if n != 1 else ''} "
                         f"({ea:#x}\u2013{end:#x}) \u2014 {reason}")
+            elif kind == "thumbscan":
+                # A vector table is a list of Thumb entry points that IDA won't
+                # follow on a headerless image, because nothing tells it those
+                # words are pointers. Scan from the cursor.
+                anchor.refresh_functions = True
+                r = self.program.thumb_scan(ea, ea + 0x400)
+                n, applied = int(r.get("n", 0)), int(r.get("applied", 0))
+                if not n:
+                    verb = (f"no Thumb entry pointers in {ea:#x}\u2013{ea+0x400:#x}"
+                            " (odd words pointing into the image)")
+                else:
+                    verb = (f"{n} Thumb entr{'y' if n == 1 else 'ies'} found, "
+                            f"{applied} disassembled")
             elif kind == "thumb":
                 # Switch the mode, then disassemble in it: flipping T and
                 # leaving the bytes undefined shows nothing, and the reason you
@@ -5257,9 +5291,8 @@ class IdaTui(App):
         written and lost.
         """
         self._dirty = True
-        self._flash = anchor.flash
         if anchor.flash:
-            self._status(anchor.flash)   # and again from the reload, via _flash
+            self._status(anchor.flash, priority=True)
         if anchor.refresh_functions:
             # Creating (or destroying) a function changes the index that the
             # names pane, Ctrl+N and the "no functions" hint all read. Without
@@ -5936,13 +5969,6 @@ class IdaTui(App):
         self._goto_ea(msg.va, push=True)
 
     def _status_for_cur(self, mode: str) -> None:
-        if self._flash:
-            # Shown, NOT consumed. A reload emits several of these (prime, then
-            # cursor), so consuming on the first one meant the second erased the
-            # message the user was meant to read. It clears on the next keypress
-            # instead — i.e. when they've moved on.
-            self._status(self._flash)
-            return
         if self._cur is not None:
             self._status(f"{self._cur.name}  @ {self._cur.ea:#x}   [{mode}]")
 
@@ -5981,15 +6007,12 @@ class IdaTui(App):
                 # status afterwards — which is precisely how "F5 does nothing"
                 # looked like nothing at all.
                 msg = f"{name}: cannot decompile{detail}"
-                self._flash = msg
+                self._status(msg, priority=True)
                 self._open_entry(ret, push=False)
-                self._status(msg)
                 return
             self._active = "disasm"
-            msg = f"{name}: cannot decompile{detail}"
-            self._flash = msg
+            self._status(f"{name}: cannot decompile{detail}", priority=True)
             self._show_active()
-            self._status(msg)
             return
         if self._active == "decomp":
             view.focus()  # loading cover had blurred it; restore focus
@@ -6196,12 +6219,6 @@ class IdaTui(App):
             return
         ea = msg.ea
         if ea is not None:
-            # A pending flash (the result of an edit that caused this reload)
-            # outranks the idle hint: the cursor lands here as part of the
-            # reload, so this handler would otherwise always have the last word.
-            if self._flash:
-                self._status(self._flash)
-                return
             sec = self.program.section_of(ea) if self.program else None
             self._status(f"{sec or '?'}  @ {ea:#x}   [listing]   "
                          "(c code · p func · u undefine · Enter follow)")

@@ -202,6 +202,53 @@ async def run() -> int:
               any("(" in t and ")" in t for t in (dec._texts or [])[:3]),
               f"{(dec._texts or [])[:3]}")
 
+    # -- Thumb entry points from a vector table ----------------------------- #
+    # An ARM function pointer carries the mode in bit 0: odd means Thumb. A
+    # Cortex-M vector table is therefore a list of Thumb entry points, and IDA
+    # won't follow them on a headerless image because nothing says those words
+    # are pointers at all.
+    vec = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                       "experiments", "cortexm.bin")
+    if not os.path.isfile(vec):
+        check("the cortexm fixture exists", False, vec)
+    else:
+        for ext in (".i64", ".id0", ".id1", ".id2", ".nam", ".til"):
+            try:
+                os.remove(vec + ext)
+            except OSError:
+                pass
+        app = IdaTui(open_path=vec, keepalive=False, load_args="-parm:ARMv7-M")
+        async with app.run_test(size=(140, 44)) as pilot:
+            await wait(lambda: app._func_index is not None
+                       and app._func_index.complete, pilot)
+            check("a bare vector table gives IDA nothing to go on",
+                  len(app._func_index) == 0, f"n={len(app._func_index)}")
+            if type(app.screen).__name__ != "Screen":
+                await pilot.press("escape")
+                await pilot.pause(0.5)
+            app._goto_ea(0, push=True)
+            lst = app.query_one(ListingView)
+            await wait(lambda: lst.model is not None, pilot, 60)
+            lst.focus()
+            lst.cursor = lst.model.index_of_ea(0)
+            lst._scroll_cursor_into_view()
+            await pilot.pause(0.3)
+            await pilot.press("T")
+            await wait(lambda: app._func_index is not None
+                       and len(app._func_index) >= 3, pilot, 90)
+            names = sorted(f.name for f in app._func_index.all_loaded())
+            check("scanning the table finds the Thumb handlers",
+                  names == ["sub_200", "sub_240", "sub_280"], f"{names}")
+            # The table also holds an even word (the initial stack pointer), an
+            # even in-range word and an odd word pointing outside the image. All
+            # three must be ignored — marking a data word as code corrupts the
+            # listing, so the cost of a false positive is high.
+            check("and ignores the words that aren't Thumb pointers",
+                  len(app._func_index) == 3, f"n={len(app._func_index)}")
+            status = str(app.query_one("#status", Static).render())
+            check("the result survives the reload AND the reindex",
+                  "3 Thumb entries" in status, status[:90])
+
     print(f"\n{PASS} passed, {FAIL} failed")
     return 1 if FAIL else 0
 

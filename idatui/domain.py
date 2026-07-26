@@ -1393,6 +1393,15 @@ class Program:
             return "this database is 64-bit \u2014 Ctrl+L, pick arm:ARMv7-A"
         return reason
 
+    def thumb_scan(self, start: int, end: int, apply: bool = True) -> dict:
+        """Find Thumb entry points from odd pointers in ``[start, end)``."""
+        r = self.client.call("thumb_scan", start=hex(start), end=hex(end),
+                             apply=bool(apply))
+        if not isinstance(r, dict) or r.get("error"):
+            raise IDAToolError("thumb_scan",
+                               f"@ {start:#x}: {(r or {}).get('error', 'failed')}")
+        return r
+
     def set_thumb(self, ea: int, mode: str = "toggle") -> dict:
         """Switch ARM/Thumb decoding at ``ea``. Returns the resulting state."""
         r = self.client.call("set_thumb", addr=hex(ea), mode=mode)

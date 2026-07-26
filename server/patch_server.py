@@ -1033,6 +1033,31 @@ def set_thumb(
             # discover that F5 does nothing.
             "db_64bit": bool(db64 and want)}
 
+def _idatui_add_func(ea):
+    """add_func at ``ea``, falling back to an explicit end.
+
+    ida_funcs.add_func(ea) asks IDA to find the end and on carved or
+    freshly-marked code it often can't, failing with no reason given."""
+    import ida_bytes
+    import ida_funcs
+    import ida_segment
+    import idaapi
+
+    if idaapi.get_func(ea) is not None:
+        return True
+    if ida_funcs.add_func(ea):
+        return True
+    seg = ida_segment.getseg(ea)
+    hi = seg.end_ea if seg else ea
+    end = ea
+    while end < hi and ida_bytes.is_code(ida_bytes.get_flags(end)):
+        nxt = ida_bytes.get_item_end(end)
+        if nxt <= end:
+            break
+        end = nxt
+    return bool(end > ea and ida_funcs.add_func(ea, end))
+
+
 @tool
 @idasync
 def define_func_run(
@@ -1061,28 +1086,15 @@ def define_func_run(
     if fn is not None and fn.start_ea == ea:
         return {"addr": hex(ea), "ok": True, "start": hex(fn.start_ea),
                 "end": hex(fn.end_ea), "how": "existed"}
-    if ida_funcs.add_func(ea):
-        f = idaapi.get_func(ea)
-        return {"addr": hex(ea), "ok": True, "start": hex(f.start_ea),
-                "end": hex(f.end_ea), "how": "auto"}
-
-    seg = ida_segment.getseg(ea)
-    hi = seg.end_ea if seg else ea
-    end = ea
-    while end < hi and ida_bytes.is_code(ida_bytes.get_flags(end)):
-        nxt = ida_bytes.get_item_end(end)
-        if nxt <= end:
-            break
-        end = nxt
-    if end <= ea:
+    auto = ida_funcs.add_func(ea)
+    if not auto and not _idatui_add_func(ea):
         return {"addr": hex(ea), "ok": False,
-                "error": "no code here to make a function from"}
-    if not ida_funcs.add_func(ea, end):
-        return {"addr": hex(ea), "ok": False,
-                "error": f"IDA refused a function at {ea:#x}..{end:#x}"}
+                "error": f"IDA refused a function at {ea:#x}"}
     f = idaapi.get_func(ea)
+    if f is None:
+        return {"addr": hex(ea), "ok": False, "error": "function did not stick"}
     return {"addr": hex(ea), "ok": True, "start": hex(f.start_ea),
-            "end": hex(f.end_ea), "how": "explicit-end"}
+            "end": hex(f.end_ea), "how": "auto" if auto else "explicit-end"}
 
 @tool
 @idasync
@@ -1124,6 +1136,76 @@ def decomp_error(
     except Exception as e:  # noqa: BLE001
         out["reason"] = f"{type(e).__name__}: {e}"
     return out
+
+@tool
+@idasync
+def thumb_scan(
+    start: Annotated[str, "Start of the range to scan for entry pointers"] = "",
+    end: Annotated[str, "Exclusive end of the range (default: 1KB from start)"] = "",
+    apply: Annotated[bool, "Mark the targets as Thumb and disassemble them"] = True,
+    limit: Annotated[int, "Max entries to act on"] = 512,
+) -> dict:
+    """Find Thumb entry points from ODD pointers, e.g. a Cortex-M vector table.
+
+    An ARM function pointer carries the mode in bit 0: odd means Thumb. A vector
+    table is therefore a list of Thumb entry points that IDA won't follow on a
+    headerless image, because nothing tells it those words are pointers at all.
+
+    Being wrong here is expensive — marking a data word as code corrupts the
+    listing — so a word only counts when it is odd, lands inside a loaded
+    segment, and its target is EXECUTABLE and not already defined as data. The
+    even words in a vector table (the initial stack pointer) fail the first test,
+    which is the point."""
+    import ida_bytes
+    import ida_funcs
+    import ida_idp
+    import ida_segment
+    import ida_segregs
+    import ida_ua
+
+    seg0 = ida_segment.getseg(parse_address(start)) if start else None
+    if seg0 is None:
+        seg0 = ida_segment.getnseg(0)
+    if seg0 is None:
+        return {"error": "no segments", "found": [], "applied": 0}
+    try:
+        lo = parse_address(start) if start else seg0.start_ea
+        hi = parse_address(end) if end else min(lo + 0x400, seg0.end_ea)
+    except Exception as e:
+        return {"error": str(e), "found": [], "applied": 0}
+
+    treg = ida_idp.str2reg("T")
+    found, applied = [], 0
+    ea = lo
+    while ea + 4 <= hi and len(found) < limit:
+        w = ida_bytes.get_dword(ea)
+        ea += 4
+        if not (w & 1):
+            continue                       # even: not a Thumb pointer
+        tgt = w & ~1
+        seg = ida_segment.getseg(tgt)
+        if seg is None or not (seg.perm & ida_segment.SEGPERM_EXEC or seg.perm == 0):
+            continue                       # points outside the image, or at data
+        f = ida_bytes.get_flags(tgt)
+        if ida_bytes.is_data(f):
+            continue                       # already something else; don't fight it
+        rec = {"at": hex(ea - 4), "value": hex(w), "target": hex(tgt),
+               "was_code": bool(ida_bytes.is_code(f))}
+        found.append(rec)
+        if not apply:
+            continue
+        if treg is not None and treg >= 0:
+            ida_segregs.split_sreg_range(tgt, treg, 1, ida_segregs.SR_user)
+        if not ida_bytes.is_code(ida_bytes.get_flags(tgt)):
+            ida_bytes.del_items(tgt, 0, 2)
+            if ida_ua.create_insn(tgt) <= 0:
+                rec["decoded"] = False
+                continue
+        rec["decoded"] = True
+        rec["function"] = _idatui_add_func(tgt)
+        applied += 1
+    return {"start": hex(lo), "end": hex(hi), "found": found,
+            "applied": applied, "n": len(found)}
 '''
 
 SNIPPET = f"{BEGIN}\n{BODY.strip()}\n{END}\n"
