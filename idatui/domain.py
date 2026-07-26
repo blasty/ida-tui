@@ -1366,6 +1366,22 @@ class Program:
         if res.get("error"):
             raise IDAToolError("define_code", f"@ {ea:#x}: {res['error']}")
 
+    def define_code_run(self, ea: int, limit: int = 20000) -> dict:
+        """Disassemble consecutively from ``ea`` until something stops it.
+
+        Falls back to a single instruction when the worker predates the tool, so
+        an old worker degrades to the previous behaviour instead of failing.
+        """
+        try:
+            r = self.client.call("define_code_run", addr=hex(ea), limit=int(limit))
+        except IDAToolError:
+            self.define_code(ea)
+            return {"count": 1, "stopped": "single", "end": hex(ea)}
+        if not isinstance(r, dict) or r.get("error"):
+            raise IDAToolError("define_code_run",
+                               f"@ {ea:#x}: {(r or {}).get('error', 'failed')}")
+        return r
+
     def define_func(self, ea: int) -> None:
         """Create a function starting at ``ea`` (IDA's 'p')."""
         res = self._first_result(

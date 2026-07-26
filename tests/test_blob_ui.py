@@ -55,7 +55,7 @@ async def run() -> int:
         planted = 0x40                       # file offset -> ea 0x4040
         for k, insn in enumerate((0xD503201F,   # nop
                                   0xD503201F,   # nop
-                                  0xD65F03C0)):  # ret
+                                  0xD65F03C0)):  # ret  <- the run must stop here
             data[planted + k * 4:planted + k * 4 + 4] = insn.to_bytes(4, "little")
         blob = os.path.join(tmp, "rnd.bin")
         with open(blob, "wb") as f:
@@ -141,6 +141,22 @@ async def run() -> int:
                   f"kind={h.kind if h else None} text={h.text if h else None!r}")
             if h is not None and h.kind == "code":
                 print(f"       carved {target:#x}: {h.text}")
+                # `c` runs until something stops it, like IDA — one instruction
+                # at a time means pressing it once per opcode for the length of
+                # a routine. We planted nop/nop/nop/ret, so it must take all
+                # four and stop AT the ret, not run on into the random bytes
+                # after it.
+                run = [m.get(m.index_of_ea(target + k * 4)) for k in range(3)]
+                check("`c` keeps going until control flow ends",
+                      all(x is not None and x.kind == "code" for x in run),
+                      f"{[(hex(x.ea), x.kind) for x in run if x]}")
+                check("and stops at the ret instead of running into junk",
+                      m.get(m.index_of_ea(target + 12)).kind == "unknown",
+                      f"{m.get(m.index_of_ea(target + 12)).text!r}")
+                status = str(app.query_one("#status", Static).render())
+                check("the status reports what the run did",
+                      "3 instructions" in status and "control flow" in status,
+                      status[:80])
                 check("the carved row spans the instruction, not one byte",
                       h.size == 4, f"size={h.size}")
                 check("bytes before it stay individually addressable",

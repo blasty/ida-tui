@@ -768,6 +768,80 @@ def list_linkage(
                                 "ordinal": int(ordinal)})
     return {"imports": imports, "exports": exports,
             "n_imports": len(imports), "n_exports": len(exports)}
+
+@tool
+@idasync
+def define_code_run(
+    addr: Annotated[str, "Address to start disassembling from"],
+    limit: Annotated[int, "Max instructions to create (safety stop)"] = 20000,
+) -> dict:
+    """Disassemble CONSECUTIVELY from ``addr`` until something stops it, the way
+    IDA's 'c' does — one instruction is rarely what you want when carving a raw
+    image. Returns {start,end,count,stopped} where ``stopped`` says why:
+    'undecodable' (bytes aren't an instruction), 'flow' (the last instruction
+    doesn't fall through, e.g. RET/B), 'defined' (ran into existing code/data),
+    'segment' (hit the end) or 'limit'.
+
+    Runs in-process: doing this from the client would be one round trip per
+    instruction, which is minutes on a real firmware image."""
+    import ida_bytes
+    import ida_idp
+    import ida_segment
+    import ida_ua
+    import idaapi
+
+    try:
+        ea = parse_address(addr)
+    except Exception as e:
+        return {"addr": str(addr), "error": str(e), "count": 0}
+
+    seg = ida_segment.getseg(ea)
+    if not seg:
+        return {"addr": str(addr), "error": "no segment", "count": 0}
+    hi = seg.end_ea
+    try:
+        limit = max(1, min(int(limit), 200000))
+    except (TypeError, ValueError):
+        limit = 20000
+
+    start, count, stopped = ea, 0, "limit"
+    while count < limit:
+        if ea >= hi:
+            stopped = "segment"
+            break
+        flags = ida_bytes.get_flags(ea)
+        if ida_bytes.is_code(flags) or ida_bytes.is_data(flags):
+            # Already defined: stop rather than clobber. Undefining someone's
+            # existing work to keep a speculative run going is not a trade the
+            # user asked for.
+            stopped = "defined"
+            break
+        n = ida_ua.create_insn(ea)
+        if n <= 0:
+            stopped = "undecodable"
+            break
+        count += 1
+        # Stop where control flow stops. Past a RET the next bytes are usually
+        # padding or a new function's data, and running on turns a clean carve
+        # into a mess that has to be undone by hand.
+        #
+        # Ask ida_idp.is_ret_insn, NOT the canonical feature bits: on AArch64
+        # get_canon_feature() returns 0 for RET, so a CF_STOP test silently never
+        # fires and the run walks straight through the end of the routine.
+        insn = ida_ua.insn_t()
+        if ida_ua.decode_insn(insn, ea) > 0:
+            try:
+                is_ret = ida_idp.is_ret_insn(insn)
+            except Exception:
+                is_ret = False
+            if is_ret or (insn.get_canon_feature() & idaapi.CF_STOP):
+                ea += n
+                stopped = "flow"
+                break
+        ea += n
+
+    return {"start": hex(start), "end": hex(ea), "count": count,
+            "stopped": stopped}
 '''
 
 SNIPPET = f"{BEGIN}\n{BODY.strip()}\n{END}\n"

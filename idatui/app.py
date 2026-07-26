@@ -3338,6 +3338,7 @@ class IdaTui(App):
         self._hops: list[str] = []            # binaries a navigation crossed FROM
         self._load_for_label = None           # project binary the dialog is for
         self._no_functions = False            # analysis produced nothing at all
+        self._flash: str | None = None        # message a pending reload must keep
         self._pending_switch = None           # switch waiting on that answer
         self._nav_seq = 0                     # bumped per navigation; drops stale ones
         # None = teardown wasn't an explicit quit (crash/kill): save defensively.
@@ -5407,7 +5408,28 @@ class IdaTui(App):
                 "undef": "undefined", "string": "made string"}[kind]
         try:
             if kind == "code":
-                self.program.define_code(ea)
+                # Keep going until something stops it: one instruction is rarely
+                # what you want, and on a raw image it means pressing `c` once
+                # per opcode for the length of a function.
+                r = self.program.define_code_run(ea)
+                n, why = int(r.get("count", 0)), r.get("stopped", "")
+                if n == 0 and why == "defined":
+                    # Already code/data here — a no-op, not a failure. Saying
+                    # "failed to create instruction" for it would be a lie.
+                    self.app.call_from_thread(
+                        self._status, f"already defined @ {ea:#x}")
+                    return
+                if n == 0:
+                    raise IDAToolError("define_code",
+                                       f"@ {ea:#x}: Failed to create instruction")
+                end = int(str(r.get("end", hex(ea))), 0)
+                reason = {"undecodable": "hit bytes that don't decode",
+                          "flow": "control flow ends here",
+                          "defined": "ran into existing code/data",
+                          "segment": "end of segment",
+                          "limit": "instruction limit"}.get(why, why)
+                verb = (f"defined {n} instruction{'s' if n != 1 else ''} "
+                        f"({ea:#x}\u2013{end:#x}) \u2014 {reason}")
             elif kind == "func":
                 self.program.define_func(ea)
             elif kind == "string":
@@ -5438,7 +5460,12 @@ class IdaTui(App):
 
     def _edit_item_done(self, verb: str, ea: int) -> None:
         self._dirty = True
-        self._status(f"{verb} @ {ea:#x}   (Ctrl+S to save)")
+        # Defining an item reloads the view, and that reload writes its own
+        # status when it lands — after this one. Hand the message over as a
+        # flash so the result of the edit is what you actually read, instead of
+        # "ROM @ 0x4040 [listing]" every time.
+        self._flash = f"{verb} @ {ea:#x}   (Ctrl+S to save)"
+        self._status(self._flash)
 
     @work(thread=True, exclusive=True, group="save")
     def _save(self) -> None:
@@ -6038,6 +6065,10 @@ class IdaTui(App):
         self._goto_ea(msg.va, push=True)
 
     def _status_for_cur(self, mode: str) -> None:
+        flash, self._flash = self._flash, None
+        if flash:
+            self._status(flash)   # the edit that caused this reload wins
+            return
         if self._cur is not None:
             self._status(f"{self._cur.name}  @ {self._cur.ea:#x}   [{mode}]")
 
@@ -6274,6 +6305,13 @@ class IdaTui(App):
             return
         ea = msg.ea
         if ea is not None:
+            # A pending flash (the result of an edit that caused this reload)
+            # outranks the idle hint: the cursor lands here as part of the
+            # reload, so this handler would otherwise always have the last word.
+            flash, self._flash = self._flash, None
+            if flash:
+                self._status(flash)
+                return
             sec = self.program.section_of(ea) if self.program else None
             self._status(f"{sec or '?'}  @ {ea:#x}   [listing]   "
                          "(c code · p func · u undefine · Enter follow)")
