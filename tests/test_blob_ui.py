@@ -14,7 +14,7 @@ import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from textual.widgets import Static  # noqa: E402
+from textual.widgets import Input, Static  # noqa: E402
 
 from idatui.app import ConfirmScreen, IdaTui, ListingView  # noqa: E402
 
@@ -162,6 +162,33 @@ async def run() -> int:
                 check("bytes before it stay individually addressable",
                       m.get(m.index_of_ea(target - 1)).size == 1
                       and m.get(m.index_of_ea(target - 1)).ea == target - 1)
+
+            # -- an edit must not move the view -------------------------- #
+            # Every mutation rebuilds the model, and row indices don't survive
+            # that: carving collapses four byte rows into one instruction row.
+            # All the edit paths go through ViewAnchor, which remembers
+            # ADDRESSES. This runs in its own app, so unlike the shared scenario
+            # suite it can mutate the database freely.
+            lst.cursor = m.index_of_ea(0x4200)
+            lst._scroll_cursor_into_view()
+            await pilot.pause(0.4)
+            ctop = lst.model.get(round(lst.scroll_offset.y)).ea
+            ccur = lst._cursor_ea()
+            old = lst.model
+            await pilot.press("semicolon")
+            await wait(lambda: app.query_one("#comment", Input).display, pilot, 20)
+            for ch in "note":
+                await pilot.press(ch)
+            await pilot.press("enter")
+            await wait(lambda: lst.model is not old and lst.model is not None,
+                       pilot, 30)
+            await pilot.pause(0.4)
+            check("commenting leaves the view where it was",
+                  lst.model.get(round(lst.scroll_offset.y)).ea == ctop
+                  and lst._cursor_ea() == ccur,
+                  f"top {ctop:#x} -> "
+                  f"{lst.model.get(round(lst.scroll_offset.y)).ea:#x}, "
+                  f"cursor {ccur:#x} -> {lst._cursor_ea():#x}")
 
             # -- carving must not move the view -------------------------- #
             # Defining code collapses rows (four byte rows become one

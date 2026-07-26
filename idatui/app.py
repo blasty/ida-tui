@@ -112,6 +112,29 @@ class BinaryState:
 
 
 @dataclass
+class ViewAnchor:
+    """Where the user is looking, expressed in ADDRESSES.
+
+    Every path that rebuilds a model must round-trip through this. Row indices
+    do NOT survive a rebuild: defining code collapses four undefined byte rows
+    into one instruction row, undefining does the reverse, and a rename can add
+    or remove banner rows above a function. Anything that remembers an index
+    puts the user somewhere else afterwards, which reads as "the edit jumped my
+    screen" or, worse, "the edit didn't apply".
+
+    ``flash`` travels with it because the same rebuild also decides what the
+    status bar says: the reload writes its own status when it lands, so an edit
+    that doesn't hand its message over here gets silently overwritten.
+    """
+
+    view: str = "listing"
+    ea: int | None = None          # cursor address
+    top_ea: int | None = None      # first visible address
+    cursor_x: int = 0
+    flash: str | None = None
+
+
+@dataclass
 class NavEntry:
     ea: int
     name: str
@@ -5113,13 +5136,17 @@ class IdaTui(App):
             dec.loaded_ea = None  # force re-decompile
             self._show_active()
         else:
-            # Capture the LIVE listing position straight from the widget (the
-            # source of truth) rather than trusting nav-entry tracking, which can
-            # go stale. bump_names() discards the segment model, so the reload
-            # rebuilds it; feeding the true cursor/scroll keeps the edited line on
-            # screen even on a huge segment (otherwise it primes/scrolls to a
-            # stale index and the renamed line lands off-screen — looking like the
-            # rename never applied).
+            # Capture the LIVE position from the widget (the source of truth)
+            # rather than trusting nav-entry tracking, which goes stale. Capture
+            # it as ADDRESSES via the anchor: bump_names() discards the segment
+            # model so the reload rebuilds it, and an edit that changes how many
+            # rows an item takes makes the old indices point somewhere else.
+            # Index capture is CORRECT here and an anchor is not: a rename or
+            # comment doesn't change how many rows anything takes, and the model
+            # this rebuilds is constructed empty — index_of_ea on it returns -1
+            # until pages load, so an anchor would resolve to nothing while
+            # costing an extra model build on the UI thread. Address anchoring is
+            # for the edit paths that DO change row structure (see _do_edit_item).
             lst = self.query_one(ListingView)
             cur.view = "listing"
             if lst.model is not None:
@@ -5272,7 +5299,8 @@ class IdaTui(App):
             view.focus()
 
     @work(thread=True, exclusive=True, group="makedata")
-    def _do_make_data(self, ea: int, type_decl: str) -> None:  # worker context
+    def _do_make_data(self, ea: int, type_decl: str,
+                      anchor: ViewAnchor | None = None) -> None:  # worker context
         assert self.program is not None
         try:
             self.program.make_data(ea, type_decl)
@@ -5280,12 +5308,15 @@ class IdaTui(App):
             self.app.call_from_thread(self._status, f"make data: {e}")
             return
         self.program.bump_items()
+        anchor = anchor or ViewAnchor()
+        anchor.flash = f"data ({type_decl}) @ {ea:#x}   (Ctrl+S to save)"
         name = self.program.region_label(ea)
         lm = self.program.listing(ea)
         idx = max(lm.ensure_ea(ea), 0) if lm is not None else 0
-        self.app.call_from_thread(self._open_at, ea, name, idx, False, -1, 0, True)
+        _cur, top = self._anchor_rows(anchor, lm, ea)
         self.app.call_from_thread(
-            self._edit_item_done, f"data ({type_decl})", ea)
+            self._open_at, ea, name, idx, False, -1, 0, True, None, top)
+        self.app.call_from_thread(self._edit_done, anchor)
 
     @work(thread=True, exclusive=True, group="rename")
     def _do_rename(self, view, old: str, new: str) -> None:  # type: ignore[no-untyped-def]
@@ -5400,21 +5431,11 @@ class IdaTui(App):
         if ea is None:
             self._status("no address on this line to (re)define")
             return
-        # Remember the TOP VISIBLE ADDRESS, not the row index: defining code
-        # collapses rows (four undefined bytes become one instruction), so the
-        # row that was at the top afterwards is a different place entirely. The
-        # view should not appear to move just because you carved in it.
-        top_ea = None
-        model = getattr(view, "model", None)
-        if model is not None:
-            top = round(view.scroll_offset.y)
-            h = model.cached_line(top) or model.get(top)
-            top_ea = getattr(h, "ea", None)
-        self._do_edit_item(msg.kind, ea, top_ea)
+        self._do_edit_item(msg.kind, ea, self._anchor())
 
     @work(thread=True, exclusive=True, group="edititem")
     def _do_edit_item(self, kind: str, ea: int,
-                      top_ea: int | None = None) -> None:  # worker context
+                      anchor: ViewAnchor | None = None) -> None:  # worker context
         assert self.program is not None
         verb = {"code": "defined code", "func": "created function",
                 "undef": "undefined", "string": "made string"}[kind]
@@ -5456,32 +5477,36 @@ class IdaTui(App):
         self.program.bump_items()
         # Re-resolve: a define_func upgrades the region to a real function view;
         # anything else re-reads the (still function-less) listing in place.
+        anchor = anchor or ViewAnchor()
+        anchor.flash = f"{verb} @ {ea:#x}   (Ctrl+S to save)"
         fn = self.program.function_of(ea)
         if fn is not None:
             model = self.program.disasm(fn.addr, fn.name)
             idx = 0 if ea == fn.addr else model.index_of_ea(ea)
-            top = model.index_of_ea(top_ea) if top_ea is not None else -1
+            _cur, top = self._anchor_rows(anchor, model, ea)
             self.app.call_from_thread(
                 self._open_at, fn.addr, fn.name, idx, False, -1, 0, False,
-                None, max(top, -1))
+                None, top)
         else:
             name = self.program.region_label(ea)
             lm = self.program.listing(ea)
             idx = max(lm.ensure_ea(ea), 0) if lm is not None else 0
-            top = lm.index_of_ea(top_ea) if (lm is not None and top_ea is not None) else -1
+            _cur, top = self._anchor_rows(anchor, lm, ea)
             self.app.call_from_thread(
-                self._open_at, ea, name, idx, False, -1, 0, True,
-                None, max(top, -1))
-        self.app.call_from_thread(self._edit_item_done, verb, ea)
+                self._open_at, ea, name, idx, False, -1, 0, True, None, top)
+        self.app.call_from_thread(self._edit_done, anchor)
 
-    def _edit_item_done(self, verb: str, ea: int) -> None:
+    def _edit_done(self, anchor: ViewAnchor) -> None:
+        """One place where an edit's aftermath is settled.
+
+        The reload this edit triggered will write its own status when it lands —
+        after this — so the message is handed over as a flash rather than
+        written and lost.
+        """
         self._dirty = True
-        # Defining an item reloads the view, and that reload writes its own
-        # status when it lands — after this one. Hand the message over as a
-        # flash so the result of the edit is what you actually read, instead of
-        # "ROM @ 0x4040 [listing]" every time.
-        self._flash = f"{verb} @ {ea:#x}   (Ctrl+S to save)"
-        self._status(self._flash)
+        self._flash = anchor.flash
+        if anchor.flash:
+            self._status(anchor.flash)
 
     @work(thread=True, exclusive=True, group="save")
     def _save(self) -> None:
@@ -5671,6 +5696,50 @@ class IdaTui(App):
             return
         self._nav.append(entry)
 
+    # -- view state across a model rebuild --------------------------------- #
+    def _anchor(self, flash: str | None = None) -> ViewAnchor:
+        """Capture where we're looking, BEFORE an edit rebuilds the model.
+
+        Must run on the UI thread: it reads live widget state.
+        """
+        a = ViewAnchor(view=self._active, flash=flash)
+        view = self._active_code_view()
+        model = getattr(view, "model", None)
+        if view is None or model is None:
+            return a
+        a.cursor_x = getattr(view, "cursor_x", 0)
+        try:
+            a.ea = view._cursor_ea()
+        except Exception:  # noqa: BLE001
+            a.ea = None
+        top = round(view.scroll_offset.y)
+        h = model.cached_line(top) or model.get(top)
+        a.top_ea = getattr(h, "ea", None)
+        return a
+
+    @staticmethod
+    def _anchor_rows(a: ViewAnchor, model, fallback_ea: int | None = None):
+        """(cursor_row, top_row) for ``a`` in a freshly built ``model``.
+
+        -1 means "no opinion" — the caller's own default wins.
+        """
+        if model is None:
+            return (-1, -1)
+
+        def row_of(ea):
+            if ea is None:
+                return -1
+            try:
+                i = model.index_of_ea(ea)
+            except Exception:  # noqa: BLE001
+                return -1
+            return i if i >= 0 else -1
+
+        cur = row_of(a.ea if a.ea is not None else fallback_ea)
+        if cur < 0 and fallback_ea is not None:
+            cur = row_of(fallback_ea)
+        return (cur, row_of(a.top_ea))
+
     def _open_at(self, ea: int, name: str, cursor: int, push: bool,
                  dec_cursor: int = -1, dec_cursor_x: int = 0,
                  is_region: bool = False, focus_name: str | None = None,
@@ -5799,7 +5868,7 @@ class IdaTui(App):
             view, ea = self._makedata_ctx
             self._end_makedata()
             if view is not None and value:
-                self._do_make_data(ea, value)
+                self._do_make_data(ea, value, self._anchor())
             return
         if inp.id == "goto":
             self._end_goto()

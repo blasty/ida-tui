@@ -71,3 +71,22 @@ done-ish:
 [x] makes names pane sortable (addr/name columns)
 
 
+
+## The scenario suite mutates a PERSISTENT database
+
+tests/test_scenarios.py runs against targets/echo.i64 and every edit it makes is
+saved there. A scenario that undefines an instruction leaves that instruction
+undefined for every later run — decomp_follow_self started failing "for no
+reason" and stayed failing until the .i64 was deleted and re-analysed.
+
+That also poisoned an investigation: an `edit_keeps_view` check looked flaky
+(cursor jumping 0x20c6 -> 0x2094 about one run in three) and was almost
+certainly the database drifting between runs, not a race. Any conclusion drawn
+from repeated runs of a mutating scenario is suspect.
+
+Worth fixing properly: either give the suite a scratch copy of the binary per
+run, or have mutating scenarios undo themselves. Until then, `rm targets/*.i64`
+before trusting a failure that appeared without a code change.
+
+Coverage for "an edit must not move the view" lives in tests/test_blob_ui.py,
+which builds its own throwaway binary and can mutate freely.
