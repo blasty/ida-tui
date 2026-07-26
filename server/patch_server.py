@@ -1083,6 +1083,47 @@ def define_func_run(
     f = idaapi.get_func(ea)
     return {"addr": hex(ea), "ok": True, "start": hex(f.start_ea),
             "end": hex(f.end_ea), "how": "explicit-end"}
+
+@tool
+@idasync
+def decomp_error(
+    addr: Annotated[str, "Address of the function that failed to decompile"],
+) -> dict:
+    """Why Hex-Rays refused this function, in its own words.
+
+    The plain decompile tool reports "Decompilation failed at 0x0" and drops the
+    reason, which is the only useful part. Hex-Rays fills in a hexrays_failure_t
+    saying things like "only 64-bit functions can be decompiled in the current
+    database" — that one is unfixable in place (the database's bitness is set at
+    load), so a user who can't see it has no way to know they must reload."""
+    import ida_funcs
+    import ida_hexrays
+    import ida_ida
+
+    try:
+        ea = parse_address(addr)
+    except Exception as e:
+        return {"addr": str(addr), "error": str(e)}
+    out = {"addr": hex(ea), "bitness": ida_ida.inf_get_app_bitness()}
+    fn = ida_funcs.get_func(ea)
+    if fn is None:
+        out["reason"] = "no function here"
+        return out
+    try:
+        if not ida_hexrays.init_hexrays_plugin():
+            out["reason"] = "the decompiler is not available for this processor"
+            return out
+        hf = ida_hexrays.hexrays_failure_t()
+        cf = ida_hexrays.decompile_func(fn, hf)
+        if cf is not None:
+            out["reason"] = ""      # it decompiles now
+            return out
+        out["reason"] = hf.desc() or f"error {hf.code}"
+        out["code"] = int(hf.code)
+        out["errea"] = hex(hf.errea)
+    except Exception as e:  # noqa: BLE001
+        out["reason"] = f"{type(e).__name__}: {e}"
+    return out
 '''
 
 SNIPPET = f"{BEGIN}\n{BODY.strip()}\n{END}\n"

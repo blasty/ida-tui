@@ -146,6 +146,26 @@ async def run() -> int:
               "64-bit" in status and "decompile" in status, status[:120])
         check("and names the fix", "ARMv7-A" in status, status[:120])
 
+        # And if you ignore that and carry on, the failure has to say WHY. The
+        # plain decompile tool reports "Decompilation failed at 0x0" and drops
+        # the reason, which is the only part that tells you what to do — with it
+        # missing, F5 doing nothing is indistinguishable from a bug in the TUI.
+        lst.cursor = lst.model.index_of_ea(0)
+        await pilot.pause(0.2)
+        mp = lst.model
+        await pilot.press("p")
+        await wait(lambda: lst.model is not mp and lst.model is not None, pilot, 60)
+        await wait(lambda: app._func_index is not None
+                   and len(app._func_index) > 0, pilot, 60)
+        await pilot.press("tab")
+        await wait(lambda: "cannot decompile" in
+                   str(app.query_one("#status", Static).render()), pilot, 90)
+        status = str(app.query_one("#status", Static).render())
+        check("a failed decompile says why, in Hex-Rays' own words",
+              "only 64-bit functions" in status, status[:130])
+        check("and the reason survives the view reloading under it",
+              "cannot decompile" in status, status[:130])
+
     # -- the whole point: a 32-bit database decompiles ---------------------- #
     for ext in (".i64", ".id0", ".id1", ".id2", ".nam", ".til"):
         try:

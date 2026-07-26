@@ -1373,6 +1373,20 @@ class Program:
         if res.get("error"):
             raise IDAToolError("define_code", f"@ {ea:#x}: {res['error']}")
 
+    def decomp_error(self, ea: int) -> str:
+        """Hex-Rays' own reason for refusing ``ea``, or "" if it won't say."""
+        try:
+            r = self.client.call("decomp_error", addr=hex(ea))
+        except IDAToolError:
+            return ""
+        if not isinstance(r, dict):
+            return ""
+        reason = str(r.get("reason") or "")
+        if reason and r.get("bitness") == 64 and "64-bit" in reason:
+            # Unfixable in place: the database's bitness is decided at load.
+            reason += " \u2014 Ctrl+L and pick arm:ARMv7-A"
+        return reason
+
     def set_thumb(self, ea: int, mode: str = "toggle") -> dict:
         """Switch ARM/Thumb decoding at ``ea``. Returns the resulting state."""
         r = self.client.call("set_thumb", addr=hex(ea), mode=mode)

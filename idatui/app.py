@@ -5259,7 +5259,7 @@ class IdaTui(App):
         self._dirty = True
         self._flash = anchor.flash
         if anchor.flash:
-            self._status(anchor.flash)
+            self._status(anchor.flash)   # and again from the reload, via _flash
         if anchor.refresh_functions:
             # Creating (or destroying) a function changes the index that the
             # names pane, Ctrl+N and the "no functions" hint all read. Without
@@ -5565,6 +5565,8 @@ class IdaTui(App):
             view.focus()
 
     def on_key(self, event) -> None:  # type: ignore[no-untyped-def]
+        # Any keypress means the result of the last edit has been read.
+        self._flash = None
         if event.key != "escape":
             return
         if self.query_one("#search", Input).display:
@@ -5934,9 +5936,12 @@ class IdaTui(App):
         self._goto_ea(msg.va, push=True)
 
     def _status_for_cur(self, mode: str) -> None:
-        flash, self._flash = self._flash, None
-        if flash:
-            self._status(flash)   # the edit that caused this reload wins
+        if self._flash:
+            # Shown, NOT consumed. A reload emits several of these (prime, then
+            # cursor), so consuming on the first one meant the second erased the
+            # message the user was meant to read. It clears on the next keypress
+            # instead — i.e. when they've moved on.
+            self._status(self._flash)
             return
         if self._cur is not None:
             self._status(f"{self._cur.name}  @ {self._cur.ea:#x}   [{mode}]")
@@ -5945,12 +5950,22 @@ class IdaTui(App):
     def _load_decomp(self, ea: int, name: str) -> None:
         assert self.program is not None
         dec = self.program.decompile(ea)
-        self.app.call_from_thread(self._apply_decomp, ea, name, dec)
+        why = ""
+        if dec.failed:
+            # Ask Hex-Rays why, in the same worker: the plain tool reports
+            # "Decompilation failed at 0x0" and drops the only useful part.
+            # "Decompile failed" with no reason is indistinguishable from a bug
+            # in this app, and for the common cause (a 32-bit function in a
+            # 64-bit database) the user cannot even guess the fix.
+            why = self.program.decomp_error(ea)
+        self.app.call_from_thread(self._apply_decomp, ea, name, dec, why)
 
-    def _apply_decomp(self, ea: int, name: str, dec) -> None:  # type: ignore[no-untyped-def]
+    def _apply_decomp(self, ea: int, name: str, dec,  # type: ignore[no-untyped-def]
+                      why: str = "") -> None:
         view = self.query_one(DecompView)
         view.loading = False
         if dec.failed:
+            detail = f" \u2014 {why}" if why else ""
             # No pseudocode for this function: fall back to the code view rather
             # than an error panel. If we came from the continuous listing (F5),
             # return there; otherwise show the disassembly.
@@ -5961,13 +5976,20 @@ class IdaTui(App):
                 self._decomp_return = None
                 self._cur = ret
                 self._active = "listing"
+                # Hand the reason over as a flash BEFORE reopening: going back
+                # to the listing reloads it, and the reload writes its own
+                # status afterwards — which is precisely how "F5 does nothing"
+                # looked like nothing at all.
+                msg = f"{name}: cannot decompile{detail}"
+                self._flash = msg
                 self._open_entry(ret, push=False)
-                self._status(f"{name} — decompile failed; back to the listing")
+                self._status(msg)
                 return
             self._active = "disasm"
+            msg = f"{name}: cannot decompile{detail}"
+            self._flash = msg
             self._show_active()
-            self._status(
-                f"{name} — no pseudocode (decompile failed); showing disassembly")
+            self._status(msg)
             return
         if self._active == "decomp":
             view.focus()  # loading cover had blurred it; restore focus
@@ -6177,9 +6199,8 @@ class IdaTui(App):
             # A pending flash (the result of an edit that caused this reload)
             # outranks the idle hint: the cursor lands here as part of the
             # reload, so this handler would otherwise always have the last word.
-            flash, self._flash = self._flash, None
-            if flash:
-                self._status(flash)
+            if self._flash:
+                self._status(self._flash)
                 return
             sec = self.program.section_of(ea) if self.program else None
             self._status(f"{sec or '?'}  @ {ea:#x}   [listing]   "
