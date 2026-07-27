@@ -165,6 +165,8 @@ def spawn(args) -> int:
         inner += ["--rpc", sock]
     else:
         inner = [args.python, "-m", "idatui.launch", target, "--rpc", sock]
+    if getattr(args, "trace", None):
+        inner += ["--trace", os.path.abspath(os.path.expanduser(args.trace))]
     cmd = f"cd {REPO!r} && exec " + " ".join(_q(a) for a in inner)
 
     split = ["split-window", "-v" if args.vertical else "-h",
@@ -316,6 +318,8 @@ def main(argv: list[str]) -> int:
     sp = sub.add_parser("spawn", help="open a TUI pane and wait until ready")
     sp.add_argument("--open", metavar="PATH",
                     help="binary to open (its dir must be writable)")
+    sp.add_argument("--trace", metavar="FILE",
+                    help="Tenet execution trace to load alongside the binary")
     sp.add_argument("--project", metavar="FILE",
                     help="project file to open instead of a single binary; "
                          "any --open paths are added to it (created if absent)")

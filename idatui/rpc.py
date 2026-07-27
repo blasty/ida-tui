@@ -72,6 +72,7 @@ METHODS = {
     "search": "{term,direction?=1} incremental search in the code view",
     "select": "{index?} choose the highlighted/nth item in the open modal",
     "save": "persist the .i64 (Ctrl+S)",
+    "trace": "{seek|goto|step,over?} navigate the execution trace (seek '!50' = percent)",
     "binaries": "-> project binaries {label,active,resident,indexed} (project mode)",
     "switch": "{binary,addr?} make another project binary active (addr also jumps)",
     "close": "dismiss a modal (Escape)",
@@ -531,6 +532,38 @@ class RpcServer:
             return functions(app, params.get("filter"), int(params.get("limit", 50)))
 
         # -- projects ------------------------------------------------------ #
+        if method == "trace":
+            if app._trace is None:
+                raise ValueError("no trace loaded (launch with --trace FILE)")
+            t = app._trace
+            if "seek" in params:
+                v = params["seek"]
+                # "!50" seeks a percentage, like Tenet's timestamp shell.
+                if isinstance(v, str) and v.startswith("!"):
+                    idx = int(float(v[1:]) * (t.length - 1) / 100.0)
+                else:
+                    idx = int(str(v).replace(",", ""), 0) if isinstance(v, str) else int(v)
+                app._seek(idx)
+            elif "goto" in params:      # first execution of an address/name
+                tgt = params["goto"]
+                ea = (int(str(tgt), 0) if str(tgt).lower().startswith("0x")
+                      else app.program.resolve(str(tgt)))
+                first = t.first_execution(ea)
+                if first is None:
+                    raise ValueError(f"{tgt} never executed in this trace")
+                app._seek(first)
+            elif "step" in params:
+                n = int(params.get("step") or 1)
+                over = bool(params.get("over"))
+                for _ in range(abs(n)):
+                    (app._step_over if over else app._step)(1 if n > 0 else -1)
+            await settle(app, timeout=float(params.get("timeout", 20.0)))
+            snap = snapshot(app)
+            snap["trace"] = {"idx": app._t, "length": t.length,
+                             "pc": hex(t.ip(app._t)),
+                             "changed": sorted(t.changed(app._t))}
+            return snap
+
         if method == "binaries":
             if app._project is None:
                 raise ValueError("not a project session (launch with --project)")
