@@ -3242,6 +3242,7 @@ class IdaTui(App):
         self._open_path = open_path
         self._ttl = ttl
         self._load_args = load_args or ""   # IDA switches for a headerless blob
+        self._title = (os.path.basename(open_path) if open_path else "")
         self._trace_path = trace_path or ""  # Tenet execution trace to explore
         self._trace = None                   # the loaded Trace, once analysed
         self._trail_map = []                 # decomp_map for _trail_map_ea
@@ -3576,8 +3577,12 @@ class IdaTui(App):
             self._flash_until = _time.monotonic() + 8.0
         elif self._flash and _time.monotonic() < self._flash_until:
             text = self._flash
-        if self._binary:  # project mode: always say which binary you're in
-            text = f"[{self._binary}] {text}"
+        # Always say WHICH file this is. In project mode that's the binary's
+        # label; otherwise the filename we opened. Cheap on purpose — _module()
+        # asks the worker, and this runs on every status write.
+        tag = self._binary or self._title
+        if tag:
+            text = f"[{tag}] {text}"
         # An image with no functions at all is nearly always a blob described
         # wrongly, and that stays true as you scroll around — so it belongs in
         # the status bar, not in a one-off message the next write clobbers.
@@ -3723,6 +3728,7 @@ class IdaTui(App):
             self._binary = label
             self._pool.set_active(label)
             self._open_path = self._project.by_label(label).staged
+            self._title = os.path.basename(self._open_path)
             return client
         if not self._open_path:
             self.app.call_from_thread(
@@ -3745,7 +3751,6 @@ class IdaTui(App):
         self._func_index = idx
         self.app.call_from_thread(lambda: self.query_one("#func-table", DataTable).clear())
         last = 0
-        module = self._module()
         while not idx.complete:
             idx.load_next_page()
             rows = idx.window(last, len(idx) - last)
@@ -3753,14 +3758,14 @@ class IdaTui(App):
             if rows:
                 self.app.call_from_thread(self._append_rows, rows)
                 self.app.call_from_thread(
-                    self._status, f"{module} — {last} functions…"
+                    self._status, f"{last} functions…"
                 )
         # If a filter is active (typed during load), re-apply it over the full set.
         if self._filter_term:
             self.app.call_from_thread(self._apply_filter, self._filter_term)
         else:
             self.app.call_from_thread(
-                self._status, f"{module} — {len(idx)} functions   (Ctrl+N: find symbol)")
+                self._status, f"{len(idx)} functions   (Ctrl+N: find symbol)")
         # Land somewhere useful instead of an empty pane: main() if present,
         # otherwise pop the fuzzy symbol picker.
         self.app.call_from_thread(self._auto_land)
@@ -3977,7 +3982,7 @@ class IdaTui(App):
         if term:
             self._status(f"filter '{term}':  {len(matched)}/{total}")
         else:
-            self._status(f"{self._module()} — {total} functions")
+            self._status(f"{total} functions")
 
     def _apply_pending_filter(self) -> None:
         self._filter_timer = None
@@ -4179,6 +4184,7 @@ class IdaTui(App):
         self._binary = label
         self._pool.set_active(label)
         self._open_path = self._project.by_label(label).staged
+        self._title = os.path.basename(self._open_path)
         self._active = st.active if st else "listing"
         self._split = st.split if st else False
         self._filter_term = st.filter_term if st else ""

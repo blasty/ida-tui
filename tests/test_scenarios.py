@@ -444,6 +444,37 @@ async def s_asm_highlight(c: Ctx):
             mn is not None, f"{code[0].spans if code else None}")
 
 
+@scenario("status_names_the_file")
+async def s_status_names_the_file(c: Ctx):
+    """The status bar always says which file you're looking at.
+
+    Obvious once several panes and a project switcher exist: with two idatui
+    windows open, or after switching binaries, "0x2490" alone doesn't say what
+    it belongs to.
+    """
+    from textual.widgets import Static
+    app = c.app
+    await c.open_biggest("listing")
+    await c.pause(0.3)
+    name = os.path.basename(app._open_path)
+    status = str(app.query_one("#status", Static).render())
+    c.check("the status bar names the open file",
+            status.startswith(f"[{name}]"), f"{status[:60]!r} (want [{name}])")
+
+    # It must survive the messages that WRITE the status, not just the idle one.
+    c.lst.focus()
+    await c.press("down")
+    await c.pause(0.3)
+    status = str(app.query_one("#status", Static).render())
+    c.check("and keeps naming it as you move",
+            status.startswith(f"[{name}]"), status[:60])
+
+    # The function-count message used to include the module name itself, which
+    # would now read "[echo] echo — 128 functions".
+    c.check("without saying the name twice",
+            status.count(name) == 1, status[:70])
+
+
 @scenario("command_palette")
 async def s_command_palette(c: Ctx):
     app = c.app
