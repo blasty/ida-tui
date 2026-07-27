@@ -16,7 +16,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from textual.widgets import Static  # noqa: E402
 
-from idatui.app import IdaTui, ListingView, TraceDock  # noqa: E402
+from idatui.app import (DecompView, IdaTui, ListingView,  # noqa: E402
+                        TraceDock)
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 TRACER = os.path.expanduser(
@@ -139,6 +140,59 @@ async def run() -> int:
                 check("} steps OVER a call instead of into it",
                       app._t == ret, f"{i} -> {app._t}, expected {ret}")
                 check("which is further than a plain step", app._t > i + 1)
+
+            # -- trails ------------------------------------------------------ #
+            # Not "every address the trace ever touched": on a loop-heavy
+            # program that's almost everything and says nothing. The last/next
+            # few dozen steps say how you got here and where you're going.
+            app._seek(min(40, t.length - 1))
+            await pilot.pause(0.6)
+            trail = lst.trail
+            kinds = {k for k in trail.values()}
+            check("the listing is painted with an execution trail",
+                  {"now", "past", "future"} <= kinds, f"{sorted(kinds)}")
+            check("'now' is the instruction we're standing on",
+                  trail.get(t.ip(app._t)) == "now", f"{trail.get(t.ip(app._t))}")
+            check("the step behind is past, the step ahead is future",
+                  trail.get(t.ip(app._t - 1)) == "past"
+                  and trail.get(t.ip(app._t + 1)) == "future",
+                  f"{trail.get(t.ip(app._t - 1))}, {trail.get(t.ip(app._t + 1))}")
+            painted = [y for y in range(min(lst.size.height, 30))
+                       if any(seg.style and seg.style.bgcolor
+                              for seg in lst.render_line(y))]
+            check("and it actually reaches the screen", painted, "no tinted rows")
+
+            # -- the same trail on PSEUDOCODE -------------------------------- #
+            # The point of doing this in our app rather than using Tenet: a
+            # trace's addresses are instructions, but decomp_map (built for the
+            # split view) says which instructions each pseudocode line covers,
+            # so the trail lands on C.
+            main_ea = app.program.resolve("main")
+            first = t.first_execution(main_ea)
+            if first is None:
+                check("main was executed in the trace", False)
+            else:
+                app._seek(first + 12)
+                await wait(lambda: app._t == first + 12, pilot, 20)
+                lst.focus()
+                await pilot.press("tab")
+                got = await wait(lambda: app.query_one(DecompView).display
+                                 and app.query_one(DecompView)._texts, pilot, 120)
+                dec = app.query_one(DecompView)
+                check("pseudocode is available for the traced function", got)
+                app._seek(first + 12)
+                await pilot.pause(1.0)
+                check("pseudocode lines are painted with the trail",
+                      len(dec.trail) > 2, f"{len(dec.trail)} lines")
+                now = [i for i, k in dec.trail.items() if k == "now"]
+                check("exactly one pseudocode line is 'now'",
+                      len(now) == 1, f"{now}")
+                # The 'now' line must be the one covering the current
+                # instruction, not merely some executed line.
+                covered = app._trail_map[now[0]] if now and app._trail_map else []
+                check("and it's the line covering the current instruction",
+                      t.ip(app._t) in covered,
+                      f"pc={t.ip(app._t):#x} line covers {[hex(a) for a in covered][:4]}")
 
     print(f"\n{PASS} passed, {FAIL} failed")
     return 1 if FAIL else 0

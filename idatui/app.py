@@ -91,6 +91,13 @@ _ASM_KEYWORDS = frozenset({
     "gs", "ss", "align", "public", "assume", "end",
 })
 _S_CURSOR = Style(bgcolor="#2a313c")
+#: Execution trails. Deliberately faint: they sit UNDER the code palette and
+#: must not compete with it — the trail says "you came through here", the text
+#: still has to be readable as code. Now is the loudest because there is exactly
+#: one of it.
+_S_TRAIL_NOW = Style(bgcolor="#3f3410")
+_S_TRAIL_PAST = Style(bgcolor="#2b1c17")     # warm: behind you
+_S_TRAIL_FUTURE = Style(bgcolor="#152230")   # cool: ahead of you
 _S_DIM = Style(color="#7c8b9e", italic=True)
 _S_MATCH = Style(bgcolor="#7a5c00")  # all search matches
 _S_MATCH_CUR = Style(bgcolor="#d0a215", color="#12161c")  # the current match
@@ -777,6 +784,8 @@ class ListingView(SearchMixin, NavMixin, ColumnCursor, ScrollView, can_focus=Tru
         self._search_loading = False
         self._search_pending: list = []  # done-callbacks awaiting the load
         self._link_rows: set[int] = set()  # split-view: linked instruction rows
+        #: {address: 'now'|'past'|'future'} painted under the code (trace mode).
+        self.trail: dict[int, str] = {}
 
     # -- text helpers ------------------------------------------------------ #
     def _head(self, idx: int) -> Head | None:
@@ -1045,6 +1054,12 @@ class ListingView(SearchMixin, NavMixin, ColumnCursor, ScrollView, can_focus=Tru
         linked = idx in self._link_rows
         if linked:
             strip = strip.apply_style(_S_LINK)  # split-view companion band
+        if self.trail and h is not None:
+            kind = self.trail.get(h.ea)
+            if kind is not None:
+                strip = strip.apply_style(
+                    _S_TRAIL_NOW if kind == "now" else
+                    _S_TRAIL_PAST if kind == "past" else _S_TRAIL_FUTURE)
         plain = self._line_plain(idx) if (self._hl_word or idx == self.cursor) else None
         if idx in self._ranges:
             strip = _overlay_ranges(strip, self._ranges[idx], self._match_style(idx))
@@ -1253,6 +1268,9 @@ class DecompView(SearchMixin, NavMixin, ColumnCursor, ScrollView, can_focus=True
         self._gutter = 0  # line-number gutter width (cells)
         self._line_eas: list[int | None] = []  # per-line address (marker stripped)
         self._link_line: int | None = None  # split-view: linked pseudocode line
+        #: {line index: 'now'|'past'|'future'} — the execution trail, mapped from
+        #: instructions onto pseudocode via decomp_map.
+        self.trail: dict[int, str] = {}
         self._term = ""
         self._matches: list[int] = []
         self._ranges: dict[int, list[tuple[int, int]]] = {}
@@ -1386,6 +1404,11 @@ class DecompView(SearchMixin, NavMixin, ColumnCursor, ScrollView, can_focus=True
         base = self._strips[idx]
         if linked:
             base = base.apply_style(_S_LINK)  # split-view companion band
+        kind = self.trail.get(idx) if self.trail else None
+        if kind is not None:
+            base = base.apply_style(
+                _S_TRAIL_NOW if kind == "now" else
+                _S_TRAIL_PAST if kind == "past" else _S_TRAIL_FUTURE)
         if idx in self._ranges:
             base = _overlay_ranges(base, self._ranges[idx], self._match_style(idx))
         if self._hl_word:
@@ -3221,6 +3244,8 @@ class IdaTui(App):
         self._load_args = load_args or ""   # IDA switches for a headerless blob
         self._trace_path = trace_path or ""  # Tenet execution trace to explore
         self._trace = None                   # the loaded Trace, once analysed
+        self._trail_map = []                 # decomp_map for _trail_map_ea
+        self._trail_map_ea = None
         self._t = 0                          # current timestamp in that trace
         self._do_keepalive = keepalive
         self._rpc_path = rpc_path
@@ -5462,8 +5487,68 @@ class IdaTui(App):
             return
         self._t = max(0, min(int(idx), t.length - 1))
         self.query_one(TraceDock).show(t, self._t)
+        self._paint_trail()
         if follow:
             self._goto_ea(t.ip(self._t), push=False)
+
+    def _paint_trail(self) -> None:
+        """Push the execution trail into the code views.
+
+        Recomputed per seek rather than per repaint: it's ~200 lookups, and a
+        repaint happens far more often than a step.
+        """
+        t = self._trace
+        if t is None:
+            return
+        trail = t.trail(self._t)
+        try:
+            lst = self.query_one(ListingView)
+            lst.trail = trail
+            lst.refresh()
+        except Exception:  # noqa: BLE001 -- view not mounted yet
+            pass
+        self._paint_trail_decomp(trail)
+
+    def _paint_trail_decomp(self, trail: dict) -> None:
+        """Map the instruction trail onto pseudocode lines.
+
+        This is the thing Tenet can't do: it paints disassembly, because that's
+        where a trace's addresses live. We already have decomp_map (built for
+        the split view) saying which instructions each pseudocode line covers,
+        so the same trail lands on C.
+
+        A line covers many instructions, so it takes the strongest kind present:
+        'now' wins over 'past' wins over 'future' — if the instruction you are
+        standing on is part of this line, this line is where you are.
+        """
+        try:
+            dec = self.query_one(DecompView)
+        except Exception:  # noqa: BLE001
+            return
+        ea = dec.loaded_ea
+        if not dec.display or ea is None or self.program is None:
+            dec.trail = {}
+            return
+        if self._trail_map_ea != ea:
+            # Cached per function: decomp_map is an RPC and stepping is
+            # interactive, so paying it per keystroke would be felt.
+            try:
+                self._trail_map = self.program.decomp_map(ea)
+            except Exception:  # noqa: BLE001
+                self._trail_map = []
+            self._trail_map_ea = ea
+        rank = {"future": 0, "past": 1, "now": 2}
+        lines: dict[int, str] = {}
+        for i, eas in enumerate(self._trail_map or []):
+            best = None
+            for a in eas:
+                k = trail.get(a)
+                if k is not None and (best is None or rank[k] > rank[best]):
+                    best = k
+            if best is not None:
+                lines[i] = best
+        dec.trail = lines
+        dec.refresh()
 
     def _step(self, delta: int) -> None:
         if self._trace is None:

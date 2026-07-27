@@ -126,6 +126,11 @@ ones the current instruction wrote are highlighted) and a timeline. `]` and `[`
 step one instruction forward and back; `}` and `{` step over a call by following
 the stack pointer. The code view follows.
 
+Both code views are painted with the execution trail: where you just came from,
+where you're about to go, and the instruction you're standing on. The pseudocode
+view is painted too — a trace records instructions, but `decomp_map` says which
+instructions each C line covers, so the same trail lands on the decompilation.
+
 Trace addresses are rebased onto the database automatically — a traced process
 is relocated, so nothing lines up until that's solved.
 

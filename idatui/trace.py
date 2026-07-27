@@ -296,6 +296,45 @@ class Trace:
                 out[ea] = len(ts)
         return out
 
+    def prev_ips(self, idx: int, n: int) -> list[int]:
+        """Addresses executed in the ``n`` steps before ``idx`` (nearest first).
+
+        A trail, not all of history: showing every address the trace ever
+        touched says almost nothing on a loop-heavy program, whereas the last
+        few dozen steps say how you GOT here.
+        """
+        lo = max(idx - n, 0)
+        return [self.ips[i] + self.slide for i in range(idx - 1, lo - 1, -1)]
+
+    def next_ips(self, idx: int, n: int) -> list[int]:
+        """Addresses executed in the ``n`` steps after ``idx`` (nearest first)."""
+        hi = min(idx + n + 1, self.length)
+        return [self.ips[i] + self.slide for i in range(idx + 1, hi)]
+
+    def trail(self, idx: int, n: int = 96) -> dict[int, str]:
+        """{address: 'now' | 'past' | 'future'} around ``idx``.
+
+        Where an address appears on both sides — a loop body, which is most of
+        them — the nearer side wins, because that's the one that explains the
+        step you are about to take or just took.
+        """
+        out: dict[int, str] = {}
+        for k, ea in enumerate(self.next_ips(idx, n)):
+            out.setdefault(ea, "future")
+        for k, ea in enumerate(self.prev_ips(idx, n)):
+            prev = out.get(ea)
+            if prev is None:
+                out[ea] = "past"
+            elif prev == "future":
+                # Same distance rule as above, resolved by which loop found it
+                # first would be arbitrary; compare real distances instead.
+                fwd = next((i for i, a in enumerate(self.next_ips(idx, n)) if a == ea), n)
+                if k < fwd:
+                    out[ea] = "past"
+        if 0 <= idx < self.length:
+            out[self.ips[idx] + self.slide] = "now"
+        return out
+
     def first_execution(self, ea: int) -> int | None:
         ts = self.executions(ea)
         return ts[0] if ts else None
