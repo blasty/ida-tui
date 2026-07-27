@@ -112,6 +112,26 @@ multi-image firmware wants. They apply to the first open only — after that the
 > reopen. Delete those stale files (never the `.i64`) and retry — `ida-tui` does
 > this automatically.
 
+## Execution traces
+
+Load a [Tenet](https://github.com/gaasedelen/tenet) trace alongside the binary
+and explore it in time:
+
+```sh
+./ida-tui /path/to/binary --trace trace.0.log
+```
+
+A docked pane on the right shows the registers at the current timestamp (the
+ones the current instruction wrote are highlighted) and a timeline. `]` and `[`
+step one instruction forward and back; `}` and `{` step over a call by following
+the stack pointer. The code view follows.
+
+Trace addresses are rebased onto the database automatically — a traced process
+is relocated, so nothing lines up until that's solved.
+
+Traces are recorded separately; see `~/dev/tenet/tenet-original/tracers/` for the
+QEMU tracer.
+
 ## RPC / driving the TUI
 
 Give the TUI `--rpc <sock>` to expose a unix-socket control channel, then drive

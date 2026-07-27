@@ -64,6 +64,8 @@ def main(argv: list[str] | None = None) -> int:
                    help="do not run the keepalive heartbeat")
     p.add_argument("--rpc", metavar="PATH",
                    help="listen for RPC on this unix socket (puppeteer the TUI)")
+    p.add_argument("--trace", metavar="FILE",
+                   help="Tenet execution trace to explore alongside the binary")
     g = p.add_argument_group(
         "loading a headerless blob",
         "An ELF/PE/Mach-O says what it is. A raw firmware dump doesn't, and IDA "
@@ -157,7 +159,9 @@ def main(argv: list[str] | None = None) -> int:
     rpc_path = os.path.abspath(os.path.expanduser(args.rpc)) if args.rpc else None
     IdaTui(open_path=binary, keepalive=not args.no_keepalive,
            rpc_path=rpc_path, ttl=args.ttl, project=project,
-           load_args=_load_args(load)).run()
+           load_args=_load_args(load),
+           trace_path=(os.path.abspath(os.path.expanduser(args.trace))
+                       if args.trace else "")).run()
     return 0
 
 

@@ -2286,6 +2286,101 @@ class HelpScreen(ModalScreen):
         self.dismiss(None)
 
 
+class TraceDock(Vertical):
+    """Registers and a timeline for the loaded execution trace, docked right.
+
+    Persistent rather than a modal: a trace turns every other view into "state
+    at time T", so the time and the registers are context you read WHILE looking
+    at code, not something you open and dismiss.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(id="trace-dock")
+        self.trace = None
+        self.idx = 0
+
+    def compose(self) -> ComposeResult:
+        yield Static("", id="trace-head", markup=False)
+        yield Static("", id="trace-regs", markup=False)
+        yield TraceTimeline(id="trace-timeline")
+
+    def show(self, trace, idx: int) -> None:
+        self.trace = trace
+        self.idx = idx
+        tl = self.query_one(TraceTimeline)
+        tl.trace, tl.idx = trace, idx
+        self.refresh_state()
+
+    def refresh_state(self) -> None:
+        t = self.trace
+        if t is None:
+            return
+        n = max(t.length, 1)
+        pct = (self.idx + 1) * 100.0 / n
+        head = Text()
+        head.append(f" {self.idx:,}", _S_MNEM)
+        head.append(f" / {t.length - 1:,}  ", _S_DIM)
+        head.append(f"{pct:5.1f}%\n", _S_ADDR)
+        # Register values are machine state and stay as the trace recorded them,
+        # but everything else on screen is in database addresses. Showing both
+        # here explains the relationship once, where it's read, instead of
+        # leaving "pc 0x2aed" next to "rip 0x7ffff6faaaed" to be puzzled over.
+        head.append(f" pc {t.ip(self.idx):#x}", _S_LABEL)
+        if t.slide:
+            head.append(f"  (trace {t.raw_ip(self.idx):#x})", _S_DIM)
+        self.query_one("#trace-head", Static).update(head)
+
+        # Registers, with the ones THIS instruction wrote called out: that
+        # difference is the entire reason a delta trace is readable.
+        changed = t.changed(self.idx)
+        body = Text()
+        pc = t.pc_name
+        for name in t.registers:
+            v = t.register(name, self.idx)
+            if v is None:
+                continue
+            hot = name in changed
+            body.append(f" {name:>4} ", _S_MNEM if hot else _S_DIM)
+            body.append(f"{v:#018x}\n" if v > 0xFFFFFFFF else f"{v:#010x}\n",
+                        _S_DATA if hot else (_S_LABEL if name == pc else _S_INSN))
+        self.query_one("#trace-regs", Static).update(body)
+        tl = self.query_one(TraceTimeline)
+        tl.idx = self.idx
+        tl.refresh()
+
+
+class TraceTimeline(Static):
+    """The trace as a vertical bar: where you are, and where you've been.
+
+    Tenet's timeline is a Qt widget you scroll and drag to zoom. A terminal
+    column can't do that, but it can do the part that matters — show the shape
+    of the trace and your position in it — with one row per N timestamps.
+    """
+
+    def __init__(self, **kw) -> None:
+        super().__init__("", **kw)
+        self.trace = None
+        self.idx = 0
+
+    def render(self) -> Text:
+        t = self.trace
+        out = Text()
+        h = max(self.size.height - 1, 1)
+        if t is None or not t.length:
+            return out
+        out.append(" timeline\n", _S_DIM)
+        h = max(h - 1, 1)
+        per = max(t.length / h, 1.0)
+        here = int(self.idx / per)
+        for row in range(h):
+            if row == here:
+                out.append(" \u25b6", _S_MNEM)
+                out.append(f" {int(row * per):>10,}\n", _S_ADDR)
+            else:
+                out.append(" \u2502\n", _S_SEP if row % 5 else _S_ADDR)
+        return out
+
+
 class LoadOptionsScreen(ModalScreen):
     """Ask how to load a file no loader recognised.
 
@@ -3026,6 +3121,10 @@ class IdaTui(App):
     #pal-title { dock: top; height: 1; background: $accent; color: $background; text-style: bold; padding: 0 1; }
     #pal-input { border: none; height: 1; margin: 0 1; background: $panel; color: $text; }
     #pal-list { height: auto; max-height: 24; }
+    #trace-dock { dock: right; width: 34; background: $surface; border-left: solid $panel; }
+    #trace-head { height: 2; padding: 0 1; background: $panel; }
+    #trace-regs { height: auto; padding: 1 0 0 0; }
+    #trace-timeline { height: 1fr; padding: 1 0 0 0; }
     #load-note { height: 2; padding: 1 1 0 1; color: $text-muted; }
     /* Cap the processor list so the ADDRESS FIELD is always on screen: with the
        palette default (24) the box outgrew the terminal and the field you need
@@ -3071,6 +3170,12 @@ class IdaTui(App):
         Binding("quotation_mark,shift+f12", "strings", "Strings", show=False),
         Binding("ctrl+o", "switch_binary", "Binaries", show=False),
         Binding("ctrl+l", "load_options", "Reload as…", show=False),
+        # Trace stepping. ] / [ move one instruction, } / { step over a
+        # call by following the stack pointer.
+        Binding("right_square_bracket", "step_fwd", "Step", show=False),
+        Binding("left_square_bracket", "step_back", "Step back", show=False),
+        Binding("right_curly_bracket", "step_over_fwd", "Step over", show=False),
+        Binding("left_curly_bracket", "step_over_back", "Step over back", show=False),
         Binding("f1", "help", "Keys", show=False),
         Binding("g", "goto", "Goto"),
         Binding("slash", "filter", "Filter", show=False),
@@ -3082,7 +3187,7 @@ class IdaTui(App):
 
     def __init__(self, open_path: str | None = None, keepalive: bool = True,
                  rpc_path: str | None = None, ttl: int = 1800,
-                 project=None, load_args: str = "") -> None:
+                 project=None, load_args: str = "", trace_path: str = "") -> None:
         super().__init__()
         # Project mode is additive: with no project this is the plain
         # single-binary app, unchanged.
@@ -3114,6 +3219,9 @@ class IdaTui(App):
         self._open_path = open_path
         self._ttl = ttl
         self._load_args = load_args or ""   # IDA switches for a headerless blob
+        self._trace_path = trace_path or ""  # Tenet execution trace to explore
+        self._trace = None                   # the loaded Trace, once analysed
+        self._t = 0                          # current timestamp in that trace
         self._do_keepalive = keepalive
         self._rpc_path = rpc_path
         self._rpc = None
@@ -3168,6 +3276,11 @@ class IdaTui(App):
             hx = HexView()
             hx.display = False
             yield hx
+            # Docked right and only shown once a trace is loaded, so a normal
+            # session looks exactly as it did.
+            td = TraceDock()
+            td.display = False
+            yield td
         si = Input(id="search")
         si.display = False
         si.can_focus = False
@@ -3627,6 +3740,8 @@ class IdaTui(App):
         # otherwise pop the fuzzy symbol picker.
         self.app.call_from_thread(self._auto_land)
         self._index_binary()  # project mode: keep the cross-binary index fresh
+        if self._trace_path and self._trace is None:
+            self._load_trace()   # needs the index above: rebasing reads it
 
     @work(thread=True, exclusive=True, group="prewarm")
     def _prewarm_provider(self) -> None:
@@ -5298,6 +5413,100 @@ class IdaTui(App):
             # names pane, Ctrl+N and the "no functions" hint all read. Without
             # this, `p` gave you a function the rest of the app couldn't see.
             self._reindex_functions()
+
+    def _load_trace(self) -> None:
+        """Parse the trace and line it up with the database.
+
+        Runs after the function index exists: rebasing needs the database's
+        addresses, and without it nothing in the trace matches anything on
+        screen (our echo trace runs at 0x7ffff6faa000; the database has that
+        code at 0x2000).
+        """
+        from .trace import Trace
+        path = self._trace_path
+        try:
+            def note(n):
+                self.app.call_from_thread(
+                    self._status, f"trace: {n:,} instructions\u2026")
+            trace = Trace.load(path, progress=note)
+        except OSError as e:
+            self.app.call_from_thread(self._status, f"trace: {e}")
+            return
+        if not trace.length:
+            self.app.call_from_thread(
+                self._status, f"trace: {os.path.basename(path)} is empty")
+            return
+        idx = self._func_index
+        addrs = [f.addr for f in idx.all_loaded()] if idx is not None else []
+        slide = trace.rebase(addrs)
+        trace.apply_slide(slide)
+        hit = sum(1 for f in (idx.all_loaded() if idx else []) if trace.executions(f.addr))
+        self.app.call_from_thread(self._trace_ready, trace, slide, hit)
+
+    def _trace_ready(self, trace, slide: int, hit: int) -> None:
+        self._trace = trace
+        self._t = 0
+        dock = self.query_one(TraceDock)
+        dock.display = True
+        dock.show(trace, 0)
+        where = (f"rebased {slide:+#x}" if slide else "no rebase needed")
+        self._status(f"trace: {trace.length:,} instructions, {hit} functions "
+                     f"touched ({where})", priority=True)
+        self._seek(0, follow=True)
+
+    # -- trace navigation --------------------------------------------------- #
+    def _seek(self, idx: int, follow: bool = True) -> None:
+        """Move to timestamp ``idx``; ``follow`` takes the code view with it."""
+        t = self._trace
+        if t is None or not t.length:
+            return
+        self._t = max(0, min(int(idx), t.length - 1))
+        self.query_one(TraceDock).show(t, self._t)
+        if follow:
+            self._goto_ea(t.ip(self._t), push=False)
+
+    def _step(self, delta: int) -> None:
+        if self._trace is None:
+            self._status("no trace loaded (--trace FILE)")
+            return
+        self._seek(self._t + delta)
+
+    def action_step_fwd(self) -> None:
+        self._step(1)
+
+    def action_step_back(self) -> None:
+        self._step(-1)
+
+    def _step_over(self, direction: int) -> None:
+        """Step over a call by following the stack pointer.
+
+        A call pushes, so the callee runs with SP BELOW where we started;
+        stepping until SP comes back up lands after the call returns. Cheaper
+        and more robust than recognising call instructions per architecture,
+        which is what the mode makes it: if this instruction doesn't call
+        anything, SP is already >= the start and it degenerates to one step.
+        """
+        t = self._trace
+        if t is None:
+            self._status("no trace loaded (--trace FILE)")
+            return
+        sp_name = "rsp" if "rsp" in t.reg_at else ("esp" if "esp" in t.reg_at else "sp")
+        sp0 = t.register(sp_name, self._t)
+        i = self._t + direction
+        limit = 200000          # a runaway search must not hang the UI
+        while 0 <= i < t.length and limit > 0:
+            sp = t.register(sp_name, i)
+            if sp0 is None or sp is None or sp >= sp0:
+                break
+            i += direction
+            limit -= 1
+        self._seek(max(0, min(i, t.length - 1)))
+
+    def action_step_over_fwd(self) -> None:
+        self._step_over(1)
+
+    def action_step_over_back(self) -> None:
+        self._step_over(-1)
 
     @work(thread=True, exclusive=True, group="load-funcs")
     def _reindex_functions(self) -> None:
