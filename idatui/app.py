@@ -5618,22 +5618,16 @@ class IdaTui(App):
             dec.trail = {}
             return
         if self._trail_map_ea != ea:
-            # Cached per function: decomp_map is an RPC and stepping is
-            # interactive, so paying it per keystroke would be felt.
+            # One index, built once per decompiled function and shared with the
+            # split view (_apply_split_map fills the same fields). decomp_map is
+            # an RPC and stepping is interactive, so paying it per keystroke —
+            # or twice, once for each of two parallel maps — would be felt.
             try:
-                self._trail_map = self.program.decomp_map(ea)
+                self._apply_split_map(ea, self.program.decomp_map(ea))
             except Exception:  # noqa: BLE001
-                self._trail_map = []
-            self._trail_map_ea = ea
-            # ea -> line, built once per function: stepping asks for it on every
-            # keypress and a scan per step would be quadratic in the function.
-            self._trail_line_of = {}
-            for i, eas in enumerate(self._trail_map or []):
-                for a in eas:
-                    self._trail_line_of.setdefault(a, i)
-            self._trail_eas = sorted(self._trail_line_of)
-            self._trail_span = ((self._trail_eas[0], self._trail_eas[-1])
-                                if self._trail_eas else None)
+                self._trail_map, self._trail_map_ea = [], ea
+                self._trail_line_of, self._trail_eas = {}, []
+                self._trail_span = None
         rank = {"future": 0, "past": 1, "now": 2}
         lines: dict[int, str] = {}
         for i, eas in enumerate(self._trail_map or []):
@@ -6564,8 +6558,18 @@ class IdaTui(App):
         self.app.call_from_thread(self._apply_split_map, ea, m)
 
     def _apply_split_map(self, ea: int, m: list) -> None:
-        if not self._split or self._cur is None or self._cur.ea != ea:
-            return  # left split / navigated away
+        """Index the per-line instruction map for the decompiled function.
+
+        Keyed to what the DECOMPILER holds, not to _cur, and not conditional on
+        split being on. The old guard dropped the result whenever _cur had moved
+        while the fetch was in flight — during trace stepping that is almost
+        always — leaving the split view working from the map of the function you
+        just left. _cur follows the cursor; this map describes the pseudocode on
+        screen, and those are different things.
+        """
+        dec = self._try_view(DecompView)
+        if dec is not None and dec.loaded_ea is not None and ea != dec.loaded_ea:
+            return  # a stale fetch for a function we no longer show
         self._split_eamap = m
         self._split_ea2line = {}
         alleas = []
@@ -6576,7 +6580,15 @@ class IdaTui(App):
         # ea span of the decompiled function: when the listing cursor leaves it,
         # _sync_split re-points the decomp to the function under the cursor.
         self._split_range = (min(alleas), max(alleas)) if alleas else None
-        self._sync_split(self._active)  # re-link with the region map
+        # ONE index, shared with the trace path: it used to keep a parallel copy
+        # of exactly this, fetched separately and keyed differently, which is how
+        # the two ended up describing different functions.
+        self._trail_map, self._trail_map_ea = m, ea
+        self._trail_line_of = dict(self._split_ea2line)
+        self._trail_eas = sorted(self._trail_line_of)
+        self._trail_span = self._split_range
+        if self._split:
+            self._sync_split(self._active)  # re-link with the region map
 
     def on_decomp_view_cursor_moved(self, msg: DecompView.CursorMoved) -> None:
         dv = self._try_view(DecompView)

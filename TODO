@@ -109,7 +109,8 @@ waits on the rest. The tempting fallback — nearest mapped address at or before
 the pc — is UNSOUND: C lines are not monotonic in address, and it resolved an
 instruction early in main to a line near the end of the function.
 
-Left alone: _split_ea2line and _split_range are still fed by that guarded path,
-so the split view's own sync can still work from the map of the function you
-just left. It has not caused a visible problem outside stepping, but it is the
-same latent issue.
+FIXED: the split view and the trace path used to keep two parallel maps of the
+same thing, fetched separately and keyed differently — the split one on _cur (the
+cursor's function), the trace one on the decompiler's loaded function. That is
+how they ended up describing different functions. There is now one index, keyed
+to what the decompiler HOLDS, and both read it.
