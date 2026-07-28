@@ -3247,6 +3247,8 @@ class IdaTui(App):
         self._trace = None                   # the loaded Trace, once analysed
         self._trail_map = []                 # decomp_map for _trail_map_ea
         self._trail_map_ea = None
+        self._pending_trace_line = None      # step waiting on a re-decompile
+        self._trail_line_of: dict[int, int] = {}   # ea -> pseudocode line
         self._t = 0                          # current timestamp in that trace
         self._do_keepalive = keepalive
         self._rpc_path = rpc_path
@@ -5494,13 +5496,73 @@ class IdaTui(App):
         self._t = max(0, min(int(idx), t.length - 1))
         self.query_one(TraceDock).show(t, self._t)
         self._paint_trail()
-        if follow:
-            # Stay in whichever view you're reading. Without prefer_decomp a
-            # step from the pseudocode navigates to an address, which opens the
-            # listing — so stepping through C threw you out of C on the first
-            # keypress.
-            self._goto_ea(t.ip(self._t), push=False,
-                          prefer_decomp=(self._active == "decomp"))
+        if not follow:
+            return
+        pc = t.ip(self._t)
+        if self._split and self._seek_split(pc):
+            return
+        # Stay in whichever view you're reading. Without prefer_decomp a step
+        # from the pseudocode navigates to an address, which opens the listing —
+        # so stepping through C threw you out of C on the first keypress.
+        self._goto_ea(pc, push=False,
+                      prefer_decomp=(self._active == "decomp"))
+
+    def _seek_split(self, pc: int) -> bool:
+        """Put BOTH panes on ``pc``. True if handled.
+
+        Normal navigation moves one pane and gives the companion a band, never a
+        cursor — that rule exists so the two can't chase each other. A trace step
+        isn't navigation though: time is a single global position, and both views
+        are showing the same instant, so both cursors belong on it.
+
+        The scroll anchoring is unchanged: after placing the cursors, the usual
+        _sync_split still bands the companion and aligns it to the driver's
+        screen row, so the eye tracks straight across.
+        """
+        lst = self.query_one(ListingView)
+        dec = self.query_one(DecompView)
+        if lst.model is None:
+            return False
+        row = lst.model.ensure_ea(pc)
+        if row is None or row < 0:
+            return False        # not in this listing (other segment): full nav
+        lst.cursor = row
+        lst._scroll_cursor_into_view()
+
+        rng = self._split_range
+        if rng is None or not (rng[0] <= pc <= rng[1]):
+            # Execution left the decompiled function. Load the new one, and
+            # remember where to land once its line map exists.
+            self._pending_trace_line = pc
+            self._resync_decomp_async(pc)
+            return True
+        self._place_decomp_at(pc)
+        self._sync_split(self._active)
+        return True
+
+    def _place_decomp_at(self, pc: int) -> None:
+        """Move the pseudocode cursor to the line covering ``pc``.
+
+        Uses the map the trail painting already keeps (keyed to the decompiler's
+        CURRENTLY loaded function), not the split view's _split_ea2line. That one
+        is refreshed by a guarded async path — it drops a result if _cur moved
+        while it was in flight — and a burst of steps moves _cur constantly, so
+        during stepping it is frequently a map of the function you just left.
+        """
+        dec = self.query_one(DecompView)
+        line = None
+        if self._trail_map_ea == dec.loaded_ea and self._trail_line_of:
+            line = self._trail_line_of.get(pc)
+        if line is None:
+            line = self._split_ea2line.get(pc)
+        if line is None:
+            line = dec.line_for_ea(pc)
+        if line is not None:
+            dec.goto(line, dec.cursor_x)
+
+    @work(thread=True, exclusive=True, group="split-resync")
+    def _resync_decomp_async(self, ea: int) -> None:
+        self._resync_decomp(ea)
 
     def _paint_trail(self) -> None:
         """Push the execution trail into the code views.
@@ -5548,6 +5610,12 @@ class IdaTui(App):
             except Exception:  # noqa: BLE001
                 self._trail_map = []
             self._trail_map_ea = ea
+            # ea -> line, built once per function: stepping asks for it on every
+            # keypress and a scan per step would be quadratic in the function.
+            self._trail_line_of = {}
+            for i, eas in enumerate(self._trail_map or []):
+                for a in eas:
+                    self._trail_line_of.setdefault(a, i)
         rank = {"future": 0, "past": 1, "now": 2}
         lines: dict[int, str] = {}
         for i, eas in enumerate(self._trail_map or []):
@@ -5560,6 +5628,12 @@ class IdaTui(App):
                 lines[i] = best
         dec.trail = lines
         dec.refresh()
+        pend, self._pending_trace_line = self._pending_trace_line, None
+        if pend is not None and self._split:
+            # The function was still decompiling when the step happened; land
+            # now that its line map exists.
+            self._place_decomp_at(pend)
+            self._sync_split(self._active)
 
     def _step(self, delta: int) -> None:
         if self._trace is None:

@@ -208,6 +208,29 @@ async def run() -> int:
                 check("and so does stepping backward",
                       app._active == "decomp", f"active={app._active}")
 
+            # -- split view: a step is a GLOBAL move ------------------------ #
+            # Normal navigation moves one pane and gives the companion a band,
+            # never a cursor, so the two can't chase each other. Time isn't
+            # navigation though: both panes show the same instant, so the
+            # listing cursor must sit on the current instruction.
+            app.action_toggle_split()
+            await pilot.pause(2.0)
+            if not app._split:
+                check("split view toggled on", False)
+            else:
+                base = t.first_execution(main_ea) or 0
+                tracked = 0
+                for k in range(2, 8):
+                    app._seek(base + k)
+                    await pilot.pause(0.5)
+                    if lst._cursor_ea() == t.ip(app._t):
+                        tracked += 1
+                check("stepping in split moves the listing cursor to the pc",
+                      tracked == 6, f"{tracked}/6 steps tracked")
+                check("and the trail follows in both panes",
+                      lst.trail.get(t.ip(app._t)) == "now",
+                      f"{lst.trail.get(t.ip(app._t))}")
+
     print(f"\n{PASS} passed, {FAIL} failed")
     return 1 if FAIL else 0
 

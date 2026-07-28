@@ -88,3 +88,32 @@ The general rule this came from: a suite whose result depends on its own history
 can't be trusted to accuse the code. tests/test_blob_ui.py builds a throwaway
 binary; test_project_ui.py stages copies; test_thumb_ui.py deletes the .i64
 before each phase because the T flag and segment bitness are SAVED in it.
+
+## decomp_map returns almost nothing for some functions (blocks split stepping)
+
+Found while making a trace step move BOTH cursors in split view. For cat's
+main() — 700+ pseudocode lines — decomp_map() came back with FOUR entries, so
+almost no instruction address maps to a C line and the pseudocode cursor can't
+follow the program counter. On echo's main the same call maps plenty (the trail
+painting test relies on it), so it is function- or timing-dependent, not simply
+broken.
+
+Two things to separate when picking this up:
+
+* Is the map itself sparse (the tool's item.dstr() walk missing most items for
+  this function), or is it being FETCHED at a moment when the decompiler has a
+  different function loaded? _trail_map_ea and dec.loaded_ea both read 0x24a0
+  when it happened, which argues for the former.
+* dec.goto(96) left dec.cursor at 0 in the same run. That may be a symptom of
+  the same confusion (a stale/short _strips) or an independent bug. Check it on
+  its own before assuming.
+
+Also noticed: _split_ea2line is refreshed by a guarded async path
+(_apply_split_map drops its result if _cur moved while in flight). A burst of
+trace steps moves _cur constantly, so during stepping it is frequently the map
+of the function you just left. _place_decomp_at now prefers the trail's map for
+that reason, but the split view's own sync still uses the laggy one.
+
+Consequence today: in split view a trace step moves the LISTING cursor onto the
+current instruction (works, tested) but the pseudocode cursor only follows when
+the map happens to cover that address.
