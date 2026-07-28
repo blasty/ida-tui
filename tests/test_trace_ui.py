@@ -194,6 +194,20 @@ async def run() -> int:
                       t.ip(app._t) in covered,
                       f"pc={t.ip(app._t):#x} line covers {[hex(a) for a in covered][:4]}")
 
+                # Stepping must not throw you out of the view you're reading.
+                # A step navigates to an address, and navigating to an address
+                # opens the LISTING unless the decompiler is preferred — so
+                # stepping through C used to drop you into disassembly on the
+                # first keypress. Found by watching a demo, not by a test.
+                await pilot.press("]")
+                await pilot.pause(1.2)
+                check("stepping in pseudocode stays in pseudocode",
+                      app._active == "decomp", f"active={app._active}")
+                await pilot.press("[")
+                await pilot.pause(1.2)
+                check("and so does stepping backward",
+                      app._active == "decomp", f"active={app._active}")
+
     print(f"\n{PASS} passed, {FAIL} failed")
     return 1 if FAIL else 0
 

@@ -5495,7 +5495,12 @@ class IdaTui(App):
         self.query_one(TraceDock).show(t, self._t)
         self._paint_trail()
         if follow:
-            self._goto_ea(t.ip(self._t), push=False)
+            # Stay in whichever view you're reading. Without prefer_decomp a
+            # step from the pseudocode navigates to an address, which opens the
+            # listing — so stepping through C threw you out of C on the first
+            # keypress.
+            self._goto_ea(t.ip(self._t), push=False,
+                          prefer_decomp=(self._active == "decomp"))
 
     def _paint_trail(self) -> None:
         """Push the execution trail into the code views.
