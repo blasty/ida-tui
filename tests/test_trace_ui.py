@@ -231,6 +231,27 @@ async def run() -> int:
                       lst.trail.get(t.ip(app._t)) == "now",
                       f"{lst.trail.get(t.ip(app._t))}")
 
+                # The pseudocode cursor follows too — but only for instructions
+                # the decompiler actually attributes to a line. About half
+                # aren't, and the tempting fallback (nearest mapped address at
+                # or before the pc) is unsound because C lines are not monotonic
+                # in address: an early instruction resolved to a line near the
+                # END of the function. Better to wait than to jump somewhere
+                # unrelated.
+                dec = app.query_one(DecompView)
+                mapped = missed = 0
+                for k in range(2, 30):
+                    app._seek(base + k)
+                    await pilot.pause(0.3)
+                    pc = t.ip(app._t)
+                    if app._trail_map_ea == dec.loaded_ea and pc in app._trail_line_of:
+                        mapped += 1
+                        if dec.cursor != app._trail_line_of[pc]:
+                            missed += 1
+                check("the pseudocode cursor follows every mapped instruction",
+                      mapped > 3 and missed == 0,
+                      f"{mapped} mapped, {missed} not followed")
+
     print(f"\n{PASS} passed, {FAIL} failed")
     return 1 if FAIL else 0
 

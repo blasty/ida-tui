@@ -3249,6 +3249,8 @@ class IdaTui(App):
         self._trail_map_ea = None
         self._pending_trace_line = None      # step waiting on a re-decompile
         self._trail_line_of: dict[int, int] = {}   # ea -> pseudocode line
+        self._trail_span = None                   # ea span of that function
+        self._trail_eas: list[int] = []            # sorted keys of _trail_line_of
         self._t = 0                          # current timestamp in that trace
         self._do_keepalive = keepalive
         self._rpc_path = rpc_path
@@ -5529,10 +5531,16 @@ class IdaTui(App):
         lst.cursor = row
         lst._scroll_cursor_into_view()
 
-        rng = self._split_range
-        if rng is None or not (rng[0] <= pc <= rng[1]):
-            # Execution left the decompiled function. Load the new one, and
-            # remember where to land once its line map exists.
+        # Has execution actually left the decompiled function? Ask the map the
+        # trail painting keeps, which is keyed to what the decompiler currently
+        # HOLDS. _split_range comes from the guarded async path and lags, so a
+        # stale one made every step look like a function change: the decompiler
+        # bounced main -> PLT stub -> main, each bounce costing a synchronous
+        # 769-line map fetch on the UI thread.
+        span = self._trail_span
+        inside = (pc in self._trail_line_of
+                  or (span is not None and span[0] <= pc <= span[1]))
+        if not inside:
             self._pending_trace_line = pc
             self._resync_decomp_async(pc)
             return True
@@ -5552,6 +5560,13 @@ class IdaTui(App):
         dec = self.query_one(DecompView)
         line = None
         if self._trail_map_ea == dec.loaded_ea and self._trail_line_of:
+            # EXACT match only. The decompiler doesn't attribute every
+            # instruction to a line (about half of main's aren't), and the
+            # tempting fallback — the nearest mapped instruction at or before
+            # the pc — is unsound: C lines are not monotonic in address, so
+            # 0x24a8 early in main resolved to line 708, "sub_2040();", near the
+            # end. A cursor that jumps to an unrelated statement is worse than
+            # one that waits; the trail still marks where we are.
             line = self._trail_line_of.get(pc)
         if line is None:
             line = self._split_ea2line.get(pc)
@@ -5616,6 +5631,9 @@ class IdaTui(App):
             for i, eas in enumerate(self._trail_map or []):
                 for a in eas:
                     self._trail_line_of.setdefault(a, i)
+            self._trail_eas = sorted(self._trail_line_of)
+            self._trail_span = ((self._trail_eas[0], self._trail_eas[-1])
+                                if self._trail_eas else None)
         rank = {"future": 0, "past": 1, "now": 2}
         lines: dict[int, str] = {}
         for i, eas in enumerate(self._trail_map or []):

@@ -89,31 +89,27 @@ can't be trusted to accuse the code. tests/test_blob_ui.py builds a throwaway
 binary; test_project_ui.py stages copies; test_thumb_ui.py deletes the .i64
 before each phase because the T flag and segment bitness are SAVED in it.
 
-## decomp_map returns almost nothing for some functions (blocks split stepping)
+## decomp_map was NOT the problem (corrected)
 
-Found while making a trace step move BOTH cursors in split view. For cat's
-main() — 700+ pseudocode lines — decomp_map() came back with FOUR entries, so
-almost no instruction address maps to a C line and the pseudocode cursor can't
-follow the program counter. On echo's main the same call maps plenty (the trail
-painting test relies on it), so it is function- or timing-dependent, not simply
-broken.
+I recorded here that decomp_map returned four entries for cat's main and blamed
+the tool. It doesn't: called directly it returns 769 lines, 475 with addresses,
+for exactly that function. The four-line map belonged to a PLT stub the
+decompiler had momentarily switched to, sampled mid-bounce.
 
-Two things to separate when picking this up:
+The real fault was the resync decision in _seek_split using _split_range, which
+is maintained by a guarded async path and lags. A stale range made every step
+look like a function change, so the decompiler thrashed
+(main -> stub -> main), each bounce paying a synchronous 769-line map fetch on
+the UI thread. Fixed by deciding from the map the trail painting already holds,
+which is keyed to what the decompiler currently HAS loaded.
 
-* Is the map itself sparse (the tool's item.dstr() walk missing most items for
-  this function), or is it being FETCHED at a moment when the decompiler has a
-  different function loaded? _trail_map_ea and dec.loaded_ea both read 0x24a0
-  when it happened, which argues for the former.
-* dec.goto(96) left dec.cursor at 0 in the same run. That may be a symptom of
-  the same confusion (a stale/short _strips) or an independent bug. Check it on
-  its own before assuming.
+Still true and worth knowing: the decompiler attributes only about half of a
+function's instructions to a line, so the pseudocode cursor moves on those and
+waits on the rest. The tempting fallback — nearest mapped address at or before
+the pc — is UNSOUND: C lines are not monotonic in address, and it resolved an
+instruction early in main to a line near the end of the function.
 
-Also noticed: _split_ea2line is refreshed by a guarded async path
-(_apply_split_map drops its result if _cur moved while in flight). A burst of
-trace steps moves _cur constantly, so during stepping it is frequently the map
-of the function you just left. _place_decomp_at now prefers the trail's map for
-that reason, but the split view's own sync still uses the laggy one.
-
-Consequence today: in split view a trace step moves the LISTING cursor onto the
-current instruction (works, tested) but the pseudocode cursor only follows when
-the map happens to cover that address.
+Left alone: _split_ea2line and _split_range are still fed by that guarded path,
+so the split view's own sync can still work from the map of the function you
+just left. It has not caused a visible problem outside stepping, but it is the
+same latent issue.
