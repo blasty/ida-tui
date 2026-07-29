@@ -14,10 +14,10 @@ import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from textual.widgets import Static  # noqa: E402
+from textual.widgets import Input, OptionList, Static  # noqa: E402
 
 from idatui.app import (DecompView, IdaTui, ListingView,  # noqa: E402
-                        TraceDock)
+                        RegWriteScreen, TraceDock)
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 TRACER = os.path.expanduser(
@@ -285,6 +285,86 @@ async def run() -> int:
                 check("the pseudocode cursor follows every mapped instruction",
                       mapped > 3 and missed == 0,
                       f"{mapped} mapped, {missed} not followed")
+
+            # -- seeking, as opposed to stepping ---------------------------- #
+            # "When else did this instruction run?" — the question that makes a
+            # trace more than a very long single-step log.
+            hot = max(t.by_ip, key=lambda a: len(t.by_ip[a]))
+            stamps = list(t.by_ip[hot])
+            db = hot + t.slide
+            if len(stamps) < 2 or lst.model is None:
+                check("found an address executed more than once", False,
+                      f"{len(stamps)} executions")
+            else:
+                if app._split:
+                    app.action_toggle_split()
+                    await pilot.pause(1.0)
+                if app._active != "listing":
+                    # focus() does NOT make a view active outside split mode;
+                    # Tab is what switches which one is showing.
+                    await pilot.press("tab")
+                    await wait(lambda: app._active == "listing", pilot, 60)
+                app._seek(stamps[0])
+                await pilot.pause(1.2)
+                lst.focus()
+                row = lst.model.index_of_ea(db)
+                lst.cursor = row
+                lst._scroll_cursor_into_view()
+                await pilot.pause(0.4)
+                check("cursor is on the repeated instruction",
+                      lst._cursor_ea() == db, f"{lst._cursor_ea():#x} vs {db:#x}")
+                await pilot.press(">")
+                await pilot.pause(1.0)
+                check("> seeks to the next execution of it",
+                      app._t == stamps[1], f"t={app._t}, expected {stamps[1]}")
+                status = str(app.query_one("#status", Static).render())
+                check("and says which execution this is",
+                      f"2 of {len(stamps)}" in status, status[:80])
+                lst.cursor = row
+                await pilot.pause(0.2)
+                await pilot.press("<")
+                await pilot.pause(1.0)
+                check("< seeks back to the previous one",
+                      app._t == stamps[0], f"t={app._t}, expected {stamps[0]}")
+                # An edge must SAY it's an edge rather than silently doing
+                # nothing, which is indistinguishable from a broken key.
+                lst.cursor = row
+                await pilot.pause(0.2)
+                await pilot.press("<")
+                await pilot.pause(1.0)
+                status = str(app.query_one("#status", Static).render())
+                check("and the first execution says so instead of moving",
+                      app._t == stamps[0] and "first" in status, status[:80])
+
+            # -- "which instruction set this register?" ---------------------- #
+            app._seek(min(200, t.length - 1))
+            await pilot.pause(1.0)
+            lst.focus()
+            await pilot.press("W")
+            opened = await wait(lambda: isinstance(app.screen, RegWriteScreen),
+                                pilot, 20)
+            check("W lists the registers and where each was set", opened,
+                  f"screen={type(app.screen).__name__}")
+            if opened:
+                sc = app.screen
+                pick = next((k for k, (n, v, l, x) in enumerate(sc._rows)
+                             if l is not None and l != app._t), None)
+                if pick is None:
+                    check("a register was set by an earlier instruction", False)
+                    await pilot.press("escape")
+                else:
+                    name, _v, last, _n = sc._rows[pick]
+                    sc.query_one(OptionList).highlighted = pick
+                    await pilot.pause(0.3)
+                    await pilot.press("enter")
+                    await wait(lambda: app._t == last, pilot, 30)
+                    check("choosing one seeks to the write that set it",
+                          app._t == last, f"t={app._t}, expected {last}")
+                    # The real check: that instruction must actually have
+                    # written the register we asked about.
+                    check("and that instruction really wrote it",
+                          name in t.changed(app._t),
+                          f"{name} not in {sorted(t.changed(app._t))}")
 
     print(f"\n{PASS} passed, {FAIL} failed")
     return 1 if FAIL else 0

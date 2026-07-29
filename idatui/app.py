@@ -2341,6 +2341,87 @@ class HelpScreen(ModalScreen):
         self.dismiss(None)
 
 
+class RegWriteScreen(ModalScreen):
+    """Registers, and the instruction that set each one.
+
+    "Which instruction set this register to its current value?" is the question
+    a trace exists to answer, and seeking backwards to it is a single keypress
+    here rather than a manual walk. Forward is offered too, but backward is what
+    people actually want — you notice a bad value after it has been used.
+    """
+
+    BINDINGS = [
+        Binding("escape", "close", "Close"),
+        Binding("down,ctrl+n", "cursor_down", show=False),
+        Binding("up,ctrl+p", "cursor_up", show=False),
+        Binding("enter", "choose", show=False, priority=True),
+        Binding("f", "choose_forward", show=False),
+    ]
+
+    def __init__(self, rows, idx: int) -> None:
+        super().__init__()
+        self._rows = rows          # (name, value, last_write, next_write)
+        self._idx = idx
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="pal-box"):
+            yield Static(f" registers at t={self._idx:,} \u2014 Enter seeks to the "
+                         f"write, f seeks forward", id="pal-title", markup=False)
+            yield OptionList(id="pal-list")
+
+    def on_mount(self) -> None:
+        ol = self.query_one(OptionList)
+        opts = []
+        for name, val, last, nxt in self._rows:
+            label = Text()
+            label.append(f" {name:>4} ", _S_MNEM)
+            label.append(f"{val:#018x}  " if val > 0xFFFFFFFF else f"{val:#010x}  ",
+                         _S_INSN)
+            if last is None:
+                label.append("never written in this trace", _S_DIM)
+            elif last == self._idx:
+                label.append("set by THIS instruction", _S_DATA)
+            else:
+                label.append(f"set at t={last:,}", _S_LABEL)
+                label.append(f"  ({self._idx - last:,} steps back)", _S_DIM)
+            if nxt is not None:
+                label.append(f"   next t={nxt:,}", _S_DIM)
+            opts.append(Option(label))
+        ol.add_options(opts)
+        ol.highlighted = 0
+        ol.focus()
+
+    def action_cursor_down(self) -> None:
+        ol = self.query_one(OptionList)
+        if ol.option_count:
+            ol.highlighted = min((ol.highlighted or 0) + 1, ol.option_count - 1)
+
+    def action_cursor_up(self) -> None:
+        ol = self.query_one(OptionList)
+        if ol.option_count:
+            ol.highlighted = max((ol.highlighted or 0) - 1, 0)
+
+    def _pick(self, forward: bool) -> None:
+        i = self.query_one(OptionList).highlighted
+        if i is None or not (0 <= i < len(self._rows)):
+            self.dismiss(None)
+            return
+        _name, _val, last, nxt = self._rows[i]
+        self.dismiss(nxt if forward else last)
+
+    def action_choose(self) -> None:
+        self._pick(False)
+
+    def action_choose_forward(self) -> None:
+        self._pick(True)
+
+    def on_option_list_option_selected(self, event) -> None:  # type: ignore[no-untyped-def]
+        self._pick(False)
+
+    def action_close(self) -> None:
+        self.dismiss(None)
+
+
 class TraceDock(Vertical):
     """Registers and a timeline for the loaded execution trace, docked right.
 
@@ -3205,7 +3286,7 @@ class IdaTui(App):
     #xref-list { height: auto; max-height: 100%; }
     /* every #pal-box palette centres, not just the symbol one */
     SymbolPalette, StringsPalette, ProjectPalette,
-    LoadOptionsScreen { align: center middle; }
+    LoadOptionsScreen, RegWriteScreen { align: center middle; }
     /* Give the stock Ctrl+P command palette side padding instead of full width;
        the input + results inherit this width (results is an overlay, so pin it). */
     CommandPalette > Vertical { width: 80%; max-width: 120; }
@@ -3267,6 +3348,12 @@ class IdaTui(App):
         Binding("ctrl+l", "load_options", "Reload as…", show=False),
         # Trace stepping. ] / [ move one instruction, } / { step over a
         # call by following the stack pointer.
+        # Seeking, as opposed to stepping: jump to the next/previous time THIS
+        # thing was touched, where "this thing" is whatever the focused view
+        # addresses — an instruction in the code views, a byte in hex.
+        Binding("greater_than_sign", "seek_next_hit", "Next hit", show=False),
+        Binding("less_than_sign", "seek_prev_hit", "Prev hit", show=False),
+        Binding("W", "seek_reg_write", "Reg writes", show=False),
         Binding("right_square_bracket", "step_fwd", "Step", show=False),
         Binding("left_square_bracket", "step_back", "Step back", show=False),
         Binding("right_curly_bracket", "step_over_fwd", "Step over", show=False),
@@ -5731,6 +5818,97 @@ class IdaTui(App):
             self._status("no trace loaded (--trace FILE)")
             return
         self._seek(self._t + delta)
+
+    def _seek_hit(self, direction: int) -> None:
+        """Seek to the next/previous time the focused view's subject was touched.
+
+        Two different questions with one pair of keys, because the answer to
+        "which thing?" is already on screen: in a code view it's the instruction
+        under the cursor ("when else did this run?"), in hex it's the byte under
+        the cursor ("who else touched this?").
+        """
+        t = self._trace
+        if t is None:
+            self._status("no trace loaded (--trace FILE)")
+            return
+        if self._active == "hex":
+            hx = self._try_view(HexView)
+            va = hx.cursor_va() if hx is not None else None
+            if va is None:
+                return
+            stamps = t.memory_accesses(va, 1)
+            what = f"access to {va:#x}"
+        else:
+            view = self._active_code_view()
+            if isinstance(view, DecompView):
+                # A C line is not one address, so ask about the whole statement:
+                # "when else did this line run?" is the question, and it's the
+                # union of its instructions' executions. Falling back to the
+                # line's single /*ea*/ marker would answer a narrower question
+                # and often no question at all, since most lines have no marker.
+                line = view.cursor
+                eas = []
+                if (self._trail_map_ea == view.loaded_ea
+                        and 0 <= line < len(self._trail_map or [])):
+                    eas = list(self._trail_map[line])
+                if not eas:
+                    one = view._line_ea(line)
+                    eas = [one] if one is not None else []
+                if not eas:
+                    self._status("this line has no instructions to seek on",
+                                 priority=True)
+                    return
+                stamps = sorted({x for e in eas for x in t.executions(e)})
+                what = f"execution of C line {line + 1}"
+            else:
+                ea = view._cursor_ea() if view is not None else None
+                if ea is None:
+                    self._status("no address on this line", priority=True)
+                    return
+                stamps = list(t.executions(ea))
+                what = f"execution of {ea:#x}"
+        if not stamps:
+            self._status(f"no {what} in this trace", priority=True)
+            return
+        import bisect as _b
+        if direction > 0:
+            i = _b.bisect_right(stamps, self._t)
+        else:
+            i = _b.bisect_left(stamps, self._t) - 1
+        if not (0 <= i < len(stamps)):
+            edge = "last" if direction > 0 else "first"
+            self._status(f"already at the {edge} {what} "
+                         f"({len(stamps)} in the trace)", priority=True)
+            return
+        self._seek(stamps[i])
+        self._status(f"{what}: {i + 1} of {len(stamps)}  @ t={stamps[i]:,}",
+                     priority=True)
+
+    def action_seek_next_hit(self) -> None:
+        self._seek_hit(1)
+
+    def action_seek_prev_hit(self) -> None:
+        self._seek_hit(-1)
+
+    def action_seek_reg_write(self) -> None:
+        """W: which instruction set each register to its current value."""
+        t = self._trace
+        if t is None:
+            self._status("no trace loaded (--trace FILE)")
+            return
+        rows = []
+        for name in t.registers:
+            v = t.register(name, self._t)
+            if v is None:
+                continue
+            rows.append((name, v, t.last_write(name, self._t),
+                         t.next_write(name, self._t)))
+        if rows:
+            self.push_screen(RegWriteScreen(rows, self._t), self._on_reg_write_chosen)
+
+    def _on_reg_write_chosen(self, idx) -> None:  # type: ignore[no-untyped-def]
+        if idx is not None:
+            self._seek(int(idx))
 
     def action_step_fwd(self) -> None:
         self._step(1)
