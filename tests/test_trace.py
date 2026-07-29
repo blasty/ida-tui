@@ -87,6 +87,43 @@ def main() -> int:
               [o.write for o in t.memory_ops(4)] == [False])
         check("an instruction with no memory has none", t.memory_ops(2) == [])
 
+        # -- memory state at a timestamp ------------------------------------ #
+        # The trace wrote 2a000000 at 0xff4 (t=3) and read it back (t=4); it
+        # pushed/popped 8 zero bytes at 0xff8 (t=1 write, t=5 read).
+        d, k = t.memory(0xff4, 4, 3)
+        check("memory reflects a write as of that timestamp",
+              d == bytes.fromhex("2a000000") and k == b"\x01" * 4, f"{d.hex()} {k.hex()}")
+        d, k = t.memory(0xff4, 4, 2)
+        check("and does NOT reflect it before the write happened",
+              k == b"\x00" * 4, f"{d.hex()} known={k.hex()}")
+
+        # A trace only knows what it saw. A byte nobody touched is unknown, and
+        # must not be reported as zero — that distinction is the entire reason
+        # to read memory from a trace instead of from the database.
+        d, k = t.memory(0x5000, 4, t.length - 1)
+        check("untouched memory is unknown, not zero",
+              k == b"\x00" * 4 and d == b"\x00" * 4, f"known={k.hex()}")
+        # 0xff2..0xff3 was never touched; 0xff4..0xff7 came from the write at
+        # t=3 and 0xff8..0xff9 from the push at t=1 — a window can be knowable
+        # from several accesses at different times, which is what makes this
+        # worth a mask rather than a flag.
+        d, k = t.memory(0xff2, 8, 4)
+        check("a partially-covered window marks which bytes are known",
+              k == bytes([0, 0, 1, 1, 1, 1, 1, 1]), f"known={k.hex()}")
+
+        # Reads are evidence too: an instruction reading a byte reveals what it
+        # held at that moment.
+        d, k = t.memory(0xff8, 8, 5)
+        check("a read reveals memory contents",
+              k == b"\x01" * 8, f"known={k.hex()}")
+
+        check("memory_writes lists only the writers",
+              t.memory_writes(0xff4, 4) == [3], f"{t.memory_writes(0xff4, 4)}")
+        check("memory_accesses includes the readers",
+              t.memory_accesses(0xff4, 4) == [3, 4], f"{t.memory_accesses(0xff4, 4)}")
+        check("a never-touched range has no accesses",
+              t.memory_accesses(0x5000, 16) == [])
+
         # -- execution queries: what painting is built on -------------------- #
         check("executions lists every timestamp for an address",
               list(t.executions(0x401000)) == [0, 6], f"{list(t.executions(0x401000))}")
@@ -119,8 +156,12 @@ def main() -> int:
         check("addresses come back in database terms",
               t.ip(0) == 0x1000 and list(t.executions(0x1000)) == [0, 6],
               f"{t.ip(0):#x}")
-        check("memory addresses are slid too",
-              t.memory_ops(3)[0].addr == 0xff4 + slide)
+        # Memory addresses are NOT slid: the slide relocates the image, and
+        # these are overwhelmingly stack/heap addresses with no database
+        # counterpart — sliding a stack pointer by the image delta produced a
+        # negative address in testing.
+        check("memory op addresses stay in trace space",
+              t.memory_ops(3)[0].addr == 0xff4, f"{t.memory_ops(3)[0].addr:#x}")
         check("raw_ip still gives the traced address",
               t.raw_ip(0) == 0x401000)
 

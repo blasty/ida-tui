@@ -141,6 +141,40 @@ async def run() -> int:
                       app._t == ret, f"{i} -> {app._t}, expected {ret}")
                 check("which is further than a plain step", app._t > i + 1)
 
+            # -- memory at time T -------------------------------------------- #
+            # This is where a trace's memory actually lives: measured on two
+            # real traces, NONE of the accesses fell inside the image — every
+            # one was stack or heap. A memory view that could only address the
+            # image would have nothing to show.
+            dock = app.query_one(TraceDock)
+            app._seek(min(60, t.length - 1))
+            await pilot.pause(0.8)
+            stack = str(dock.query_one("#trace-stack", Static).render())
+            check("the dock shows the stack at this timestamp",
+                  "stack (" in stack and len(stack.splitlines()) > 4, stack[:60])
+            sp_name = next(r for r in ("rsp", "esp", "sp") if r in t.reg_at)
+            sp = t.register(sp_name, app._t)
+            check("anchored at the stack pointer",
+                  f"{sp:012x}" in stack, f"sp={sp:#x} / {stack[:80]}")
+
+            # A trace knows what it observed and nothing else. Unseen bytes are
+            # printed as '?', never as zeros — rendering them as zero would
+            # invent facts about memory nobody looked at.
+            data, known = t.memory_raw(sp, 8, app._t)
+            if not all(known):
+                check("memory the trace never saw is marked unknown",
+                      "?" in stack, stack[:80])
+            else:
+                check("known stack words are shown as values",
+                      any(c in "0123456789abcdef" for c in stack), stack[:60])
+
+            # Stepping must move the memory view with time.
+            before = stack
+            app._seek(min(80, t.length - 1))
+            await pilot.pause(0.8)
+            check("and it follows as you move through time",
+                  str(dock.query_one("#trace-stack", Static).render()) != before)
+
             # -- trails ------------------------------------------------------ #
             # Not "every address the trace ever touched": on a loop-heavy
             # program that's almost everything and says nothing. The last/next

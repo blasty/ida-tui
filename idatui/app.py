@@ -98,6 +98,11 @@ _S_CURSOR = Style(bgcolor="#2a313c")
 _S_TRAIL_NOW = Style(bgcolor="#3f3410")
 _S_TRAIL_PAST = Style(bgcolor="#2b1c17")     # warm: behind you
 _S_TRAIL_FUTURE = Style(bgcolor="#152230")   # cool: ahead of you
+#: Hex with a trace loaded: bytes the trace SAW at this timestamp vs bytes we're
+#: still showing from the file. The distinction matters more than the values —
+#: one is evidence, the other is an assumption.
+_S_HEX_LIVE = Style(color="#9ece6a")
+_S_HEX_STALE = Style(color="#5e6875")
 _S_DIM = Style(color="#7c8b9e", italic=True)
 _S_MATCH = Style(bgcolor="#7a5c00")  # all search matches
 _S_MATCH_CUR = Style(bgcolor="#d0a215", color="#12161c")  # the current match
@@ -1561,6 +1566,10 @@ class HexView(ScrollView, can_focus=True):
         super().__init__(id="hex")
         self.model = None
         self.total = 0
+        #: Trace to read memory from, and the timestamp to read it at. When set,
+        #: the dump shows what memory HELD then rather than what the file holds.
+        self.trace = None
+        self.trace_idx = 0
         self._internal_top: int | None = None  # scroll target we set ourselves
 
     # -- public API -------------------------------------------------------- #
@@ -1747,6 +1756,15 @@ class HexView(ScrollView, can_focus=True):
             return Strip([Segment("".ljust(width), _S_HEX)])
         va, data = model.row(r)
         cur_row, cur_col = self.cursor // 16, self.cursor % 16
+        # With a trace loaded the row shows what memory HELD at the current
+        # timestamp, not what the file contains. Only the bytes the trace
+        # actually saw are overlaid: the rest stay the database's, dimmed, so
+        # you can always tell evidence from the file's idea of the world.
+        tmem = tknown = None
+        if self.trace is not None and data is not None:
+            tmem, tknown = self.trace.memory(va, len(data), self.trace_idx)
+            if not any(tknown):
+                tmem = tknown = None
         fo = model.file_offset(va)
         fo_str = f"{fo:08X}" if fo is not None else "--------"
         segs: list[Segment] = [
@@ -1761,15 +1779,29 @@ class HexView(ScrollView, can_focus=True):
                 if i == 8:
                     segs.append(Segment(" ", _S_HEX))
                 if i < n:
-                    st = _S_CELL if (r == cur_row and i == cur_col) else _S_HEX
-                    segs.append(Segment(f"{data[i]:02X} ", st))
+                    live = tknown is not None and tknown[i]
+                    val = tmem[i] if live else data[i]
+                    if r == cur_row and i == cur_col:
+                        st = _S_CELL
+                    elif tknown is None:
+                        st = _S_HEX
+                    else:
+                        st = _S_HEX_LIVE if live else _S_HEX_STALE
+                    segs.append(Segment(f"{val:02X} ", st))
                 else:
                     segs.append(Segment("   ", _S_HEX))
             segs.append(Segment(" |", _S_DIM))
             for i in range(16):
                 if i < n:
-                    ch = chr(data[i]) if 32 <= data[i] < 127 else "."
-                    st = _S_CELL if (r == cur_row and i == cur_col) else _S_ASCII
+                    live = tknown is not None and tknown[i]
+                    val = tmem[i] if live else data[i]
+                    ch = chr(val) if 32 <= val < 127 else "."
+                    if r == cur_row and i == cur_col:
+                        st = _S_CELL
+                    elif tknown is None:
+                        st = _S_ASCII
+                    else:
+                        st = _S_HEX_LIVE if live else _S_HEX_STALE
                 else:
                     ch, st = " ", _S_ASCII
                 segs.append(Segment(ch, st))
@@ -2325,6 +2357,7 @@ class TraceDock(Vertical):
     def compose(self) -> ComposeResult:
         yield Static("", id="trace-head", markup=False)
         yield Static("", id="trace-regs", markup=False)
+        yield Static("", id="trace-stack", markup=False)
         yield TraceTimeline(id="trace-timeline")
 
     def show(self, trace, idx: int) -> None:
@@ -2367,9 +2400,47 @@ class TraceDock(Vertical):
             body.append(f"{v:#018x}\n" if v > 0xFFFFFFFF else f"{v:#010x}\n",
                         _S_DATA if hot else (_S_LABEL if name == pc else _S_INSN))
         self.query_one("#trace-regs", Static).update(body)
+        self._render_stack(t)
         tl = self.query_one(TraceTimeline)
         tl.idx = self.idx
         tl.refresh()
+
+
+    STACK_WORDS = 8
+
+    def _render_stack(self, t) -> None:  # type: ignore[no-untyped-def]
+        """The stack as of this instant, read out of the trace.
+
+        This is where a trace's memory actually is: on two real traces, NONE of
+        the accesses fell inside the image — every one was stack or heap. A
+        memory view that could only address the image would have nothing to show.
+
+        Bytes the trace never saw are printed as '??' rather than zeros. A trace
+        knows what it observed and nothing else, and quietly rendering unseen
+        memory as zero would invent facts.
+        """
+        sp_name = next((r for r in ("rsp", "esp", "sp") if r in t.reg_at), "")
+        sp = t.register(sp_name, self.idx) if sp_name else None
+        out = Text()
+        if sp is None:
+            self.query_one("#trace-stack", Static).update(out)
+            return
+        width = 8 if (t.info and "64" in (t.info.arch or "")) else 4
+        out.append(f" stack ({sp_name})\n", _S_DIM)
+        for k in range(self.STACK_WORDS):
+            a = sp + k * width
+            data, known = t.memory_raw(a, width, self.idx)
+            out.append(" \u25b8" if k == 0 else "  ", _S_MNEM)
+            out.append(f"{a:012x} ", _S_ADDR)
+            if all(known):
+                v = int.from_bytes(data, "little")
+                out.append(f"{v:0{width * 2}x}\n", _S_DATA if k == 0 else _S_INSN)
+            elif any(known):
+                out.append("".join(f"{b:02x}" if known[i] else "??"
+                                   for i, b in enumerate(data)) + "\n", _S_INSN)
+            else:
+                out.append("?" * (width * 2) + "\n", _S_SEP)
+        self.query_one("#trace-stack", Static).update(out)
 
 
 class TraceTimeline(Static):
@@ -3147,6 +3218,7 @@ class IdaTui(App):
     #trace-dock { dock: right; width: 34; background: $surface; border-left: solid $panel; }
     #trace-head { height: 2; padding: 0 1; background: $panel; }
     #trace-regs { height: auto; padding: 1 0 0 0; }
+    #trace-stack { height: auto; padding: 1 0 0 0; }
     #trace-timeline { height: 1fr; padding: 1 0 0 0; }
     #load-note { height: 2; padding: 1 1 0 1; color: $text-muted; }
     /* Cap the processor list so the ADDRESS FIELD is always on screen: with the
@@ -5588,6 +5660,13 @@ class IdaTui(App):
         t = self._trace
         if t is None:
             return
+        try:
+            hx = self.query_one(HexView)
+            hx.trace, hx.trace_idx = t, self._t
+            if hx.display:
+                hx.refresh()
+        except Exception:  # noqa: BLE001 -- not mounted yet
+            pass
         trail = t.trail(self._t)
         try:
             lst = self.query_one(ListingView)

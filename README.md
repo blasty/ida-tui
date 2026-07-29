@@ -131,6 +131,11 @@ where you're about to go, and the instruction you're standing on. The pseudocode
 view is painted too — a trace records instructions, but `decomp_map` says which
 instructions each C line covers, so the same trail lands on the decompilation.
 
+The dock also shows the **stack as of that instant**, read out of the trace.
+Bytes the trace never observed print as `??` rather than zeros — a trace knows
+what it saw and nothing else. The hex view (`\`) gets the same treatment: bytes
+the trace saw at this timestamp are shown in green over the file's own contents.
+
 Trace addresses are rebased onto the database automatically — a traced process
 is relocated, so nothing lines up until that's solved.
 

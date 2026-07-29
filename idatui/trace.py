@@ -76,7 +76,14 @@ class TraceInfo:
 
 @dataclass
 class MemOp:
-    """One memory access made by one instruction."""
+    """One memory access made by one instruction.
+
+    ``addr`` is the address the TRACE recorded — not slid onto the database.
+    Most accesses are stack or heap, which have no counterpart in the database
+    at all, and applying the image's relocation to a stack pointer produces a
+    nonsense address (it went negative in testing). Only addresses inside the
+    image can be translated, and the caller knows when that applies.
+    """
 
     addr: int
     data: bytes
@@ -116,6 +123,10 @@ class Trace:
     mem_row: array.array = field(default_factory=lambda: array.array("I"))
     #: applied so trace addresses line up with the database (see ``rebase``).
     slide: int = 0
+    #: accesses ordered by address, built on first memory query.
+    _mem_order: list | None = None
+    _mem_starts: list = field(default_factory=list)
+    _mem_maxlen: int = 0
 
     # -- construction ------------------------------------------------------ #
     @classmethod
@@ -266,10 +277,110 @@ class Trace:
         out = []
         for k in range(lo, hi):
             off, ln = self.mem_off[k], self.mem_len[k]
-            out.append(MemOp(addr=self.mem_addr[k] + self.slide,
+            out.append(MemOp(addr=self.mem_addr[k],
                              data=bytes(self.mem_blob[off:off + ln]),
                              write=bool(self.mem_write[k])))
         return out
+
+    # -- memory state ------------------------------------------------------- #
+    def _mem_index(self) -> None:
+        """Order the accesses by address, once.
+
+        Queries ask "what was at this window at time t", so the accesses that
+        matter are the few touching that window — not the tens of thousands in
+        the trace. Sorting by address makes those a bisect away; sorting by time
+        (the order they arrive in) would mean scanning everything per repaint.
+        """
+        if self._mem_order is not None:
+            return
+        order = sorted(range(len(self.mem_addr)), key=lambda k: self.mem_addr[k])
+        self._mem_order = order
+        self._mem_starts = [self.mem_addr[k] for k in order]
+        self._mem_maxlen = max(self.mem_len) if len(self.mem_len) else 0
+
+    def memory_raw(self, addr: int, length: int,
+                   idx: int | None = None) -> tuple[bytes, bytes]:
+        """Memory at a TRACE address (no slide).
+
+        The stack lives here. Measured on two real traces, 0% of memory accesses
+        fall inside the image — every one is stack or heap — so a query that
+        insists on database addresses can't answer the question anyone actually
+        has about memory in a trace.
+        """
+        return self.memory(addr + self.slide, length, idx)
+
+    def memory(self, addr: int, length: int,
+               idx: int | None = None) -> tuple[bytes, bytes]:
+        """``(data, known)`` for ``length`` bytes at ``addr`` as of ``idx``.
+
+        ``known`` is a byte-per-byte mask: a trace only says what it saw, so a
+        byte nobody read or wrote is genuinely unknown and must not be drawn as
+        zero. That distinction is the whole value of reading memory from a trace
+        rather than from the database — the database has the file's bytes, the
+        trace has what was actually there at that instant.
+
+        Reads count as evidence, not just writes: an instruction reading a byte
+        reveals what it held then.
+        """
+        if idx is None:
+            idx = self.length - 1
+        length = max(int(length), 0)
+        out, known = bytearray(length), bytearray(length)
+        if not length or not len(self.mem_idx):
+            return bytes(out), bytes(known)
+        self._mem_index()
+        raw = addr - self.slide
+        best = [-1] * length
+        import bisect as _b
+        lo = _b.bisect_left(self._mem_starts, raw - self._mem_maxlen)
+        hi = _b.bisect_right(self._mem_starts, raw + length - 1)
+        for pos in range(lo, hi):
+            k = self._mem_order[pos]
+            t = self.mem_idx[k]
+            if t > idx:
+                continue
+            a, ln = self.mem_addr[k], self.mem_len[k]
+            s, e = max(a, raw), min(a + ln, raw + length)
+            if s >= e:
+                continue
+            off = self.mem_off[k]
+            for b in range(s, e):
+                j = b - raw
+                # >= not >: several accesses can share a timestamp (an
+                # instruction that reads and writes), and the later entry on the
+                # line is the one that stands.
+                if t >= best[j]:
+                    best[j] = t
+                    out[j] = self.mem_blob[off + (b - a)]
+                    known[j] = 1
+        return bytes(out), bytes(known)
+
+    def memory_writes(self, addr: int, length: int) -> list[int]:
+        """Timestamps that WROTE any byte of ``[addr, addr+length)``."""
+        return self._mem_touch(addr, length, writes=True)
+
+    def memory_accesses(self, addr: int, length: int) -> list[int]:
+        """Timestamps that read or wrote any byte of the range."""
+        return self._mem_touch(addr, length, writes=False)
+
+    def _mem_touch(self, addr: int, length: int, writes: bool) -> list[int]:
+        if not len(self.mem_idx) or length <= 0:
+            return []
+        self._mem_index()
+        raw = addr - self.slide
+        import bisect as _b
+        lo = _b.bisect_left(self._mem_starts, raw - self._mem_maxlen)
+        hi = _b.bisect_right(self._mem_starts, raw + length - 1)
+        out = set()
+        for pos in range(lo, hi):
+            k = self._mem_order[pos]
+            a, ln = self.mem_addr[k], self.mem_len[k]
+            if a + ln <= raw or a >= raw + length:
+                continue
+            if writes and not self.mem_write[k]:
+                continue
+            out.add(self.mem_idx[k])
+        return sorted(out)
 
     # -- execution queries (what painting is built on) ---------------------- #
     def executions(self, ea: int) -> array.array:

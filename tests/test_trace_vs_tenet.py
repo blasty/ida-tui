@@ -134,6 +134,27 @@ def compare(path, ref_cls, arch, dctx, samples=200):
     check(f"{name}: same execution timestamps for the hottest addresses",
           not ex_bad, f"{ex_bad[:3]}")
 
+    # Memory STATE at a timestamp — reconstructed from the deltas, which is the
+    # hard part and the whole point of reading memory from a trace.
+    mem_bad, mem_checked = [], 0
+    for i in idxs[::4]:
+        for op in ours.memory_ops(i)[:2]:
+            n = min(len(op.data), 8)
+            mine, known = ours.memory(op.addr, n, i)
+            ref = theirs.get_memory(op.addr, n, i)
+            if ref is None:
+                continue
+            refb = bytes(ref.data)
+            # Compare only the bytes we claim to know; the reference reports its
+            # own coverage separately and a byte neither has seen is not a
+            # disagreement.
+            for j in range(n):
+                if known[j] and refb[j:j + 1] and mine[j] != refb[j]:
+                    mem_bad.append((i, hex(op.addr + j), mine[j], refb[j]))
+            mem_checked += 1
+    check(f"{name}: memory state at a timestamp matches the reference",
+          not mem_bad, f"{mem_bad[:3]}")
+
     # Memory: the bytes an instruction touched, and which way.
     with_mem = [i for i in idxs if ours.memory_ops(i)][:40]
     mem_bad = []
