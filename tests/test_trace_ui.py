@@ -286,6 +286,27 @@ async def run() -> int:
                       mapped > 3 and missed == 0,
                       f"{mapped} mapped, {missed} not followed")
 
+            # -- a late navigation must not drag the view back --------------- #
+            # Navigations run in workers and finish out of order. The trace's
+            # OPENING seek goes to the entry point (t=0 is _start), takes a
+            # while, and used to arrive after later seeks — leaving the cursor
+            # on _start while the trace was elsewhere, and it never settled.
+            # Anything cursor-based done right after a seek then acted on the
+            # wrong address.
+            two = [a for a in t.by_ip if len(t.by_ip[a]) > 1]
+            if two:
+                a = max(two, key=lambda x: len(t.by_ip[x]))
+                s0, s1 = list(t.by_ip[a])[:2]
+                dbaddr = a + t.slide
+                app._seek(s0)
+                await wait(lambda: lst._cursor_ea() == dbaddr, pilot, 60)
+                app._seek(s1)
+                await pilot.pause(3.0)     # long enough for a stale one to land
+                check("a stale navigation doesn't drag the cursor away",
+                      lst._cursor_ea() == dbaddr and app._cur.ea == dbaddr,
+                      f"cursor={lst._cursor_ea():#x} cur={app._cur.ea:#x} "
+                      f"want {dbaddr:#x}")
+
             # -- seeking, as opposed to stepping ---------------------------- #
             # "When else did this instruction run?" — the question that makes a
             # trace more than a very long single-step log.

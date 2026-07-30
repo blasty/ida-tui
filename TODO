@@ -115,29 +115,24 @@ cursor's function), the trace one on the decompiler's loaded function. That is
 how they ended up describing different functions. There is now one index, keyed
 to what the decompiler HOLDS, and both read it.
 
-## A stray navigation to the entry point during trace seeking
+## Stale navigations (fixed for seeks; general case left alone)
 
-Seen while building M3. After a trace seek, a SECOND _open_at arrives from a
-worker callback and re-points the view at the entry function:
+A navigation runs in a worker and its result is applied when it lands. The trace's
+OPENING seek goes to t=0, which for a normal binary is _start, and that
+navigation is slow — so it used to arrive after later seeks and drag the cursor
+back to _start while the trace was elsewhere. It never settled (measured stable
+for 3+ seconds), and anything cursor-based done just after a seek then acted on
+the wrong address.
 
-    ('_goto_ea', ['0x3160'])          <- the seek's own navigation
-    ('_open_at', ['0x3160', 'main'])  <- correct
-    ('_open_at', ['0x34d0', 'start']) <- stray, and it wins
+The listing path had no staleness guard at all; the decompiler path got one in
+756589a. Fixed by giving the listing completion the same check
+(_open_at_if_current) and bumping _nav_seq on each SEEK.
 
-The cursor and _cur then sit on 'start' while the trace's pc is elsewhere, and it
-does not settle — measured stable for 3+ seconds. Consequence: a cursor-based
-action taken right after a seek (`>` seeks on the address under the cursor) acts
-on the wrong address.
-
-Not _auto_land: 'start' is not in ENTRY_NAMES, and its guard was set. The
-traceback only shows the Textual callback frame, so the origin is a
-call_from_thread from some worker — most likely a navigation queued earlier
-arriving late, which is the same shape as the stale-result bug fixed in 756589a
-for _open_decomp_entry (that one got a sequence guard; the listing path did not).
-
-To reproduce: seek to an address executed twice, wait for the cursor to reach it,
-then seek again and watch _cur.
-
-Workaround in place: nothing. The M3 tests place the cursor explicitly rather
-than relying on where a seek left it, which is what a user does anyway (you point
-at a line and ask about it) — but the drift is real and worth fixing.
+Deliberately NOT bumped in _goto_ea for every navigation. That is the more
+general rule — "the last thing you asked for wins" — and I tried it, but it also
+means an ordinary follow can be dropped by whatever navigates next, and a full
+suite run turned up a follow_xrefs failure with it in place (the same check has
+flaked before, so it is not proof, but the mechanism is real and the evidence I
+have is only about seeks). If rapid follows ever show the same drift, the general
+bump is the fix — with a test that a follow in flight survives an unrelated
+navigation.

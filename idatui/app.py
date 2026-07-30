@@ -5654,6 +5654,16 @@ class IdaTui(App):
         t = self._trace
         if t is None or not t.length:
             return
+        # A seek invalidates any navigation still in flight. They run in workers
+        # and finish out of order: the trace's opening seek lands on the entry
+        # point, takes a while, and used to arrive AFTER later seeks — dragging
+        # the cursor back to _start while the trace was elsewhere, permanently.
+        #
+        # Bumped HERE and not in _goto_ea. Doing it for every navigation is the
+        # more general rule ("the last thing you asked for wins") but it also
+        # lets an ordinary follow be dropped by whatever navigates next, and the
+        # only evidence I have is about seeks. Narrow fix for the measured bug.
+        self._nav_seq += 1
         self._t = max(0, min(int(idx), t.length - 1))
         self.query_one(TraceDock).show(t, self._t)
         self._paint_trail()
@@ -6029,7 +6039,8 @@ class IdaTui(App):
         idx = max(lm.ensure_ea(ea), 0) if lm is not None else 0
         name = fn.name if fn is not None else self.program.region_label(ea)
         self.app.call_from_thread(
-            self._open_at, ea, name, idx, push, -1, 0, fn is None, focus_name)
+            self._open_at_if_current, seq, ea, name, idx, push, fn is None,
+            focus_name)
 
     def _open_decomp_entry(self, fn_addr: int, fn_name: str, dec_idx: int,
                            dec_cursor_x: int, push: bool,
@@ -6201,6 +6212,18 @@ class IdaTui(App):
         if cur < 0 and fallback_ea is not None:
             cur = row_of(fallback_ea)
         return (cur, row_of(a.top_ea))
+
+    def _open_at_if_current(self, seq: int, ea: int, name: str, cursor: int,
+                            push: bool, is_region: bool,
+                            focus_name: str | None) -> None:
+        """Apply a navigation result only if it's still the one being awaited.
+
+        The decompiler path has had this since 756589a; the listing path hadn't,
+        so a slow navigation could still land on top of a newer one.
+        """
+        if seq != self._nav_seq:
+            return
+        self._open_at(ea, name, cursor, push, -1, 0, is_region, focus_name)
 
     def _open_at(self, ea: int, name: str, cursor: int, push: bool,
                  dec_cursor: int = -1, dec_cursor_x: int = 0,
