@@ -4034,7 +4034,19 @@ class IdaTui(App):
         if fn is not None:
             self._open_function(fn.addr, fn.name)
         elif len(self._func_index):
-            self.action_symbols()
+            # No main(): land on the first function rather than pushing the
+            # symbol palette. A modal as the *startup* state leaves a human
+            # staring at a picker over an empty pane, and silently swallows
+            # every keystroke an RPC driver injects while `ping` still says
+            # ready:true. Landing somewhere real is better for both; Ctrl+N is
+            # one keypress away.
+            first = self._func_index.get(0)
+            if first is not None:
+                self._open_function(first.addr, first.name)
+                self._status(f"no entry function — opened {first.name}   "
+                             "(Ctrl+N: find symbol)")
+            else:
+                self.action_symbols()
         else:
             self._land_without_functions()
 
@@ -5468,12 +5480,38 @@ class IdaTui(App):
             return
         # The label shows in the listing's head rows -> invalidate + reopen.
         self.program.bump_items()
+        # Naming the address *of a function start* is a function rename by any
+        # other name. Without this the cached index kept the old name, so
+        # `functions`/`names`/resolve/the palette all reported the rename had
+        # not happened -- and a driver that trusts those readbacks redoes work
+        # it already did.
+        fn = None
+        try:
+            fn = self.program.function_of(addr)
+        except Exception:  # noqa: BLE001
+            fn = None
+        is_func_start = fn is not None and fn.addr == addr
         lm = self.program.listing(addr)
-        label = self.program.region_label(addr)
+        label = name if is_func_start else self.program.region_label(addr)
         idx = max(lm.ensure_ea(addr), 0) if lm is not None else 0
-        self.app.call_from_thread(self._open_at_named, label, addr, idx, name)
+        self.app.call_from_thread(self._open_at_named, label, addr, idx, name,
+                                  is_func_start)
 
-    def _open_at_named(self, label: str, addr: int, idx: int, name: str) -> None:
+    def _open_at_named(self, label: str, addr: int, idx: int, name: str,
+                       is_func_start: bool = False) -> None:
+        if is_func_start:
+            self.program.bump_names()
+            if self._func_index is not None:
+                self._func_index.update_name(addr, name)
+            for e in self._nav:
+                if e.ea == addr:
+                    e.name = name
+            try:
+                table = self.query_one("#func-table", DataTable)
+                name_col = list(table.columns.keys())[1]
+                table.update_cell(str(addr), name_col, name)
+            except Exception:  # noqa: BLE001 -- row filtered out / not streamed
+                pass
         self._open_at(addr, label, idx, False, -1, 0, True)
         self._dirty = True
         self._status(f"named {addr:#x} → {name}   (Ctrl+S to save)")

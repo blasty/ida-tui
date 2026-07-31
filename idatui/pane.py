@@ -248,18 +248,29 @@ def stop(args) -> int:
     if not rows:
         print("error: no matching pane (need --sock or --pane)", file=sys.stderr)
         return 2
+    killed: list[str] = []
     for r in rows:
         sock, pane = r.get("sock"), r.get("pane")
+        quit_ok = False
         if sock and os.path.exists(sock):
             try:  # ask it to quit gracefully first
                 with RpcClient(sock) as c:
                     c.call("quit")
-                time.sleep(0.4)
+                quit_ok = True
             except (OSError, RpcError, ConnectionError):
                 pass
+        # Wait for the pane to actually go away. Quitting runs App.on_unmount,
+        # which writes every dirty database; a 90 MB .i64 takes tens of seconds.
+        # Killing the pane on a fixed short sleep truncated that save and
+        # silently destroyed the session's work, so block on the real signal.
+        if pane and quit_ok:
+            deadline = time.monotonic() + float(args.timeout)
+            while time.monotonic() < deadline and _pane_alive(pane):
+                time.sleep(0.25)
         if pane and _pane_alive(pane):
             subprocess.run(["tmux", "kill-pane", "-t", pane],
                            capture_output=True)
+            killed.append(pane)
         if sock:
             try:
                 os.unlink(sock)
@@ -271,6 +282,12 @@ def stop(args) -> int:
     out = {"stopped": [r.get("sock") or r.get("pane") for r in rows]}
     if reaped:
         out["reaped_workers"] = reaped
+    if killed:
+        # Only ever reached on timeout: say so, because it means a save may have
+        # been cut short rather than "clean teardown".
+        out["force_killed"] = killed
+        out["warning"] = (f"pane(s) did not exit within {args.timeout}s and were "
+                          "killed; unsaved database changes may be lost")
     print(json.dumps(out))
     return 0
 
@@ -335,6 +352,9 @@ def main(argv: list[str]) -> int:
     st = sub.add_parser("stop", help="graceful quit + kill the pane")
     st.add_argument("--sock")
     st.add_argument("--pane")
+    st.add_argument("--timeout", type=float, default=600.0,
+                    help="seconds to wait for the pane to exit (it saves dirty "
+                         "databases on the way out) before force-killing it")
     st.set_defaults(fn=stop)
 
     ls = sub.add_parser("list", help="list tracked panes")

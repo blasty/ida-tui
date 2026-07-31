@@ -104,6 +104,33 @@ def _active_widget(app):
 
 _MODALS = ("XrefsScreen", "SymbolPalette", "StructEditor", "ConfirmScreen")
 
+#: ``drive raw`` (and any k=v CLI) hands every param through as a *string*.
+#: Handlers that did ``int(...)`` coped; the ones that compared directly blew up
+#: with e.g. "'<' not supported between instances of 'int' and 'str'". Coerce the
+#: known-numeric names once, centrally, instead of at every call site.
+_INT_PARAMS = ("lines", "limit", "max", "n", "index", "line", "col",
+               "occurrence", "delay_ms", "direction", "addr", "count")
+_FLOAT_PARAMS = ("timeout",)
+
+
+def _coerce_params(params: dict[str, Any]) -> dict[str, Any]:
+    out = dict(params)
+    for k in _INT_PARAMS:
+        v = out.get(k)
+        if isinstance(v, str) and v.strip():
+            try:
+                out[k] = int(v, 0)
+            except ValueError:
+                pass
+    for k in _FLOAT_PARAMS:
+        v = out.get(k)
+        if isinstance(v, str) and v.strip():
+            try:
+                out[k] = float(v)
+            except ValueError:
+                pass
+    return out
+
 
 def _modal_snapshot(app) -> dict[str, Any] | None:
     """Describe the top modal screen, if any, enough to drive it."""
@@ -466,7 +493,14 @@ class RpcServer:
         await settle(app, lambda: app.query_one(f"#{input_id}", Input).display, timeout=10)
         inp = app.query_one(f"#{input_id}", Input)
         if not inp.display:
-            raise RuntimeError(f"{input_id!r} prompt did not open (word under cursor?)")
+            # Say *why*. The old message always blamed the word under the cursor,
+            # which sent readers hunting for a cursor problem when the real cause
+            # was usually a modal eating the opening keystroke.
+            modal = type(app.screen).__name__
+            why = (f"modal {modal!r} has focus and ate the {open_key!r} keystroke"
+                   if modal in _MODALS or modal != "Screen"
+                   else "no renameable token under the cursor")
+            raise RuntimeError(f"{input_id!r} prompt did not open: {why}")
         if clear:
             inp.value = ""
         await app._press_keys(_text_to_keys(value, delay_ms))
@@ -485,8 +519,32 @@ class RpcServer:
         want = fn.addr if fn else ea
         return lambda: app._cur is not None and app._cur.ea == want
 
+    #: Verbs that drive the *main* app by injecting keystrokes. If a modal is on
+    #: top it eats those keys, so they must refuse rather than silently no-op.
+    _NEEDS_NO_MODAL = {
+        "goto", "open", "rename", "comment", "retype", "follow", "back",
+        "toggle_view", "hex", "save", "search", "move", "cursor", "cursor_on",
+    }
+    #: Modals the driver is expected to interact with (they have their own verbs).
+    _DRIVABLE_MODALS = {"XrefsScreen", "SymbolPalette", "StructEditor",
+                        "ProjectPalette", "QuitScreen"}
+
+    def _modal_kind(self) -> str | None:
+        scr = self.app.screen
+        name = type(scr).__name__
+        return name if name in _MODALS or name in self._DRIVABLE_MODALS else None
+
     async def _dispatch(self, method: str, params: dict[str, Any]) -> Any:
         app = self.app
+        params = _coerce_params(params)
+        if method in self._NEEDS_NO_MODAL:
+            modal = self._modal_kind()
+            if modal is not None:
+                raise RuntimeError(
+                    f"modal {modal!r} is on top and will swallow this verb's "
+                    f"keystrokes; dismiss it first (close) or use its own verb "
+                    f"(select/symbols/xrefs). Note: a binary with no entry "
+                    f"function can land in the symbol palette on startup.")
         if method in (None, "ping"):
             module = None
             try:
@@ -498,9 +556,25 @@ class RpcServer:
         if method == "methods":
             return METHODS
         if method == "quit":
+            # Route through the same teardown a human gets, so a dirty database
+            # is written instead of dropped. `app.exit()` alone skips the dirty
+            # check entirely, and the caller (pane stop) then kills the pane --
+            # which used to destroy a whole session's annotations.
+            dirty = list(app._dirty_labels())
+            save = params.get("save", True)
+            if isinstance(save, str):
+                save = save.lower() not in ("0", "false", "no", "")
+
+            def _go():
+                if dirty and save:
+                    app._on_quit_choice("save")   # saves, then exits
+                else:
+                    app._on_quit_choice("discard")
+
             # answer first, then tear down (so this response still gets written)
-            asyncio.get_running_loop().call_later(0.2, app.exit)
-            return {"ok": True, "quitting": True}
+            asyncio.get_running_loop().call_later(0.2, _go)
+            return {"ok": True, "quitting": True, "saving": bool(dirty and save),
+                    "dirty": dirty}
 
         if method in _PROGRAM_METHODS and app.program is None:
             raise ValueError("not ready: still connecting / loading functions")
