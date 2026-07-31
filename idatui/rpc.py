@@ -175,6 +175,14 @@ def _cursor_info(app, w) -> dict[str, Any]:
             "scroll_y": round(w.scroll_offset.y)}
 
 
+def _where(app) -> str:
+    """Short 'name @ 0xea' for error messages that need to say where we ended up."""
+    cur = getattr(app, "_cur", None)
+    if cur is None:
+        return "nowhere"
+    return f"{getattr(cur, 'name', '?')} @ {getattr(cur, 'ea', 0):#x}"
+
+
 def _readiness(app) -> dict[str, Any]:
     """Whether the app is drivable yet, and how far function-loading has got.
     (Cheap: no network — never call client.health() here.)"""
@@ -479,9 +487,15 @@ class RpcServer:
             return {"id": rid, "error": {"message": f"{type(e).__name__}: {msg}"}}
 
     # -- composed helpers (semantic verbs) -------------------------------- #
-    async def _press(self, keys, pred=None, timeout=20.0):
+    async def _press(self, keys, pred=None, timeout=20.0, what=""):
         await self.app._press_keys([str(k) for k in keys])
-        await settle(self.app, pred, timeout=timeout)
+        ok = await settle(self.app, pred, timeout=timeout)
+        if pred is not None and not ok:
+            # Never report success for an action that did not happen: the caller
+            # would go on to edit whatever the *previous* location was.
+            raise TimeoutError(
+                f"{what or 'action'} did not complete within {timeout}s "
+                f"(still at {_where(self.app)}); retry with a larger timeout=")
         return snapshot(self.app)
 
     async def _fill_prompt(self, open_key, input_id, value, delay_ms, clear):
@@ -716,7 +730,15 @@ class RpcServer:
             target = str(params.get("target", ""))
             pred = self._goto_target_pred(target)
             await self._fill_prompt("g", "goto", target, delay, clear=False)
-            await settle(app, pred, timeout=timeout)
+            ok = await settle(app, pred, timeout=timeout)
+            if pred is not None and not ok:
+                # A goto that silently "succeeds" without moving is worse than an
+                # error: on a big database the listing build can outrun the
+                # default timeout, and every subsequent rename/comment then lands
+                # on the function the caller *used* to be looking at.
+                raise TimeoutError(
+                    f"goto {target!r} did not land within {timeout}s "
+                    f"(still at {_where(app)}); retry with a larger timeout=")
             return snapshot(app)
 
         if method == "rename":
@@ -735,7 +757,8 @@ class RpcServer:
 
         if method == "follow":
             depth = len(app._nav)
-            return await self._press(["enter"], lambda: len(app._nav) > depth, timeout)
+            return await self._press(["enter"], lambda: len(app._nav) > depth,
+                                     timeout, "follow")
         if method == "back":
             return await self._press(["escape"], timeout=timeout)
         if method == "toggle_view":
@@ -759,12 +782,14 @@ class RpcServer:
                         return False
                 return False
 
-            return await self._press(["tab"], _toggled, timeout)
+            return await self._press(["tab"], _toggled, timeout, "toggle_view")
         if method == "hex":
-            return await self._press(["backslash"], lambda: app._active == "hex", timeout)
+            return await self._press(["backslash"], lambda: app._active == "hex",
+                                     timeout, "hex")
         if method == "xrefs":
             return await self._press(
-                ["x"], lambda: type(app.screen).__name__ == "XrefsScreen", timeout)
+                ["x"], lambda: type(app.screen).__name__ == "XrefsScreen",
+                timeout, "xrefs")
         if method == "symbols":
             await app._press_keys(["ctrl+n"])
             await settle(app, lambda: type(app.screen).__name__ == "SymbolPalette", timeout=10)
@@ -775,7 +800,8 @@ class RpcServer:
             return snapshot(app)
         if method == "structs":
             return await self._press(
-                ["ctrl+t"], lambda: type(app.screen).__name__ == "StructEditor", timeout)
+                ["ctrl+t"], lambda: type(app.screen).__name__ == "StructEditor",
+                timeout, "structs")
         if method == "close":
             return await self._press(["escape"], timeout=timeout)
         if method == "save":
