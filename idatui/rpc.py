@@ -59,7 +59,7 @@ METHODS = {
     "text": "{text,delay_ms?,settle?} type a literal string into the focused input",
     "goto/open": "{target,delay_ms?} g-prompt to a name or 0xADDR",
     "rename": "{name,word?,delay_ms?} rename the token under (or 'word') the cursor",
-    "comment": "{text,delay_ms?} comment the current line",
+    "comment": "{text} comment the current line (use \\n for newlines)",
     "retype": "{proto,word?,delay_ms?} set the prototype/type under the cursor",
     "follow": "{word?} follow the reference under (or 'word') the cursor",
     "cursor_on": "{word,line?,occurrence?=1} place the cursor on a token",
@@ -746,7 +746,13 @@ class RpcServer:
             await settle(app, timeout=timeout)
             return snapshot(app)
         if method == "comment":
-            await self._fill_prompt("semicolon", "comment", str(params["text"]), delay,
+            # Comments can be long; skip the per-char delay so the agent isn't
+            # blocked for seconds watching the typing animation.  Also: the
+            # prompt is single-line, so literal newlines (0x0a) get swallowed by
+            # the Input widget.  The app's _do_comment converts the two-char
+            # sequence '\n' into a real newline for IDA, so we escape here.
+            ctext = str(params["text"]).replace("\n", "\\n")
+            await self._fill_prompt("semicolon", "comment", ctext, 0,
                                     clear=True)
             await settle(app, timeout=timeout)
             return snapshot(app)
