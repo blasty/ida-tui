@@ -593,7 +593,15 @@ class RpcServer:
         failed = [r for r in (res.get("func") or []) if isinstance(r, dict)
                   and r.get("error")] if isinstance(res, dict) else []
 
-        # Names live in the IDB, but every cache in front of it is now stale.
+        # Names live in the IDB, but every cache in front of it is now stale --
+        # including Hex-Rays', which is per-function and does NOT notice that a
+        # *callee* was renamed. That cache is persisted in the .i64, so without
+        # this a batch import leaves pseudocode calling sub_98C0 forever while
+        # the listing (and every readback) says memset.
+        try:
+            await asyncio.to_thread(app.program.client.call, "force_recompile")
+        except Exception:  # noqa: BLE001 -- older worker without the tool
+            pass
         app.program.bump_names()
         app.program.invalidate_functions()
         app._func_index = None

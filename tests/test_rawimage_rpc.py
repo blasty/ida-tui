@@ -151,6 +151,23 @@ def main() -> int:
                 check("rename_many takes inline items",
                       r["rename_many"]["ok"] == 1, json.dumps(r["rename_many"]))
 
+                # -- the stale-pseudocode trap ------------------------------ #
+                # Hex-Rays caches per function and does not notice that a
+                # CALLEE was renamed -- and that cache is persisted in the
+                # .i64. Decompile first, then rename, then read it back: the
+                # call site must show the new name. (fibonacci is recursive, so
+                # the function's own body cites it.)
+                before = c.call("pseudocode", target=hex(ea))
+                pc_before = json.dumps(before)
+                r = c.call("rename_many", items=[{"addr": hex(ea),
+                                                  "name": "after_cache_fn"}])
+                pc_after = json.dumps(c.call("pseudocode", target=hex(ea)))
+                check("pseudocode was cached before the rename",
+                      "inline_named_fn" in pc_before, pc_before[:200])
+                check("rename_many invalidates the decompile cache",
+                      "after_cache_fn" in pc_after
+                      and "inline_named_fn" not in pc_after, pc_after[:300])
+
                 empty = None
                 try:
                     c.call("rename_many")
