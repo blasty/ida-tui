@@ -38,6 +38,7 @@ _PROGRAM_METHODS = {
     "goto", "open", "rename", "comment", "retype", "follow", "xrefs", "symbols",
     "structs", "search", "select", "save", "hex", "toggle_view",
     "pseudocode", "disassembly", "xrefs_to", "xrefs_from", "resolve",
+    "define", "rename_many",
 }
 
 # Self-documenting method table (returned by the 'methods' verb).
@@ -78,6 +79,23 @@ METHODS = {
     "close": "dismiss a modal (Escape)",
     "move": "{dir,n?=1} fast movement (down/up/.../pagedown)",
     "cursor": "{line?,col?} set the code-pane cursor directly",
+    "define": "{kind:code|func|undef|thumb|thumbscan|data|string,target?} "
+              "(re)define bytes at target — the raw-image workflow",
+    "rename_many": "{items:[{addr,name}] | file:JSON} bulk-apply a symbol file "
+                   "in ONE call (no typing, no navigation)",
+}
+
+# `define` kinds -> the ListingView key that runs them. Driving the real key
+# keeps the pane honest (a viewer sees the same thing a human would do) and
+# reuses the app's own edit worker, which reports what actually happened.
+_DEFINE_KEYS = {
+    "code": "c",          # make code (runs until flow/undecodable)
+    "func": "p",          # make function
+    "undef": "u",
+    "thumb": "t",         # flip ARM/Thumb at the cursor, then disassemble
+    "thumbscan": "T",     # find Thumb entry pointers in a vector table
+    "data": "d",
+    "string": "a",
 }
 
 # Movement keys — driven fast (no typed delay) so the pane still visibly moves.
@@ -520,6 +538,80 @@ class RpcServer:
         await app._press_keys(_text_to_keys(value, delay_ms))
         await app._press_keys(["enter"])
 
+    async def _rename_many(self, params: dict[str, Any], timeout: float) -> dict:
+        """Apply a whole symbol file in one worker call.
+
+        The per-symbol path (goto + typed rename prompt) is the right thing for
+        one name a human is watching, and hopeless for the case a firmware image
+        always brings: hundreds of names from a loader map, an emulator's
+        symbols.json, or another tool's export. Each of those renames costs a
+        navigation (which pulls a listing page and a decompile) plus two prompt
+        round-trips, so 400 symbols is tens of minutes of driving and the pane
+        just flickers. IDA's own rename tool already takes a *list*; this hands
+        it the whole list, then refreshes the caches and the function table once.
+        """
+        app = self.app
+        items = params.get("items")
+        src = params.get("file")
+        if isinstance(items, str):        # `drive raw` hands params through as text
+            items = json.loads(items)
+        if items is None:
+            if not src:
+                raise ValueError("rename_many needs items=[{addr,name}] or file=<json>")
+            with open(os.path.expanduser(str(src))) as f:
+                items = json.load(f)
+        if isinstance(items, dict):       # {"0x4370": "name"} is a natural shape too
+            items = [{"addr": k, "name": v} for k, v in items.items()]
+        if not isinstance(items, list) or not items:
+            raise ValueError("rename_many: items must be a non-empty list")
+
+        ops, skipped = [], 0
+        for it in items:
+            if not isinstance(it, dict):
+                skipped += 1
+                continue
+            # Accept the field names symbol files actually use.
+            addr = next((it[k] for k in ("addr", "start", "ea", "address")
+                         if it.get(k) is not None), None)
+            name = it.get("name") or it.get("label")
+            if addr is None or not name:
+                skipped += 1
+                continue
+            ea = int(str(addr), 0) if isinstance(addr, str) else int(addr)
+            ops.append({"addr": hex(ea), "name": str(name)})
+        if not ops:
+            raise ValueError("rename_many: no usable {addr,name} entries")
+
+        overwrite = params.get("allow_overwrite", True)
+        if isinstance(overwrite, str):
+            overwrite = overwrite.lower() not in ("0", "false", "no", "")
+        batch = {"func": ops, "allow_overwrite": bool(overwrite)}
+        # The worker is blocking and single-threaded; off the event loop it goes,
+        # or the TUI freezes for the length of the batch.
+        res = await asyncio.to_thread(app.program.client.call, "rename", batch=batch)
+        summary = res.get("summary", {}) if isinstance(res, dict) else {}
+        failed = [r for r in (res.get("func") or []) if isinstance(r, dict)
+                  and r.get("error")] if isinstance(res, dict) else []
+
+        # Names live in the IDB, but every cache in front of it is now stale.
+        app.program.bump_names()
+        app.program.invalidate_functions()
+        app._func_index = None
+        app._load_functions()             # re-streams the function table
+        await settle(app, timeout=timeout)
+        app._dirty = True
+        app._status(f"renamed {summary.get('ok', 0)} symbols"
+                    + (f", {len(failed)} failed" if failed else "")
+                    + "   (Ctrl+S to save)")
+        snap = snapshot(app)
+        snap["rename_many"] = {
+            "requested": len(ops), "skipped": skipped,
+            "ok": summary.get("ok", 0), "failed": summary.get("failed", 0),
+            "errors": [{"addr": r.get("addr"), "error": r.get("error")}
+                       for r in failed[:10]],
+        }
+        return snap
+
     def _goto_target_pred(self, target):
         """A predicate that holds once a goto to ``target`` has landed."""
         app = self.app
@@ -538,6 +630,7 @@ class RpcServer:
     _NEEDS_NO_MODAL = {
         "goto", "open", "rename", "comment", "retype", "follow", "back",
         "toggle_view", "hex", "save", "search", "move", "cursor", "cursor_on",
+        "define",
     }
     #: Modals the driver is expected to interact with (they have their own verbs).
     _DRIVABLE_MODALS = {"XrefsScreen", "SymbolPalette", "StructEditor",
@@ -740,6 +833,42 @@ class RpcServer:
                     f"goto {target!r} did not land within {timeout}s "
                     f"(still at {_where(app)}); retry with a larger timeout=")
             return snapshot(app)
+
+        if method == "define":
+            kind = str(params.get("kind", "code")).lower()
+            if kind not in _DEFINE_KEYS:
+                raise ValueError(
+                    f"unknown define kind {kind!r}; one of "
+                    f"{', '.join(sorted(_DEFINE_KEYS))}")
+            target = params.get("target")
+            if target not in (None, ""):
+                # Land on the address first. A raw image is mostly *undefined*,
+                # so the target usually has no name and no function — the goto
+                # predicate can't be address-based, only "we moved".
+                await self._fill_prompt("g", "goto", str(target), delay,
+                                        clear=False)
+                await settle(app, timeout=timeout)
+            if app._active == "hex":
+                # backslash leaves hex for the code view (which may be decomp).
+                await self._press(["backslash"],
+                                  lambda: app._active != "hex", timeout,
+                                  "leave the hex view")
+            if app._active == "decomp":
+                # These bindings live on the listing; in the decompiler the key
+                # would be swallowed or do something else entirely.
+                await self._press(["tab"], lambda: app._active == "listing",
+                                  timeout, "switch to the listing")
+            if app._active != "listing":
+                raise RuntimeError(
+                    f"define needs the listing view, but the active pane is "
+                    f"{app._active!r}")
+            snap = await self._press([_DEFINE_KEYS[kind]], timeout=timeout,
+                                     what=f"define {kind}")
+            snap["define"] = {"kind": kind, "status": snap.get("status", "")}
+            return snap
+
+        if method == "rename_many":
+            return await self._rename_many(params, timeout)
 
         if method == "rename":
             await self._fill_prompt("n", "rename", str(params["name"]), delay, clear=True)

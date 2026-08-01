@@ -233,6 +233,39 @@ def cmd_retype(c, args):
     return _fmt_where(st)
 
 
+def cmd_define(c, args):
+    """define <kind> [target ...] — the raw-image workflow (thumb/code/func).
+
+    Several targets are common on a firmware image (a list of entry points from
+    a symbol file), so take them all and report per-target.
+    """
+    if not args:
+        raise SystemExit("usage: define <code|func|undef|thumb|thumbscan|data|"
+                         "string> [target ...]")
+    kind, targets = args[0], (args[1:] or [None])
+    out = []
+    for t in targets:
+        try:
+            st = c.call("define", kind=kind, **({"target": t} if t else {}))
+            out.append(f"  {t or '.'}: {st.get('status', '')}")
+        except RpcError as e:
+            out.append(f"  {t or '.'}: FAILED: {e}")
+    return "\n".join(out)
+
+
+def cmd_syms(c, args):
+    """syms <file.json> — bulk-apply a symbol file ([{addr|start|ea, name}])."""
+    if len(args) != 1:
+        raise SystemExit("usage: syms <symbols.json>")
+    r = c.call("rename_many", file=os.path.abspath(os.path.expanduser(args[0])))
+    m = r.get("rename_many", {})
+    out = [f"  {m.get('ok', 0)}/{m.get('requested', 0)} renamed"
+           f" (skipped {m.get('skipped', 0)}, failed {m.get('failed', 0)})"]
+    for e in m.get("errors", []):
+        out.append(f"    {e.get('addr')}: {e.get('error')}")
+    return "\n".join(out)
+
+
 def cmd_save(c, args):
     c.call("save")
     return "  saved"
@@ -256,7 +289,8 @@ COMMANDS = {
     "where": cmd_where, "go": cmd_go, "pc": cmd_pc, "dis": cmd_dis,
     "callees": cmd_callees, "callers": cmd_callers, "names": cmd_names,
     "rename": cmd_rename, "mv": cmd_mv, "note": cmd_note, "retype": cmd_retype,
-    "save": cmd_save, "screen": cmd_screen, "raw": cmd_raw,
+    "save": cmd_save, "screen": cmd_screen, "raw": cmd_raw, "define": cmd_define,
+    "syms": cmd_syms,
     "binaries": cmd_binaries, "switch": cmd_switch,
 }
 

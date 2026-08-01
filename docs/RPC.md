@@ -94,6 +94,16 @@ predicate so the returned state is final.
 | `select` | `index?` | in an open modal list (xrefs/symbols) choose the highlighted (or nth) item and activate it. |
 | `save` | — | Ctrl+S: persist the `.i64`. |
 | `close` | — | Escape (dismiss a modal). |
+| `define` | `kind`, `target?`, `delay_ms?` | goto `target` (if given) then press the listing key for `kind` ∈ `code`(c) / `func`(p) / `undef`(u) / `thumb`(t) / `thumbscan`(T) / `data`(d) / `string`(a). Leaves hex/decomp for the listing first (those bindings are listing-only). The IDA-side outcome is in `status` (e.g. *defined 228 instructions (0x4370–0x45e8) — control flow ends here*) and in `define.status`. |
+| `rename_many` | `items:[{addr,name}]` **or** `file:<json>`, `allow_overwrite?=true` | bulk-apply a symbol map in ONE worker call, then refresh the caches + function table. Accepts `addr`/`start`/`ea`/`address` and `name`/`label`, or a plain `{addr: name}` object. Returns `rename_many:{requested,skipped,ok,failed,errors[]}`. |
+
+**Raw images: `define` + `rename_many` are the workflow.** A firmware blob loads
+with no functions and no names. Point `define thumb` / `define func` at the entry
+points you know (IDA's auto-analysis then cascades through the call graph), and
+apply the whole symbol file with `rename_many`. Do **not** loop `rename` over a
+symbol file: each one costs a navigation (listing page + decompile) plus two
+prompt round-trips, i.e. tens of minutes for a few hundred symbols, where
+`rename_many` is one call and a few seconds.
 
 ### Movement (fast — bare keypresses, pump-only settle)
 | method | params | effect |
@@ -110,6 +120,15 @@ to read the pseudocode → `cursor line=.. col=..` onto a token → `rename name
 (they type with delay); use `move`/`cursor` to reposition quickly between them.
 
 ## Notes / gotchas
+
+- **Load options belong to the first open.** `pane spawn --processor/--base/
+  --ida-args` (forwarded to `idatui.launch`) only take effect while there is no
+  `.i64` yet — IDA bakes them into the database. To change them, delete the
+  `.i64` (or use Ctrl+L in the TUI) and spawn again.
+- **`--processor arm` is AArch64**, and Hex-Rays will not decompile a 32-bit
+  function in a 64-bit database. For 32-bit ARM firmware use
+  `--processor arm:ARMv7-A` (see `idatui/formats.py: PROCESSORS`, every name
+  there verified against a real IDA).
 
 - Settle is the shared `_sync.settle`: drain the message pump, wait for threaded
   workers, then (for ops with a known outcome) poll a predicate. A verb whose

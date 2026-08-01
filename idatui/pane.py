@@ -165,6 +165,14 @@ def spawn(args) -> int:
         inner += ["--rpc", sock]
     else:
         inner = [args.python, "-m", "idatui.launch", target, "--rpc", sock]
+    # Loading a headerless blob: without these IDA reads a raw firmware image as
+    # x86 at 0 and analyses to nothing, and the pane comes up ready-but-empty.
+    # They are launch's options; spawn just forwards them (a project records
+    # them per binary, so they're only needed on the first open).
+    for opt in ("processor", "base", "ida_args"):
+        val = getattr(args, opt, None)
+        if val:
+            inner += ["--" + opt.replace("_", "-"), str(val)]
     if getattr(args, "trace", None):
         inner += ["--trace", os.path.abspath(os.path.expanduser(args.trace))]
     cmd = f"cd {REPO!r} && exec " + " ".join(_q(a) for a in inner)
@@ -340,6 +348,14 @@ def main(argv: list[str]) -> int:
     sp.add_argument("--project", metavar="FILE",
                     help="project file to open instead of a single binary; "
                          "any --open paths are added to it (created if absent)")
+    sp.add_argument("--processor", metavar="NAME",
+                    help="IDA processor for a headerless blob: arm, armb, "
+                         "mipsb, metapc, … (passed to idatui.launch)")
+    sp.add_argument("--base", metavar="ADDR",
+                    help="load address for a headerless blob, e.g. 0x8000000 "
+                         "(16-byte aligned)")
+    sp.add_argument("--ida-args", metavar="STR", dest="ida_args",
+                    help="extra IDA command-line switches, passed through")
     sp.add_argument("--sock", help="RPC socket path (default: auto in $XDG_RUNTIME_DIR)")
     sp.add_argument("--python", default=DEFAULT_PY, help=f"python for the TUI ({DEFAULT_PY})")
     sp.add_argument("--vertical", action="store_true", help="split vertically (stacked)")
