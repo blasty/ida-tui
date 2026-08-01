@@ -28,7 +28,15 @@ class RpcClient:
     #: Default read timeout (s). Bounds any single call so a slow/hung server
     #: (e.g. Hex-Rays grinding on an undecompilable function) can't block the
     #: CLI forever. Override via ctor or the IDATUI_RPC_TIMEOUT env var.
-    DEFAULT_TIMEOUT = 90.0
+    #:
+    #: 90s was too tight on real firmware: a comment on a 42k-line flat listing
+    #: (one segment, no function boundaries to limit the rebuild) took 26-106s,
+    #: so the client reported "no response ... server busy or the op is hung"
+    #: for edits that had in fact been applied. A driver that believes a
+    #: successful edit failed is worse than a slow one -- it redoes the work, or
+    #: "fixes" something that was never broken. Real hangs still get caught,
+    #: just later.
+    DEFAULT_TIMEOUT = 300.0
 
     def __init__(self, sock_path: str, timeout: float | None = None):
         self.path = sock_path

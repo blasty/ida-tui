@@ -219,10 +219,15 @@ def cmd_mv(c, args):
 def cmd_note(c, args):
     if len(args) < 2:
         raise SystemExit("usage: note <fn> <text...>")
-    c.call("goto", target=args[0], delay_ms=0)
-    c.call("cursor", line=0, col=0)
+    st = c.call("goto", target=args[0], delay_ms=0)
+    # goto already lands on the function's first line. The old `cursor line=0`
+    # meant "the top of the function" only in the decompiler; in the listing
+    # line 0 is the top of the whole SEGMENT, so the note landed at address 0 --
+    # and on a 42k-line firmware listing the scroll to get there timed the
+    # caller out, which read as "comments are broken".
     c.call("comment", text=" ".join(args[1:]), delay_ms=0)
-    return f"  noted {args[0]}"
+    cur = (st.get("function") or {}).get("name") or args[0]
+    return f"  noted {cur} @ {(st.get('cursor') or {}).get('ea', 0):#x}"
 
 
 def cmd_retype(c, args):
