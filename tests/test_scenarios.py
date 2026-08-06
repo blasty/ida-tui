@@ -27,9 +27,9 @@ import traceback
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from idatui.app import (  # noqa: E402
-    ConfirmScreen, DecompView, FunctionsPanel, HexView, IdaTui,
+    ConfirmScreen, DecompView, FunctionsPanel, GraphView, HexView, IdaTui,
     HelpScreen, ListingView, QuitScreen, StringsPalette, StructEditor,
-    SymbolPalette, XrefsScreen, _str_display, _word_occurrences,
+    SymbolPalette, XrefsScreen, _HELP, _str_display, _word_occurrences,
 )
 from idatui.errors import IDAToolError  # noqa: E402
 from textual.widgets import (  # noqa: E402
@@ -237,8 +237,9 @@ class Ctx:
         if left.display:
             left.display = False
         app._pref = "decomp"
-        if app._active == "hex":
+        if app._active in ("hex", "graph"):
             app._active = "decomp"
+        app._graph_sticky = False   # else every later scenario rebuilds a graph
         app._split = False
         await self.pause(0.02)
 
@@ -538,10 +539,14 @@ async def s_help(c: Ctx):
     cards = app.screen.query(".help-card")
     titles = {str(w.border_title) for w in cards}
     txt = " ".join(str(w.render()) for w in cards)
+    # Derived from _HELP, not hardcoded: adding a group is a normal change and
+    # shouldn't fail a test that only meant 'every group is rendered'.
     c.check("each key group gets its own card",
-            titles == {"Navigate", "Views", "Move", "Edit", "Search"}, f"{titles}")
+            titles == {t for t, _ in _HELP}, f"{titles}")
     c.check("it documents real bindings",
             "set type" in txt and "split view" in txt and "cross-references" in txt)
+    c.check("the graph keys are documented",
+            "control-flow graph" in txt and "minimap" in txt)
     body = app.screen.query_one("#help-body")
     c.check("the cards fit without a scrollbar at a normal size",
             body.virtual_size.height <= body.size.height,
@@ -2762,6 +2767,258 @@ async def s_opfmt_opcode_key_moved(c: Ctx):
         modes.append(lst._op_mode)
     c.check("'B' cycles the opcode-bytes column", len(set(modes)) == 3, str(modes))
     c.check("and returns to where it started", modes[0] == modes[3], str(modes))
+
+
+# --------------------------------------------------------------------------- #
+# Graph view
+# --------------------------------------------------------------------------- #
+async def _open_graph(c: Ctx, fn=None, t=60):
+    """Open a multi-block function and press Space. Returns (fn, GraphView)."""
+    app = c.app
+    if fn is None:
+        # A function with real branching -- a straight-line one proves nothing
+        # about layering, and a huge one is slow.
+        fn = c.find_func(lambda f: 0x200 < f.size < 0x600) or c.biggest()
+    await c.open(fn.addr, "listing")
+    c.lst.focus()
+    await c.pause(0.05)
+    await c.press("space")
+    gv = app.query_one(GraphView)
+    ok = await c.wait(lambda: app._active == "graph" and gv.lay is not None, t)
+    c.check("the graph opened", ok,
+            f"active={app._active} sticky={app._graph_sticky} "
+            f"focus={type(app.focused).__name__} prompt={app._prompt_active()} "
+            f"status={c.status()!r}")
+    return fn, gv
+
+
+@scenario("graph_open")
+async def s_graph_open(c: Ctx):
+    app = c.app
+    fn, gv = await _open_graph(c)
+    c.check("space opens the graph view", app._active == "graph",
+            f"active={app._active} status={c.status()}")
+    if gv.lay is None:
+        return
+    c.check("the graph has the function's blocks",
+            len(gv.lay.nodes) == len(gv.fc.blocks) and len(gv.lay.nodes) > 1,
+            f"nodes={len(gv.lay.nodes)} blocks={len(gv.fc.blocks) if gv.fc else 0}")
+    c.check("it is the right function", gv.fc is not None and gv.fc.func_ea == fn.addr,
+            f"{gv.fc.func_ea if gv.fc else None:#x} want {fn.addr:#x}")
+    c.check("the cursor starts on a real address", gv._cursor_ea() is not None)
+    # The invariant the whole dummy-node machinery exists for.
+    boxes = [(n.x, n.y, n.right, n.y + n.h - 1) for n in gv.lay.nodes]
+    overlap = any(a[0] <= b[2] and b[0] <= a[2] and a[1] <= b[3] and b[1] <= a[3]
+                  for i, a in enumerate(boxes) for b in boxes[i + 1:])
+    c.check("no two blocks overlap", not overlap)
+    c.check("the status names the graph", "graph" in c.status(), c.status())
+    await c.press("space")
+    await c.wait(lambda: app._active != "graph", 15)
+    c.check("space returns to the listing", app._active == "listing",
+            f"active={app._active}")
+
+
+@scenario("graph_nav")
+async def s_graph_nav(c: Ctx):
+    app = c.app
+    fn, gv = await _open_graph(c)
+    if gv.lay is None or len(gv.lay.nodes) < 2:
+        c.check("graph has enough blocks to navigate", False)
+        return
+    start_ea = gv._cursor_ea()
+    await c.press("j")
+    await c.pause(0.05)
+    c.check("j moves the cursor within the block", gv._cursor_ea() != start_ea,
+            f"{start_ea:#x} -> {gv._cursor_ea():#x}")
+    await c.press("k")
+    await c.pause(0.05)
+    c.check("k comes back", gv._cursor_ea() == start_ea)
+    # J follows an edge to a successor block
+    b0 = gv.cursor_node
+    succs = gv.lay.succ.get(b0) or []
+    if succs:
+        await c.press("J")
+        await c.pause(0.1)
+        c.check("J follows an edge to a successor block",
+                gv.cursor_node == succs[0][0],
+                f"node={gv.cursor_node} want={succs[0][0]}")
+        await c.press("K")
+        await c.pause(0.1)
+        c.check("K goes back up an edge", gv.cursor_node == b0,
+                f"node={gv.cursor_node} want={b0}")
+    await c.press("0")
+    await c.pause(0.1)
+    c.check("0 returns to the entry block", gv.cursor_node == gv.fc.entry,
+            f"node={gv.cursor_node} entry={gv.fc.entry}")
+    # the cursor is always scrolled into view
+    cell = gv._cursor_cell()
+    top, left = int(gv.scroll_offset.y), int(gv.scroll_offset.x)
+    c.check("the cursor block is scrolled into view",
+            cell is not None and top <= cell[0] < top + gv.size.height
+            and left <= cell[1] < left + gv.size.width,
+            f"cell={cell} scroll=({top},{left}) size={gv.size}")
+
+
+@scenario("graph_zoom")
+async def s_graph_zoom(c: Ctx):
+    app = c.app
+    fn, gv = await _open_graph(c)
+    if gv.lay is None:
+        c.check("graph loaded", False)
+        return
+    full_h = gv.lay.height
+    seen = [gv.ZOOMS[gv._zoom]]
+    for _ in range(2):
+        await c.press("z")
+        await c.pause(0.15)
+        seen.append(gv.ZOOMS[gv._zoom])
+    c.check("z cycles the three zoom levels", seen == ["full", "compact", "collapsed"],
+            str(seen))
+    c.check("collapsed is much smaller than full", gv.lay.height < full_h,
+            f"{gv.lay.height} vs {full_h}")
+    c.check("the cursor survives a zoom", gv._cursor_ea() is not None)
+    c.check("the status still names the function",
+            gv.fc.name in c.status(), c.status())
+    await c.press("z")
+    await c.pause(0.15)
+    c.check("and wraps back to full", gv.ZOOMS[gv._zoom] == "full")
+    c.check("canvas is restored", gv.lay.height == full_h,
+            f"{gv.lay.height} vs {full_h}")
+
+
+@scenario("graph_render")
+async def s_graph_render(c: Ctx):
+    """The drawing itself: boxes, instruction text and edge glyphs must actually
+    reach the screen. A layout that is right but paints nothing looks identical
+    to a broken one from the outside."""
+    app = c.app
+    fn, gv = await _open_graph(c)
+    if gv.lay is None:
+        c.check("graph loaded", False)
+        return
+    rows = [gv.render_line(y).text for y in range(gv.size.height)]
+    blob = "\n".join(rows)
+    c.check("boxes are drawn", blob.count("\u250c") >= 1 and blob.count("\u2502") > 4,
+            f"corners={blob.count(chr(0x250c))} verts={blob.count(chr(0x2502))}")
+    c.check("edges are drawn", any(ch in blob for ch in "\u25bc\u2570\u256d\u256e\u256f"),
+            "no edge glyphs on screen")
+    ea = gv._cursor_ea()
+    head = gv.cur_head()
+    c.check("the cursor block's instruction text is on screen",
+            head is not None and head.text.split(" ")[0] in blob,
+            f"mnem={head.text.split(' ')[0] if head else None}")
+    c.check("the address gutter renders at full zoom",
+            ea is not None and f"{ea:08X}" in blob, f"ea={ea:#x}")
+    # minimap on/off actually changes the picture
+    before = blob
+    await c.press("m")
+    await c.pause(0.1)
+    after = "\n".join(gv.render_line(y).text for y in range(gv.size.height))
+    c.check("m toggles the minimap", after != before and not gv._show_minimap)
+    await c.press("m")
+    await c.pause(0.1)
+    c.check("and toggles it back", gv._show_minimap)
+    # a row query must never paint inside a box (that is what dummies buy us)
+    bad = 0
+    for row in range(min(gv.lay.height, 300)):
+        cells = gv.lay.painting.cells_at_row(row, 0, gv.lay.width)
+        if not cells:
+            continue
+        for n in gv.lay.nodes_at_row(row):
+            bad += sum(1 for col in cells if n.inside(row, col))
+    c.check("no edge is painted inside a block", bad == 0, f"{bad} cells")
+
+
+@scenario("graph_click")
+async def s_graph_click(c: Ctx):
+    app = c.app
+    fn, gv = await _open_graph(c)
+    if gv.lay is None or len(gv.lay.nodes) < 2:
+        c.check("graph has blocks to click", False)
+        return
+    # find a block whose body is on screen right now
+    top, left = int(gv.scroll_offset.y), int(gv.scroll_offset.x)
+    target = None
+    for n in gv.lay.nodes:
+        if (n.id != gv.cursor_node and top <= n.y + 1 < top + gv.size.height - 1
+                and left <= n.x + 2 < left + gv.size.width - 2):
+            target = n
+            break
+    if target is None:
+        c.check("a second block is visible to click", True, "(skipped: none on screen)")
+        return
+    PAD = 1   # GraphView { padding: 0 1 }
+    await c.pilot.click(GraphView,
+                        offset=(PAD + target.x + 2 - left, target.y + 1 - top))
+    await c.pause(0.15)
+    c.check("clicking a block moves the cursor into it",
+            gv.cursor_node == target.id,
+            f"node={gv.cursor_node} want={target.id}")
+
+
+@scenario("graph_rename")
+async def s_graph_rename(c: Ctx):
+    """Editing verbs must work from inside a box -- that is the whole point of
+    reusing the listing's rows rather than rendering our own."""
+    app = c.app
+    fn, gv = await _open_graph(c)
+    if gv.lay is None:
+        c.check("graph loaded", False)
+        return
+    ea = gv._cursor_ea()
+    if ea is None:
+        c.check("cursor has an address", False)
+        return
+    new = f"gtest_{os.getpid()}"
+    await c.press("n")
+    await c.wait(lambda: app.query_one("#rename", Input).display, 10)
+    c.check("n opens the rename prompt from the graph",
+            app.query_one("#rename", Input).display)
+    inp = app.query_one("#rename", Input)
+    inp.value = ""
+    await c.type(new)
+    await c.press("enter")
+    await c.wait(lambda: not app.query_one("#rename", Input).display, 15)
+    await c.pause(0.4)
+    try:
+        got = app.program.resolve(new)
+    except Exception:  # noqa: BLE001
+        got = None
+    c.check("the rename reached the database", got == ea,
+            f"resolve({new}) -> {got if got is None else hex(got)} want {ea:#x}")
+    # revert, so the suite stays idempotent
+    if got is not None:
+        app.program.client.call(
+            "rename", batch={"data": {"addr": hex(ea), "new": ""}})
+        app.program.bump_names()
+
+
+@scenario("graph_sticky")
+async def s_graph_sticky(c: Ctx):
+    """Graph mode survives a navigation: jumping to another function should land
+    in ITS graph, not dump you back into the listing."""
+    app = c.app
+    fn, gv = await _open_graph(c)
+    if gv.lay is None:
+        c.check("graph loaded", False)
+        return
+    other = c.find_func(lambda f: f.addr != fn.addr and 0x120 < f.size < 0x500)
+    if other is None:
+        c.check("a second function exists", True, "(skipped)")
+        return
+    app._goto(other.name)
+    ok = await c.wait(lambda: app._cur is not None and app._cur.ea == other.addr
+                      and app._active == "graph"
+                      and gv.fc is not None and gv.fc.func_ea == other.addr, 60)
+    c.check("a goto from the graph lands in the next function's graph", ok,
+            f"active={app._active} sticky={app._graph_sticky} "
+            f"cur={app._cur.ea if app._cur else None} "
+            f"fc={gv.fc.func_ea if gv.fc else None} want={other.addr:#x}")
+    await c.press("space")
+    await c.wait(lambda: app._active != "graph", 15)
+    c.check("space still leaves graph mode", app._active == "listing",
+            f"active={app._active}")
+    c.check("and it stops being sticky", app._graph_sticky is False)
 
 
 # --------------------------------------------------------------------------- #
