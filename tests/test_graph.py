@@ -11,6 +11,10 @@ monsters) actually live.
 """
 from __future__ import annotations
 
+#: the layout engine is pure: no IDA, no Textual.
+#: Read by tests/run.py (--fast skips every NEEDS_IDA file).
+NEEDS_IDA = False
+
 import json
 import os
 import sys

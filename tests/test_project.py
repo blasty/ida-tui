@@ -5,6 +5,10 @@ Pure stdlib: no IDA, no textual, no worker — runs anywhere in under a second.
 
     python tests/test_project.py
 """
+
+#: the project model + staging, pure stdlib.
+#: Read by tests/run.py (--fast skips every NEEDS_IDA file).
+NEEDS_IDA = False
 import json
 import os
 import sys

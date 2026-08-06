@@ -9,6 +9,10 @@ garbage. `t` switches the mode.
 Uses experiments/fibonacci.bin (real Thumb), so the encodings are not a guess.
 Needs IDA. ~40s.
 """
+
+#: spawns a real worker on Thumb code and drives the pilot.
+#: Read by tests/run.py (--fast skips every NEEDS_IDA file).
+NEEDS_IDA = True
 import asyncio
 import os
 import sys

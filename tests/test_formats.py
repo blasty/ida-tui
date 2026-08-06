@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
 """Format sniffing + load-switch construction (pure stdlib, no IDA)."""
+
+#: format sniffing + load switches, pure stdlib.
+#: Read by tests/run.py (--fast skips every NEEDS_IDA file).
+NEEDS_IDA = False
 import os
 import sys
 import tempfile

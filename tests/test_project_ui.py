@@ -8,6 +8,10 @@ Needs idalib (it spawns real workers, one per binary) and textual:
 Defaults to targets/echo + targets/cat. The binaries are copied into a temp
 source dir first, so the "source tree stays pristine" promise is checkable.
 """
+
+#: spawns one real worker per binary and drives the pilot.
+#: Read by tests/run.py (--fast skips every NEEDS_IDA file).
+NEEDS_IDA = True
 import asyncio
 import os
 import shutil

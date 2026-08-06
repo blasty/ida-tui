@@ -7,6 +7,10 @@ which was a lie: loading had finished, there was simply nothing to land on.
 
 Needs IDA (spawns a real worker). ~40s.
 """
+
+#: spawns a real worker on a raw blob and drives the pilot.
+#: Read by tests/run.py (--fast skips every NEEDS_IDA file).
+NEEDS_IDA = True
 import asyncio
 import os
 import sys

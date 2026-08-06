@@ -16,6 +16,10 @@ Uses ~/ida-venv python (has textual).
 --stop-after <substr>     stop once a check whose name contains <substr> ran
 --list                    print scenario names and exit
 """
+
+#: the pilot suite: one real worker, 56 scenarios.
+#: Read by tests/run.py (--fast skips every NEEDS_IDA file).
+NEEDS_IDA = True
 import asyncio
 import fnmatch
 import os

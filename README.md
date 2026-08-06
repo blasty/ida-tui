@@ -195,12 +195,29 @@ See `docs/RPC.md` for the full protocol.
 
 ## Tests
 
-A headless Textual `Pilot` suite lives in `tests/`; it spawns a worker on the
-given binary (default `targets/echo`):
+`tests/run.py` is the front door — it runs every suite and prints one table:
 
 ```sh
-python tests/test_scenarios.py targets/echo              # full UI suite
-python tests/test_scenarios.py --only hex,rename
+python3 tests/run.py            # everything (needs IDA; ~3 min)
+python3 tests/run.py --fast     # only the no-IDA suites — ~0.5s, runs anywhere
+python3 tests/run.py --list     # what would run, and whether it needs IDA
+python3 tests/run.py trace -x   # only files matching "trace", stop at first failure
+```
+
+Test files come in two kinds and **each one declares which** with a module-level
+`NEEDS_IDA` marker (`run.py` reads it without importing the file, and refuses to
+run if a file doesn't have one):
+
+- **pure** — stdlib only, no IDA, no worker, no binary. Seconds. This is what
+  you run between edits.
+- **IDA** — spawns a real idalib worker on a real target and drives the headless
+  Textual `Pilot` against it. Minutes, and needs a licensed IDA.
+
+The individual suites still run standalone, which is how you iterate on one:
+
+```sh
+~/ida-venv/bin/python tests/test_scenarios.py targets/echo   # full UI suite
+~/ida-venv/bin/python tests/test_scenarios.py --only hex,rename
 ```
 
 ## Docs

@@ -12,6 +12,10 @@ this repo.
 
     python3 tests/test_trace_vs_tenet.py [trace.0.log ...]
 """
+
+#: differential vs Tenet's reader; skips without traces.
+#: Read by tests/run.py (--fast skips every NEEDS_IDA file).
+NEEDS_IDA = False
 import os
 import random
 import sys

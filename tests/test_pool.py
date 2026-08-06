@@ -6,6 +6,10 @@ without spawning real idalib workers.
 
     python tests/test_pool.py
 """
+
+#: worker residency policy, with a fake client injected.
+#: Read by tests/run.py (--fast skips every NEEDS_IDA file).
+NEEDS_IDA = False
 import os
 import sys
 import tempfile

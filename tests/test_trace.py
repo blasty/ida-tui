@@ -6,6 +6,10 @@ Pure stdlib — no IDA, no trace files needed. The differential test
 this one covers what the reference can't arbitrate: the set-shaped queries
 painting needs, and rebasing.
 """
+
+#: the trace model, pure stdlib and no trace files.
+#: Read by tests/run.py (--fast skips every NEEDS_IDA file).
+NEEDS_IDA = False
 import os
 import sys
 import tempfile

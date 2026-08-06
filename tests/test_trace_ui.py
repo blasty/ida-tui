@@ -5,6 +5,10 @@ Needs IDA and a trace. Generates its own trace with the QEMU tracer if the
 tracer is built; skips with a message otherwise, since neither the emulator nor
 the trace is part of this repo.
 """
+
+#: needs IDA and a trace; skips if the tracer isn't built.
+#: Read by tests/run.py (--fast skips every NEEDS_IDA file).
+NEEDS_IDA = True
 import asyncio
 import os
 import shutil

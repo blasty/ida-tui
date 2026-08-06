@@ -20,6 +20,10 @@ Requires: tmux or zellij, IDA (idalib). ~2min.
 
     ~/ida-venv/bin/python tests/test_rawimage_rpc.py
 """
+
+#: spawns a real mux pane on a firmware image.
+#: Read by tests/run.py (--fast skips every NEEDS_IDA file).
+NEEDS_IDA = True
 import json
 import os
 import re

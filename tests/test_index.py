@@ -5,6 +5,10 @@ Pure stdlib: no IDA, no textual, no worker.
 
     python tests/test_index.py
 """
+
+#: the symbol/string index, pure stdlib.
+#: Read by tests/run.py (--fast skips every NEEDS_IDA file).
+NEEDS_IDA = False
 import os
 import sys
 import tempfile

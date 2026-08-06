@@ -13,6 +13,10 @@ message otherwise.
 
     ~/ida-venv/bin/python tests/test_trace_rpc.py
 """
+
+#: spawns a real mux pane with --trace.
+#: Read by tests/run.py (--fast skips every NEEDS_IDA file).
+NEEDS_IDA = True
 import json
 import os
 import shutil
