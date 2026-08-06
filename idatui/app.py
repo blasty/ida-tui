@@ -20,6 +20,7 @@ import asyncio
 import os
 import re
 import subprocess
+import time
 from dataclasses import dataclass, field
 
 from rich.align import Align
@@ -44,6 +45,7 @@ from textual.widgets import (
 from textual.widgets.option_list import Option
 
 from . import graph
+from . import kittygfx
 from .highlight import highlight_c
 
 from .errors import IDAToolError, IDAConnectionError
@@ -3614,8 +3616,12 @@ class ConfirmScreen(ModalScreen):
         self.dismiss(False)
 
 
-_LOGO_PATH = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "logo.ans")
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_LOGO_PATH = os.path.join(_REPO_ROOT, "logo.ans")
+#: The same artwork as a real image, for terminals that can draw one. logo.ans
+#: is 60x33 cells of half-blocks, i.e. 60x66 pixels; this is 474x516.
+LOGO_PNG = os.path.join(_REPO_ROOT, "logo.png")
+_LOGO_CELLS = (60, 33)   # what logo.ans occupies, so either path lays out the same
 _logo_cache: object = False  # False == not yet loaded (None == absent/unreadable)
 
 
@@ -3646,17 +3652,35 @@ class LoadingScreen(ModalScreen):
         super().__init__()
         self._title = title
         self._note = note
+        self._image = False       # drawing the real image, not the block art
+        self._last_place = 0.0    # throttles re-anchoring after a repaint
+
+    def _fits(self, rows: int) -> bool:
+        """Room for the art plus the title/note/help lines and box chrome."""
+        sz = self.app.size
+        return sz.height >= rows + 9 and sz.width >= 64
 
     def compose(self) -> ComposeResult:
         with Vertical(id="loading-box"):
-            logo = _load_logo()
-            # Only show the splash art when the terminal can fit it plus the
-            # title/note/help + box chrome; otherwise fall back to a text-only
-            # overlay so nothing important is clipped off a small screen.
-            if logo is not None:
-                sz = self.app.size
-                n = len(logo.split("\n"))
-                if sz.height >= n + 9 and sz.width >= 64:
+            # A terminal that can draw a real image gets one: same artwork,
+            # same cell footprint, ~10x the linear resolution of the block art.
+            # The image is anchored to screen cells rather than composited by
+            # Textual (no unicode-placeholder support here), so the widget is
+            # only reserved blank space -- see _place_logo.
+            cols, rows = _LOGO_CELLS
+            kittygfx.log(f"compose: supported={kittygfx.supported()} "
+                         f"app.size={self.app.size} fits={self._fits(rows)}")
+            if kittygfx.supported() and self._fits(rows):
+                self._image = True
+                blank = Static("\n" * (rows - 1), id="loading-image")
+                blank.styles.height = rows
+                yield blank
+            else:
+                logo = _load_logo()
+                # Only show the splash art when the terminal can fit it plus
+                # the title/note/help + box chrome; otherwise fall back to a
+                # text-only overlay so nothing important is clipped.
+                if logo is not None and self._fits(len(logo.split("\n"))):
                     # Align.center, not the box's align-horizontal: the 1fr
                     # title/note siblings make the child group span the full
                     # width, so container alignment has nothing left to centre.
@@ -3671,6 +3695,58 @@ class LoadingScreen(ModalScreen):
             self.query_one("#loading-note", Static).update(text)
         except Exception:  # noqa: BLE001 -- not mounted yet / already gone
             pass
+        # Textual doesn't know the image is there, so a repaint can drop it.
+        # Re-anchoring is one short escape with no image data; throttled so a
+        # chatty progress callback can't turn it into a flicker.
+        if self._image:
+            now = time.monotonic()
+            if now - self._last_place > 0.2:
+                self._last_place = now
+                self._place_logo()
+
+    # -- the image, which Textual knows nothing about ---------------------- #
+    def _place_logo(self) -> None:
+        """Anchor the image over the blank cells reserved for it.
+
+        Deferred to after a refresh because a widget has no screen region until
+        it has been laid out, and re-run on resize because the region moves.
+        """
+        if not self._image:
+            return
+        try:
+            region = self.query_one("#loading-image", Static).region
+        except Exception as e:  # noqa: BLE001 -- gone already
+            kittygfx.log(f"place_logo: no widget ({e})")
+            return
+        kittygfx.log(f"place_logo: region={region}")
+        if not region.width or not region.height:
+            return
+        cols, rows = _LOGO_CELLS
+        col = region.x + max((region.width - cols) // 2, 0)   # centre it
+        kittygfx.place(region.y, col, min(cols, region.width), rows)
+
+    def on_mount(self) -> None:
+        if not self._image:
+            return
+        # Upload HERE, not from the launcher: Textual is on the alternate screen
+        # by now, and an image uploaded to the primary screen cannot be placed
+        # from the alternate one -- the placement reports success and draws
+        # nothing at all.
+        if not kittygfx.upload(LOGO_PNG):
+            self._image = False
+            return
+        self.call_after_refresh(self._place_logo)
+
+    def on_resize(self) -> None:
+        if self._image:
+            kittygfx.clear()
+            self.call_after_refresh(self._place_logo)
+
+    def on_unmount(self) -> None:
+        # The image is anchored to the screen, not owned by the compositor, so
+        # it would sit there over the disassembly forever if we didn't say so.
+        if self._image:
+            kittygfx.clear()
 
     def action_hide(self) -> None:
         self.dismiss()
@@ -4147,6 +4223,7 @@ class IdaTui(App):
     #loading-box { width: 72; height: auto; border: thick $accent;
                    background: $panel; padding: 1 2; }
     #loading-logo { width: 100%; height: auto; margin-bottom: 1; }
+    #loading-image { width: 100%; margin-bottom: 1; }
     #loading-title { width: 1fr; height: 1; text-style: bold; }
     #loading-note { height: auto; color: $text-muted; margin-top: 1; }
     #loading-help { height: auto; color: $text-muted; margin-top: 1; }

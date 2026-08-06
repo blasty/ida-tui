@@ -32,6 +32,11 @@ don't file expectations. **Use at your own risk.**
   undefined heads) as the default code view; `F5`/`Tab` drops into the
   **decompiler (pseudocode)** for the function under the cursor. Both are
   line-virtualized and page lazily over the worker.
+- The startup splash draws the **real logo image** on terminals that speak the
+  kitty graphics protocol (~10× the resolution of the block art), and falls back
+  to `logo.ans` everywhere else. Support is detected by *asking the terminal*,
+  not by sniffing `$TERM` — under a multiplexer that passes the protocol through,
+  every environment variable you'd test is empty while the protocol works fine.
 - A **control-flow graph** (`space`, IDA's own key): the current function's basic
   blocks as boxes with routed, colour-coded edges (green taken / red fall-through
   / blue unconditional / purple loop), laid out with a proper layered

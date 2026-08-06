@@ -156,6 +156,18 @@ def main(argv: list[str] | None = None) -> int:
     except ImportError as e:
         _log(f"the TUI needs textual; run with ~/ida-venv/bin/python  ({e})")
         return 1
+    # Ask the terminal about graphics support NOW: the query needs a reply from
+    # stdin, and once Textual starts it reads stdin on its own thread and would
+    # swallow it. Only the ANSWER is wanted here -- the image itself is uploaded
+    # later, by the splash, because an image uploaded to the primary screen
+    # cannot be placed once Textual has switched to the alternate one. Costs one
+    # round trip, and only when attached to a tty.
+    try:
+        from . import kittygfx
+        kittygfx.supported()
+    except Exception:  # noqa: BLE001 -- graphics are decoration, never fatal
+        pass
+
     rpc_path = os.path.abspath(os.path.expanduser(args.rpc)) if args.rpc else None
     IdaTui(open_path=binary, keepalive=not args.no_keepalive,
            rpc_path=rpc_path, ttl=args.ttl, project=project,
