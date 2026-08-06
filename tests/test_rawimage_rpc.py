@@ -22,6 +22,7 @@ Requires: tmux or zellij, IDA (idalib). ~2min.
 """
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -117,6 +118,50 @@ def main() -> int:
                     bad = str(e)
                 check("define rejects an unknown kind", bad is not None
                       and "unknown define kind" in bad, str(bad))
+
+                # -- opfmt (how a literal is displayed) --------------------- #
+                # Thumb code is full of small immediates -- the thing 'o' exists
+                # for -- but the ENTRY POINT hasn't got one, so find a line that
+                # has. `show` asks without editing, which is how a driver does
+                # that: the rendered text alone can't be trusted (a listing read
+                # before an ARM/Thumb switch shows the old decoding).
+                c.call("goto", target="0x0", delay_ms=0)
+                seen = c.call("view", lines=40).get("lines", [])
+                lit = None
+                for ln in seen:
+                    m = re.match(r"([0-9A-F]{8})\s+(.*)", ln.get("text", ""))
+                    if not (m and re.search(r"#(0x[0-9A-Fa-f]{2,}|[1-9]\d+)\b",
+                                            m.group(2))):
+                        continue
+                    ea_s = "0x" + m.group(1)
+                    st = c.call("opfmt", mode="show", target=ea_s, delay_ms=0
+                                ).get("opfmt", {}).get("status", "")
+                    if "no literal" not in st:
+                        lit = (ea_s, st)
+                        break
+                check("the blob has an immediate to reformat", lit is not None,
+                      json.dumps([ln.get("text") for ln in seen[:8]]))
+                if lit is not None:
+                    tgt, st0 = lit
+                    check("opfmt show reports the stops without editing",
+                          "[" in st0 and "dec" in st0, st0)
+                    r = c.call("opfmt", mode="dec", target=tgt, delay_ms=0)
+                    st1 = r.get("opfmt", {}).get("status", "")
+                    check("opfmt sets a named format", "dec" in st1, st1)
+                    r = c.call("opfmt", mode="cycle")
+                    st2 = r.get("opfmt", {}).get("status", "")
+                    check("opfmt cycles on from there", "\u2192" in st2, st2)
+                    r = c.call("opfmt", mode="default")
+                    check("opfmt hands the operand back to IDA",
+                          "default" in r.get("opfmt", {}).get("status", ""),
+                          r.get("opfmt", {}).get("status", ""))
+                badfmt = None
+                try:
+                    c.call("opfmt", mode="roman")
+                except RpcError as e:
+                    badfmt = str(e)
+                check("opfmt rejects an unknown mode", badfmt is not None
+                      and "unknown opfmt mode" in badfmt, str(badfmt))
 
                 # -- rename_many -------------------------------------------- #
                 fns = c.call("functions", limit=200)

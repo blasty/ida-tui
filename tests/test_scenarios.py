@@ -31,6 +31,7 @@ from idatui.app import (  # noqa: E402
     HelpScreen, ListingView, QuitScreen, StringsPalette, StructEditor,
     SymbolPalette, XrefsScreen, _str_display, _word_occurrences,
 )
+from idatui.errors import IDAToolError  # noqa: E402
 from textual.widgets import (  # noqa: E402
     DataTable, Input, OptionList, Static, TextArea,
 )
@@ -2298,6 +2299,469 @@ async def s_func_banners(c: Ctx):
     hdr = next((h for h in heads if h.kind == "funchdr"
                 and h.text == f"{fn.name} proc"), None)
     c.check("the proc header names the function", hdr is not None, f"fn={fn.name}")
+
+
+def _find_literal(c, start=0, limit=150):
+    """(head, show) for a listing row at/after ``start`` whose literal is worth
+    reformatting: a value over 9, so hex and decimal actually LOOK different.
+
+    Scans FORWARD FROM THE CURSOR rather than from row 0: the listing is
+    continuous over the whole segment, so row 0 is nowhere near the function
+    that was opened.
+    """
+    for i in range(start, min(start + limit, len(c.lst.model))):
+        h = c.lst.model.get(i)
+        if h is None or h.kind != "code":
+            continue
+        try:
+            show = c.prog.op_format(h.ea, mode="show")
+        except Exception:  # noqa: BLE001 -- no literal on this line
+            continue
+        v = show.get("value")
+        if v and int(v, 16) > 9 and {"hex", "dec"} <= set(show.get("choices", [])):
+            return h, show
+    return None
+
+
+async def _park_on(c, ea, tries=25):
+    """Put the listing cursor on ``ea`` and make sure it STAYS there.
+
+    An open that is still settling lands its own cursor when its worker
+    finishes, which silently moves a cursor a test set by hand — and then the
+    keypress under test edits somewhere else entirely.
+    """
+    held = 0
+    for _ in range(tries):
+        if c.lst._cursor_ea() == ea:
+            held += 1
+            if held >= 3:
+                return True
+        else:
+            held = 0
+            i = c.lst.model.index_of_ea(ea)
+            if i >= 0:
+                c.lst.cursor = i
+                c.lst.cursor_x = c.lst._insn_col(i)
+        await c.pause(0.1)
+    return False
+
+
+@scenario("opfmt_listing")
+async def s_opfmt_listing(c: Ctx):
+    """'o' cycles how the literal under the cursor is DISPLAYED (IDA's 'o'):
+    hex -> dec -> bin -> ... -> default, 'O' the other way, and the listing
+    re-renders in place."""
+    app = c.app
+    await c.open_biggest("listing")
+    c.lst.model.load_all()
+    found = _find_literal(c, start=c.lst.cursor)
+    if found is None:
+        c.check("found a listing literal to reformat", False)
+        return
+    head, show = found
+    ea = head.ea
+    c.lst.focus()
+    parked = await _park_on(c, ea)
+    c.check("the cursor is on the literal's line", parked,
+            f"want {ea:#x}, cursor at {c.lst._cursor_ea():#x}")
+    before = head.text
+    try:
+        await c.press("o")
+        await c.wait(lambda: c.lst.model.index_of_ea(ea) >= 0
+                     and (c.lst.model.get(c.lst.model.index_of_ea(ea)) or head).text
+                     != before, 25)
+        i = c.lst.model.index_of_ea(ea)
+        after = c.lst.model.get(i).text if i >= 0 else before
+        c.check("'o' re-renders the literal", after != before,
+                f"{before!r} -> {after!r}  ea={ea:#x} show={show}")
+        c.check("the status names the format it moved to",
+                any(f in c.status() for f in show["choices"]),
+                f"status={c.status()!r} choices={show['choices']}")
+        c.check("the change is marked unsaved", app._dirty)
+        # 'O' walks the ring the other way: back to where we started.
+        await c.press("O")
+        await c.wait(lambda: c.lst.model.index_of_ea(ea) >= 0
+                     and (c.lst.model.get(c.lst.model.index_of_ea(ea)) or head).text
+                     == before, 25)
+        j = c.lst.model.index_of_ea(ea)
+        c.check("'O' cycles back", j >= 0 and c.lst.model.get(j).text == before,
+                f"{c.lst.model.get(j).text if j >= 0 else None!r} want {before!r}")
+        # An explicit format by name (what the palette/RPC use).
+        r = c.prog.op_format(ea, mode="dec")
+        c.check("an explicit format renders decimal",
+                r["format"] == "dec" and str(int(show["value"], 16)) in r["text"],
+                str(r))
+    finally:
+        try:
+            c.prog.op_format(ea, mode="default", n=show.get("n", -1))
+        except Exception:  # noqa: BLE001
+            pass
+        c.prog.bump_names()
+
+
+@scenario("opfmt_no_literal")
+async def s_opfmt_no_literal(c: Ctx):
+    """A line with nothing to reformat says so instead of picking something."""
+    await c.open_biggest("listing")
+    c.lst.model.load_all()
+
+    def _banner(i):
+        h = c.lst.model.get(i)
+        return h is not None and h.kind in ("sep", "funchdr", "label")
+
+    row = next((i for i in range(c.lst.cursor, min(c.lst.cursor + 400,
+                                                   len(c.lst.model)))
+                if _banner(i)), None)
+    if row is None:
+        c.check("found a banner row", False)
+        return
+    c.lst.focus()
+    for _ in range(20):                 # hold it against a late-landing open
+        c.lst.cursor = row
+        await c.pause(0.05)
+        if c.lst.cursor == row:
+            break
+    c.check("the cursor is on a banner row", _banner(c.lst.cursor),
+            f"row={c.lst.cursor}")
+    await c.press("o")
+    await c.wait(lambda: "reformat" in c.status() or "format" in c.status(), 15)
+    c.check("'o' on a line with no literal explains itself",
+            "reformat" in c.status(), f"status={c.status()!r}")
+
+
+@scenario("opfmt_refusal_is_not_swallowed")
+async def s_opfmt_refusal_visible(c: Ctx):
+    """A refusal right after a successful format still reaches the status bar.
+
+    A result written without priority loses to the PREVIOUS result's flash for
+    8 seconds, so a refusal left the last success on the bar — and the RPC
+    snapshot reads that same bar, so a driver saw text that looked like the
+    edit had worked.
+
+    Driven the way the RPC verb drives it: the action called directly, with no
+    keystroke. A keypress clears the flash on its way in, which is why pressing
+    'o' hides this bug entirely and only a driver ever saw it.
+    """
+    await c.open_biggest("listing")
+    c.lst.model.load_all()
+    found = _find_literal(c, start=c.lst.cursor)
+    if found is None:
+        c.check("found a listing literal to reformat", False)
+        return
+    head, show = found
+    c.lst.focus()
+    if not await _park_on(c, head.ea):
+        c.check("the cursor is on the literal's line", False)
+        return
+    try:
+        await c.press("o")                      # a success: sets the flash
+        await c.wait(lambda: "\u2192" in c.status(), 25)
+        good = c.status()
+
+        # ... and, within the flash window, 'o' where there is nothing to do.
+        # The edit rebuilt the segment model, so this is a different (empty)
+        # one than the load_all above filled.
+        c.lst.model.load_all()
+
+        def _banner(i):
+            h = c.lst.model.get(i)
+            return h is not None and h.kind in ("sep", "funchdr", "label")
+
+        row = next((i for i in range(c.lst.cursor,
+                                     min(c.lst.cursor + 400, len(c.lst.model)))
+                    if _banner(i)), None)
+        if row is None:
+            c.check("found a banner row to refuse on", False)
+            return
+        for _ in range(20):
+            c.lst.cursor = row
+            await c.pause(0.05)
+            if c.lst.cursor == row:
+                break
+        c.lst.action_op_format("cycle")     # no keypress: as the RPC does it
+        await c.wait(lambda: c.status() != good, 15)
+        c.check("a refusal replaces the previous success on the status bar",
+                c.status() != good and "reformat" in c.status(),
+                f"still showing {c.status()!r}")
+    finally:
+        try:
+            c.prog.op_format(head.ea, mode="default", n=show.get("n", -1))
+        except Exception:  # noqa: BLE001
+            pass
+        c.prog.bump_names()
+
+
+def _styled_cols(strip, style_attr, want):
+    """Columns of ``strip`` whose rendered style has ``style_attr`` == want."""
+    cols, x = [], 0
+    for seg in strip:
+        st = seg.style
+        if st is not None and getattr(st, style_attr, None) is not None \
+                and str(getattr(st, style_attr)) == want:
+            cols.extend(range(x, x + len(seg.text)))
+        x += len(seg.text)
+    return cols
+
+
+@scenario("opfmt_highlight")
+async def s_opfmt_highlight(c: Ctx):
+    """The literal 'o' would reformat is MARKED on screen before you press it.
+
+    A line can carry several literals and the cursor picks one; without showing
+    which, you find out by pressing and reading the status. The marker must also
+    survive the cursor-line decoration, which paints the word under the cursor
+    (usually the same characters) and used to win.
+    """
+    from idatui.app import _S_OPERAND
+    await c.open_biggest("listing")
+    c.lst.model.load_all()
+    lst = c.lst
+    lst.focus()
+    # A row with two operands, so "which one" is a real question.
+    row = next((i for i in range(lst.cursor, min(lst.cursor + 400, len(lst.model)))
+                if lst.model.get(i) is not None
+                and (lst.model.get(i).ops or ()) and len(lst.model.get(i).ops) >= 2),
+               None)
+    if row is None:
+        c.check("found a row with two operands", False)
+        return
+    h = lst.model.get(row)
+    if not await _park_on(c, h.ea):
+        c.check("parked on the two-operand row", False)
+        return
+    row = lst.model.index_of_ea(h.ea)
+    h = lst.model.get(row)
+    base = lst._insn_col(row)
+    want_bg = str(_S_OPERAND.bgcolor)
+    seen = []
+    for lo, hi, n in h.ops:
+        lst.cursor_x = base + lo
+        await c.pause(0.05)
+        strip = lst.render_line(row - round(lst.scroll_offset.y))
+        cols = _styled_cols(strip, "bgcolor", want_bg)
+        seen.append((n, min(cols) if cols else None, max(cols) + 1 if cols else None))
+        c.check(f"operand {n} ({h.text[lo:hi]!r}) is marked when the cursor is on it",
+                cols and min(cols) == base + lo and max(cols) + 1 == base + hi,
+                f"marked={min(cols) if cols else None}.."
+                f"{max(cols)+1 if cols else None} want={base+lo}..{base+hi}")
+    c.check("the mark MOVES between the operands (it isn't the whole line)",
+            len({s[1] for s in seen}) == len(seen), str(seen))
+    # ... and the marked operand is the one the edit acts on — either it gets
+    # reformatted, or the refusal names that same operand. What must never
+    # happen is a different operand quietly changing.
+    for lo, hi, n in h.ops:
+        lst.cursor_x = base + lo
+        try:
+            r = c.prog.op_format(h.ea, mode="show", col=lst.op_col())
+            got, why = r.get("n"), ""
+        except IDAToolError as e:            # "operand N (rsp) has no format"
+            m = re.search(r"operand (\d+)", e.message)
+            got, why = (int(m.group(1)) if m else None), e.message
+        c.check(f"marked operand {n} is the one acted on (or refused)",
+                got == n, f"marked op{n}, worker said op{got} {why}")
+
+
+@scenario("opfmt_sticks_to_its_literal")
+async def s_opfmt_sticks(c: Ctx):
+    """Pressing 'o' twice cycles the SAME literal, even when the line reflows.
+
+    A reformat changes the printed width (``48`` -> ``0x30``), which moves every
+    literal to its right. Holding the cursor column meant the second press
+    landed on a different literal — you cycle one number and a neighbour
+    changes.
+    """
+    app = c.app
+    pick = None
+    for fn in c.all_funcs()[:60]:
+        d = c.prog.decompile(fn.addr)
+        if d.failed or not d.code:
+            continue
+        nums = c.prog.pc_nums(fn.addr)
+        for line, recs in sorted(nums.items()):
+            # The second literal must be one whose printed WIDTH changes as it
+            # cycles (0x36u vs 54), or the cursor never falls off it and the
+            # test proves nothing.
+            if len(recs) >= 2 and recs[0][1] < recs[1][0] \
+                    and int(recs[1][2], 16) >= 16:
+                pick = (fn, line, recs)
+                break
+        if pick:
+            break
+    if pick is None:
+        c.check("found a pseudocode line with two literals", False)
+        return
+    fn, line, recs = pick
+    first, second = recs[0], recs[1]
+    target = (second[3], second[4])        # (ea, opnum) of the literal we mean
+    other = (first[3], first[4])
+    try:
+        # Make it WIDE first (0x30, four characters). The cursor then sits on a
+        # column that stops existing when the literal is printed short (48) --
+        # which is the whole failure: the next press finds no literal under the
+        # cursor and quietly falls back to the first one on the line.
+        c.prog.pc_num_format(fn.addr, mode="hex", line=line, col=second[0])
+        c.prog.bump_names()
+        await c.open(fn.addr, "decomp")
+        if app._active != "decomp":
+            c.check("pseudocode view opened", False, f"active={app._active}")
+            return
+        dec = c.dec
+        dec.focus()
+        wide = next((r for r in dec._nums.get(line, ())
+                     if (r[3], r[4]) == target), None)
+        if wide is None or wide[1] - wide[0] < 3:
+            c.check("the literal is now printed wide", False,
+                    f"nums={dec._nums.get(line)}")
+            return
+        dec.cursor, dec.cursor_x = line, wide[1] - 1   # its LAST character
+        dec.refresh()
+        await c.pause(0.05)
+        seen = []
+        for _ in range(3):
+            before = dec._texts[line]
+            await c.press("o")
+            await c.wait(lambda: dec.loaded_ea == fn.addr
+                         and line < len(dec._texts)
+                         and dec._texts[line] != before, 30)
+            cur = next(((r[3], r[4]) for r in dec._nums.get(line, ())
+                        if r[0] <= dec.cursor_x < r[1]), None)
+            seen.append(cur)
+        c.check("every press stays on the literal we started on",
+                all(s == target for s in seen),
+                f"target={target} other={other} landed={seen} "
+                f"line={dec._texts[line].strip()!r}")
+    finally:
+        try:
+            c.prog.pc_num_format(fn.addr, mode="default", line=line,
+                                 col=second[0])
+        except Exception:  # noqa: BLE001
+            pass
+        c.prog.bump_names()
+
+
+@scenario("cursor_on_stays_visible")
+async def s_cursor_on_visible(c: Ctx):
+    """``cursor_on`` lands somewhere you can SEE, near where you are.
+
+    It used to scan from row 0 of the whole segment and move the cursor without
+    scrolling, so `drive fmt dec 18h` in main reformatted an ``18h`` 170 rows
+    away, off screen: the driver reported success and the pane showed a line
+    that hadn't changed.
+    """
+    from idatui.rpc import cursor_on
+    app = c.app
+    fn = await c.open_biggest("listing")
+    c.lst.model.load_all()
+    lst = c.lst
+    lst.focus()
+    await c.pause(0.1)
+    top = round(lst.scroll_offset.y)
+    # A token that occurs both before the viewport and inside it.
+    here = next((t for t in ("rax", "rsp", "eax", "rbp", "rdi")
+                 if any(t in (lst._line_plain(i) or "")
+                        for i in range(top, min(top + 20, lst.total)))
+                 and any(t in (lst._line_plain(i) or "") for i in range(0, top))),
+                None)
+    if here is None:
+        c.check("found a token both above and inside the viewport", False,
+                f"top={top}")
+        return
+    found = cursor_on(app, here)
+    await c.pause(0.1)
+    c.check(f"cursor_on({here!r}) found it", found)
+    vis = round(lst.scroll_offset.y)
+    c.check("it lands inside the viewport, not thousands of rows above",
+            vis <= lst.cursor < vis + lst._visible_height(),
+            f"cursor={lst.cursor} viewport={vis}..{vis + lst._visible_height()}")
+    c.check("and it searched from the viewport, not from row 0",
+            lst.cursor >= top, f"cursor={lst.cursor} was top={top}")
+    # An explicit line still wins, and lands visibly.
+    far = next((i for i in range(0, min(top, lst.total))
+                if here in (lst._line_plain(i) or "")), None)
+    if far is not None:
+        cursor_on(app, here, line=far)
+        await c.pause(0.1)
+        v2 = round(lst.scroll_offset.y)
+        c.check("an explicit line is honoured AND scrolled into view",
+                lst.cursor == far and v2 <= far < v2 + lst._visible_height(),
+                f"cursor={lst.cursor} want={far} viewport={v2}")
+    # The `cursor` verb has the same duty: a driver that parks the cursor for
+    # an edit must leave it where the edit can be watched.
+    from idatui.rpc import place_cursor
+    deep = min(lst.total - 1, 900)
+    place_cursor(lst, deep, 0)
+    await c.pause(0.1)
+    v3 = round(lst.scroll_offset.y)
+    c.check("`cursor line=` scrolls to what it selected",
+            v3 <= deep < v3 + lst._visible_height(),
+            f"cursor={lst.cursor} viewport={v3}..{v3 + lst._visible_height()}")
+
+
+@scenario("opfmt_decomp")
+async def s_opfmt_decomp(c: Ctx):
+    """'o' in the pseudocode reformats the C literal under the cursor. Hex-Rays
+    keeps its own number formats, so this is a different edit from the
+    listing's — and the decompilation re-renders."""
+    app = c.app
+    pick = None
+    for fn in c.all_funcs()[:60]:
+        d = c.prog.decompile(fn.addr)
+        if d.failed or not d.code:
+            continue
+        for i, txt in enumerate(d.code.split("\n")):
+            m = re.search(r"[=<>+\-*/(,]\s(\d{2,}|0x[0-9A-Fa-f]{2,})\b", txt)
+            if m and "//" not in txt[:m.start()]:
+                pick = (fn, i, m.start(1))
+                break
+        if pick:
+            break
+    if pick is None:
+        c.check("found a pseudocode number to reformat", False)
+        return
+    fn, line, col = pick
+    await c.open(fn.addr, "decomp")
+    if app._active != "decomp":
+        c.check("pseudocode view opened", False, f"active={app._active}")
+        return
+    dec = c.dec
+    dec.focus()
+    dec.cursor, dec.cursor_x = line, col
+    dec.refresh()
+    await c.pause(0.05)
+    before = dec._texts[line]
+    try:
+        await c.press("o")
+        await c.wait(lambda: dec.loaded_ea == fn.addr and line < len(dec._texts)
+                     and dec._texts[line] != before, 30)
+        c.check("'o' re-renders the pseudocode literal",
+                line < len(dec._texts) and dec._texts[line] != before,
+                f"{before!r} -> {dec._texts[line] if line < len(dec._texts) else None!r}")
+        c.check("the status says which format",
+                any(f in c.status() for f in ("hex", "dec", "oct", "char", "default")),
+                f"status={c.status()!r}")
+    finally:
+        try:
+            c.prog.pc_num_format(fn.addr, mode="default", line=line, col=col)
+        except Exception:  # noqa: BLE001
+            pass
+        c.prog.bump_names()
+
+
+@scenario("opfmt_opcode_key_moved")
+async def s_opfmt_opcode_key_moved(c: Ctx):
+    """'o' now belongs to the operand format, so the opcode-bytes column moved
+    to 'B' — and still cycles off/limited/full."""
+    await c.open_biggest("listing")
+    lst = c.lst
+    lst.focus()
+    await c.pause(0.05)
+    modes = [lst._op_mode]
+    for _ in range(3):
+        await c.press("B")
+        await c.pause(0.05)
+        modes.append(lst._op_mode)
+    c.check("'B' cycles the opcode-bytes column", len(set(modes)) == 3, str(modes))
+    c.check("and returns to where it started", modes[0] == modes[3], str(modes))
 
 
 # --------------------------------------------------------------------------- #
