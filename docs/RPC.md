@@ -71,6 +71,7 @@ stalls. `target` is a name, `0xADDR`, or omitted (= current function).
 | `xrefs_to` | `target`, `limit?=200` | `[{frm,to,type,fn_addr,fn_name}]` — who references it. |
 | `xrefs_from` | `target`, `limit?=200` | what it references. For a **function** (name/entry ea): whole-body callees + string/data refs from the decompiler, `[{to,name,string,is_func,type}]`. For an explicit **0xADDR**: address-scoped `[{frm,to,type,fn_addr,fn_name}]`. |
 | `resolve` | `name` | `{ea}` (or `{ea:null}`). |
+| `diag` | `n?=10`, `clear?` | `{recent:[{when,what,error,where,thread}], log}` — errors the app swallowed rather than crashing on. The answer to "the verb said success and the pane shows nothing": inside a full-screen TUI a traceback has nowhere to go, so it comes out here. Set `$IDATUI_LOG=/tmp/x.log` when spawning for the same entries plus tracebacks, on disk. |
 
 ### Semantic verbs
 High-level ops type through the **real prompts** with a per-char delay

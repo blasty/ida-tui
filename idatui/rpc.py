@@ -28,6 +28,7 @@ from typing import Any
 from rich.console import Console
 
 from ._sync import drain, settle
+from . import diag
 from .app import DecompView, GraphView, HexView, ListingView, ViewMode
 
 PROTO_VERSION = 1
@@ -889,6 +890,16 @@ class RpcServer:
             return functions(app, params.get("filter"), int(params.get("limit", 50)))
 
         # -- projects ------------------------------------------------------ #
+        if method == "diag":
+            # What has been swallowed lately. A driver that got "success" and a
+            # pane showing nothing has no other way to ask; inside a
+            # full-screen TUI there is nowhere for a traceback to go.
+            if params.get("clear"):
+                diag.clear()
+                return {"cleared": True}
+            return {"recent": diag.recent(int(params.get("n", 10))),
+                    "log": os.environ.get("IDATUI_LOG") or None}
+
         if method == "trace":
             tc = app.trace_ctl
             if tc.trace is None:

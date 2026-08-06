@@ -1362,11 +1362,16 @@ async def s_follow_xrefs(c: Ctx):
     orig_name = app._cur.name
     depth = len(app._nav)
     await c.press("enter")
-    await c.wait(lambda: len(app._nav) > depth, 25)
+    # Wait for exactly what the check asserts. Waiting only on the nav depth let
+    # the check run while _cur was still the function we jumped FROM -- the
+    # follow pushes the source entry before it opens the target -- so this
+    # failed about one run in ten with cur == orig, at full speed, looking like
+    # a code regression.
+    await c.wait(lambda: len(app._nav) > depth and app._cur.ea != orig, 25)
     c.check("Enter follows the call into another function",
             app._cur.ea != orig and len(app._nav) > depth, f"cur={app._cur.ea:#x}")
     await c.press("escape")
-    await c.pause(0.1)
+    await c.wait(lambda: app._cur.ea == orig, 15)
     c.check("Esc returns from the follow", app._cur.ea == orig, f"cur={app._cur.ea:#x}")
     dis.cursor = call_idx
     dis.refresh()

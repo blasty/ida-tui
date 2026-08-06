@@ -30,6 +30,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
 from typing import Callable, TYPE_CHECKING
 
+from . import diag
 from .errors import IDAToolError
 
 if TYPE_CHECKING:  # type hint only
@@ -1605,7 +1606,10 @@ class Program:
         try:
             with urllib.request.urlopen(url, timeout=timeout) as r:
                 return json.loads(r.read().decode("utf-8", "replace"))
-        except Exception:  # noqa: BLE001 -- fall back to the truncated preview
+        except Exception as e:  # noqa: BLE001 -- fall back to the truncated preview
+            # The user gets CLIPPED pseudocode with no indication that a fetch
+            # failed rather than the function genuinely being that short.
+            diag.note(f"decompile: full-body fetch {url}", e)
             return None
 
     def strings(self, min_len: int = 4, refresh: bool = False) -> list[StrLit]:

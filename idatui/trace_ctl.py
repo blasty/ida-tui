@@ -21,6 +21,8 @@ import bisect
 import os
 from typing import TYPE_CHECKING
 
+from . import diag
+
 if TYPE_CHECKING:                                    # pragma: no cover
     from .app import IdaTui
 
@@ -264,7 +266,10 @@ class TraceController:
             # or twice, once for each of two parallel maps — would be felt.
             try:
                 app._apply_split_map(ea, app.program.decomp_map(ea))
-            except Exception:  # noqa: BLE001
+            except Exception as e:  # noqa: BLE001
+                # The pseudocode simply stops being painted with the trail, with
+                # nothing on screen to say why.
+                diag.note(f"trail: decomp_map({ea:#x})", e)
                 self.trail_map, self.trail_map_ea = [], ea
                 self.trail_line_of, self.trail_eas = {}, []
                 self.trail_span = None

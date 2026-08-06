@@ -26,6 +26,7 @@ from typing import TYPE_CHECKING
 
 from textual.widgets import DataTable
 
+from . import diag
 from .errors import IDAToolError
 
 if TYPE_CHECKING:                                    # pragma: no cover
@@ -210,7 +211,11 @@ class EditController:
         resolved: int | None = None
         try:
             resolved = prog.resolve(old)
-        except Exception:  # noqa: BLE001
+        except Exception as e:  # noqa: BLE001
+            # Not cosmetic: an unresolved name is renamed as DATA instead of as
+            # a function, so a lookup that failed for a transport reason quietly
+            # applies the wrong kind of edit.
+            diag.note(f"rename: resolve({old!r})", e)
             resolved = None
         if resolved is not None:
             fn = prog.function_of(resolved)
@@ -291,7 +296,11 @@ class EditController:
         # it already did.
         try:
             fn = app.program.function_of(addr)
-        except Exception:  # noqa: BLE001
+        except Exception as e:  # noqa: BLE001
+            # If this throws we don't learn the address IS a function start, so
+            # the index keeps the old name and every readback says the rename
+            # never happened.
+            diag.note(f"name: function_of({addr:#x})", e)
             fn = None
         is_func_start = fn is not None and fn.addr == addr
         lm = app.program.listing(addr)
@@ -403,7 +412,10 @@ class EditController:
         if kind is None and app._looks_like_symbol(word):
             try:
                 tgt = app.program.resolve(word)
-            except Exception:  # noqa: BLE001
+            except Exception as e:  # noqa: BLE001
+                # Falls through to case (3), which retypes the enclosing
+                # function -- a different edit from the one asked for.
+                diag.note(f"retype: resolve({word!r})", e)
                 tgt = None
             if tgt is not None:
                 tft = app.program.func_types(tgt)
@@ -495,6 +507,7 @@ class EditController:
         try:
             app.program.make_data(ea, type_decl)
         except Exception as e:  # noqa: BLE001
+            diag.note(f"make_data({ea:#x}, {type_decl!r})", e)
             app.call_from_thread(app._status, f"make data: {e}")
             return
         app.program.bump_items()
@@ -555,6 +568,7 @@ class EditController:
             app.call_from_thread(app._status, f"format: {e.message}", True)
             return
         except Exception as e:  # noqa: BLE001 -- surface transport failures too
+            diag.note(f"op_format({where}, {ea:#x})", e)
             app.call_from_thread(app._status, f"format: {e}", True)
             return
         text = " ".join((r.get("text") or "").split())
@@ -690,6 +704,7 @@ class EditController:
                 anchor.refresh_functions = True
                 app.program.undefine(ea)
         except Exception as e:  # noqa: BLE001 -- surface soft/hard tool errors
+            diag.note(f"edit_item({kind}, {ea:#x})", e)
             app.call_from_thread(app._status, f"{kind}: {e}")
             return
         # Structure changed everywhere: drop all item/function/decomp caches.
