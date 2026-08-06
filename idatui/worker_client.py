@@ -83,11 +83,19 @@ class WorkerClient:
         self._sid = uuid.uuid4().hex[:8]
         self._lock = threading.Lock()       # serialize socket use
         self._spawn_lock = threading.Lock()
+        #: Set by close(). A dropped socket is respawned on the next call (the
+        #: worker segfaulted and we want it back); a CLOSED one must not be.
+        #: Teardown and binary-switch both close while @work threads are still
+        #: in flight, so without this, quitting during a decompile spawned a
+        #: fresh idalib worker that re-opened the database nobody was looking
+        #: at any more -- a stray process holding the .i64 we just released.
+        self._closed = False
 
     # -- lifecycle --------------------------------------------------------- #
     def connect(self, timeout: float = 1800.0, progress=None) -> "WorkerClient":
         """Spawn the worker (opens + analyzes the DB) and connect once ready."""
         with self._spawn_lock:
+            self._closed = False    # an explicit reconnect revives this client
             if self._sock is not None:
                 return self
             if self._proc is None or self._proc.poll() is not None:
@@ -104,6 +112,11 @@ class WorkerClient:
                 )
             deadline = time.time() + timeout
             t0 = time.time()
+            # Poll fast at first, then back off. A flat 0.2s cost every caller a
+            # fifth of a second even when the worker was ready in milliseconds
+            # (a small binary, or a seeded .i64), which is most of the time in
+            # the tests and noticeable on a re-open.
+            delay = 0.005
             while time.time() < deadline:
                 try:
                     s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -118,7 +131,8 @@ class WorkerClient:
                     if progress:
                         progress(f"auto-analyzing {os.path.basename(self._bin)}… "
                                  f"({int(time.time() - t0)}s)")
-                    time.sleep(0.2)
+                    time.sleep(delay)
+                    delay = min(delay * 1.6, 0.2)
             raise IDAConnectionError("worker did not become ready in time")
 
     @property
@@ -137,6 +151,7 @@ class WorkerClient:
         with self._lock:
             s = self._sock
             self._sock = None
+            self._closed = True
             if s is not None:
                 try:
                     _send(s, ("__shutdown__", {}))
@@ -161,6 +176,9 @@ class WorkerClient:
 
     # -- the call surface -------------------------------------------------- #
     def call(self, tool: str, *, timeout: float | None = None, **args) -> Any:
+        if self._closed:
+            raise IDAConnectionError(
+                f"{tool}: this worker was closed (call connect() to revive it)")
         if self._sock is None:
             self.connect()
         with self._lock:
