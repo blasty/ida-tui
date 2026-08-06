@@ -26,7 +26,67 @@ import pickle
 import socket
 import struct
 import sys
+import threading
+import time
 import uuid
+
+#: Seconds a single tool call may run before it is cancelled. 0 disables the
+#: deadline entirely.
+TOOL_TIMEOUT_SEC = float(os.environ.get("IDATUI_TOOL_TIMEOUT_SEC") or 60)
+
+# ida-pro-mcp enforces its own tool deadline by installing a `sys.setprofile`
+# hook for the duration of every call, so that a pure-python loop inside a tool
+# body can be interrupted. That hook runs a python function on EVERY python call
+# and return -- and our tools are exactly the call-heavy kind: `heads` renders
+# hundreds of items per request and measured 92us/row with the hook against
+# 28us/row without it. A 3.3x tax on the whole backend to bound loops that are
+# already bounded by their `count` argument.
+#
+# So: turn the upstream mechanism off and re-arm the half that does the real
+# work ourselves (see _Deadline). ida_kernwin.set_cancelled() is what actually
+# frees the IDA main thread -- decompile, auto_wait, find_bytes and friends poll
+# user_cancelled() and bail within a poll cycle -- and it costs nothing until it
+# fires.
+os.environ["IDA_MCP_TOOL_TIMEOUT_SEC"] = "0"
+
+
+class _Deadline:
+    """A single watchdog thread that cancels a tool call which overruns.
+
+    Arming is two attribute writes, because it is on the path of every call the
+    TUI makes (a scroll is dozens of them). The watchdog polls instead of being
+    signalled for the same reason: waking a thread per call costs more than the
+    0.25s of granularity it buys on a 60s deadline.
+    """
+
+    TICK = 0.25
+
+    def __init__(self, seconds: float) -> None:
+        import ida_kernwin
+        self._kernwin = ida_kernwin
+        self.seconds = seconds
+        self._until: float | None = None
+        t = threading.Thread(target=self._run, name="idatui-deadline",
+                             daemon=True)
+        t.start()
+
+    def _run(self) -> None:
+        while True:
+            time.sleep(self.TICK)
+            until = self._until
+            if until is not None and time.monotonic() >= until:
+                self._until = None
+                # THREAD_SAFE in the IDA SDK; upstream fires it off a Timer too.
+                self._kernwin.set_cancelled()
+
+    def arm(self) -> None:
+        # Clear unconditionally: the flag is sticky, and one left set would make
+        # every later user_cancelled() true forever.
+        self._kernwin.clr_cancelled()
+        self._until = time.monotonic() + self.seconds
+
+    def disarm(self) -> None:
+        self._until = None
 
 
 # --------------------------------------------------------------------------- #
@@ -147,6 +207,7 @@ def _open_and_register(binpath: str, load_args: str = ""):
 def serve(sockpath: str, binpath: str, load_args: str = "") -> None:
     tools, module, save = _open_and_register(binpath, load_args)
     sid = uuid.uuid4().hex[:8]
+    deadline = _Deadline(TOOL_TIMEOUT_SEC) if TOOL_TIMEOUT_SEC > 0 else None
 
     def dispatch(name: str, args: dict):
         args = dict(args)
@@ -167,7 +228,14 @@ def serve(sockpath: str, binpath: str, load_args: str = "") -> None:
         fn = tools.get(name)
         if fn is None:
             raise KeyError(f"unknown tool: {name!r}")
-        result = fn(**args)
+        if deadline is None:
+            result = fn(**args)
+        else:
+            deadline.arm()
+            try:
+                result = fn(**args)
+            finally:
+                deadline.disarm()
         # Match the MCP server's structuredContent: a dict passes through, any
         # other return (list/scalar) is wrapped as {"result": ...}. domain.py
         # parses that exact shape (e.g. lookup_funcs -> payload["result"]).

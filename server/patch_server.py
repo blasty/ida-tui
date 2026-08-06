@@ -364,6 +364,8 @@ def _idatui_tag_map():
 
 _IDATUI_TAGS = None
 _IDATUI_OPND_TAGS = None
+_IDATUI_CTL = None   # re: the three control characters a tagged line can hold
+_IDATUI_WS = None    # re: a run of whitespace, exactly what str.isspace() calls one
 
 
 def _idatui_opnd_tag_map():
@@ -393,75 +395,84 @@ def _idatui_spans(line):
     Unknown tags become 'text' rather than being dropped: a processor module can
     emit a colour we don't classify, and losing the characters would corrupt the
     line."""
-    global _IDATUI_TAGS, _IDATUI_OPND_TAGS
+    global _IDATUI_TAGS, _IDATUI_OPND_TAGS, _IDATUI_CTL, _IDATUI_WS
     import ida_lines
     if _IDATUI_TAGS is None:
         _IDATUI_TAGS = _idatui_tag_map()
     if _IDATUI_OPND_TAGS is None:
         _IDATUI_OPND_TAGS = _idatui_opnd_tag_map()
+    if _IDATUI_CTL is None:
+        import re as _re
+        _IDATUI_CTL = _re.compile("[\\x01\\x02\\x03]")
+        # str.isspace() is true for \\x1c-\\x1f and \\x85 as well as the \\s
+        # class, so spell those out: this substitution has to agree with the
+        # plain-text collapse character for character (checked over every
+        # codepoint) or the row silently loses its highlighting.
+        _IDATUI_WS = _re.compile("[\\\\s\\x1c\\x1d\\x1e\\x1f\\x85]+")
+    tags, opnds, ctl = _IDATUI_TAGS, _IDATUI_OPND_TAGS, _IDATUI_CTL
     on, off, esc = "\x01", "\x02", "\x03"
     addr_tag = chr(getattr(ida_lines, "COLOR_ADDR", 0x28))
     addr_len = int(getattr(ida_lines, "COLOR_ADDR_SIZE", 16))
+    # Jump between control characters and take the text in between as one slice.
+    # A per-character loop here was 68% of the whole `heads` tool: a disasm line
+    # is ~50 characters but only ~15 tags, and everything between two tags is
+    # already exactly one span's worth of text.
     spans, stack, buf = [], [], []   # stack entries: (kind, operand index|None)
+    kind, opnd = "text", None        # state the current run of text belongs to
     i, n = 0, len(line)
-
-    def _opnd():
-        for _k, o in reversed(stack):
+    for m in ctl.finditer(line):
+        j = m.start()
+        if j < i:                    # inside an address payload / after an esc
+            continue
+        if j + 1 >= n:               # a trailing control char is literal text
+            break
+        ch = line[j]
+        if ch == esc:                # escaped literal: keep the char it guards
+            buf.append(line[i:j])
+            buf.append(line[j + 1])
+            i = j + 2
+            continue
+        tag = line[j + 1]
+        if ch == on and tag == addr_tag:
+            # An embedded target address, not display text: 16 hex digits that
+            # must not reach the screen. Deliberately NOT a span boundary.
+            buf.append(line[i:j])
+            i = j + 2 + addr_len
+            continue
+        buf.append(line[i:j])
+        i = j + 2
+        txt = "".join(buf)
+        if txt:
+            spans.append([kind, txt, opnd])
+        del buf[:]
+        if ch == on:
+            stack.append((kind, opnd))
+            kind = tags.get(tag, "text")
+            o = opnds.get(tag)
             if o is not None:
-                return o
-        return None
-
-    def flush():
-        if buf:
-            spans.append([stack[-1][0] if stack else "text", "".join(buf),
-                          _opnd()])
-            del buf[:]
-
-    while i < n:
-        ch = line[i]
-        if ch == on and i + 1 < n:
-            tag = line[i + 1]
-            if tag == addr_tag:
-                # An embedded target address, not display text: 16 hex digits
-                # that must not reach the screen.
-                i += 2 + addr_len
-                continue
-            flush()
-            stack.append((_IDATUI_TAGS.get(tag, "text"),
-                          _IDATUI_OPND_TAGS.get(tag)))
-            i += 2
-            continue
-        if ch == off and i + 1 < n:
-            flush()
-            if stack:
-                stack.pop()
-            i += 2
-            continue
-        if ch == esc and i + 1 < n:      # escaped literal
-            buf.append(line[i + 1])
-            i += 2
-            continue
-        buf.append(ch)
-        i += 1
-    flush()
+                opnd = o     # operands nest: an inner colour keeps the operand
+        elif stack:
+            kind, opnd = stack.pop()
+        else:
+            kind, opnd = "text", None
+    if i < n:
+        buf.append(line[i:])
+    txt = "".join(buf)
+    if txt:
+        spans.append([kind, txt, opnd])
     # Collapse IDA's column padding EXACTLY as the plain text does. A run of
-    # spaces can straddle two spans, so this walks characters rather than
-    # collapsing each span on its own — otherwise the spans and `text` disagree
-    # about the line and the row silently loses its highlighting.
+    # spaces can straddle two spans, so the leading space of a span is dropped
+    # when the previous one ended in space — otherwise the spans and `text`
+    # disagree about the line and the row silently loses its highlighting.
     out, prev_space = [], False
+    ws = _IDATUI_WS
     for kind, txt, opnd in spans:
-        acc = []
-        for ch in txt:
-            if ch.isspace():
-                if prev_space:
-                    continue
-                acc.append(" ")
-                prev_space = True
-            else:
-                acc.append(ch)
-                prev_space = False
+        acc = ws.sub(" ", txt)
+        if prev_space and acc[:1] == " ":
+            acc = acc[1:]
         if acc:
-            out.append([kind, "".join(acc), opnd])
+            prev_space = acc[-1] == " "
+            out.append([kind, acc, opnd])
     while out and out[0][1] == " ":
         out.pop(0)
     while out and out[-1][1] == " ":
