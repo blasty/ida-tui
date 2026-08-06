@@ -32,6 +32,15 @@ don't file expectations. **Use at your own risk.**
   undefined heads) as the default code view; `F5`/`Tab` drops into the
   **decompiler (pseudocode)** for the function under the cursor. Both are
   line-virtualized and page lazily over the worker.
+- A **control-flow graph** (`space`, IDA's own key): the current function's basic
+  blocks as boxes with routed, colour-coded edges (green taken / red fall-through
+  / blue unconditional / purple loop), laid out with a proper layered
+  (Sugiyama) algorithm. The boxes hold the *same listing rows* as the text view,
+  so highlighting, renames, xrefs and comments all work inside them. `z` cycles
+  three zoom levels, `m` toggles a minimap, `J`/`K` walk edges, and the mode is
+  sticky — following a call lands in the callee's graph. Above 400 blocks it
+  declines and says so, because nothing readable comes out at that size.
+  Details in [`docs/GRAPH_VIEW.md`](docs/GRAPH_VIEW.md).
 - A **Ghidra-style split view** (`s`): listing and pseudocode side by side, kept
   in cursor sync — the focused pane drives and the other highlights the linked
   region (every instruction a C line owns), following you across functions.
@@ -152,6 +161,7 @@ it from another pane:
 python -m idatui.drive where                 # ergonomic terse-text helper
 python -m idatui.drive pc main               # pseudocode of main
 python -m idatui.drive rename sub_5BE0 foo   # goto + rename
+python -m idatui.drive fmt dec               # show this literal in decimal
 ```
 
 Or let `idatui.pane` spawn + manage TUI panes in tmux (see the idatui-rpc skill):

@@ -1,138 +1,45 @@
-## INCOMPLETE LIST OF TODO's
-## ----------------------------------------------------------------------------
+RESTART.
 
-bugs:
+TODO:
+- [x] add support for toggling literal types, ala `o` in IDA. (decimal to hex to
+      reference etc.)
+      -> `o` / `O` on either code view cycle the literal under the cursor;
+         named formats (hex/dec/oct/bin/char/offset/stack/default) via the
+         command palette, the `opfmt` RPC verb and `drive fmt`.
+      -> listing: IDA's operand types (ida_bytes.op_hex/op_dec/... +
+         op_plain_offset). pseudocode: Hex-Rays' own per-(ea,opnum) numforms,
+         which are a SEPARATE set — the listing's format doesn't reach it.
+      -> the ring only offers stops that change what you see: no `char` unless
+         the value prints as one, no `offset` unless the target is already
+         named (making one invents a dummy name that cycling past does NOT
+         remove). Explicit requests still convert anything mapped.
+      -> `B` now cycles the opcode-bytes column (it used to be `o`).
+      -> the literal the cursor is on is MARKED, and that mark is what changes:
+         operand extents come from IDA's own COLOR_OPND markers on the line
+         (free — the line is generated anyway, and they agree with
+         print_operand exactly), pseudocode literals from one pc_nums call per
+         decompile. Cursor on a register: refused, naming the operand that has
+         a format, rather than reformatting a different one behind the mark.
+      -> the cursor follows its literal across the edit (48 <-> 0x30 reflows
+         the line; holding the column put the next press on a neighbour).
 
-current:
-[~] DITCH ida-pro-mcp -> our own idalib worker (idatui/worker.py + WorkerClient)
-    [x] worker + WorkerClient (drop-in for IDAClient, same tool shapes)
-    [x] --backend {worker,mcp}; worker is now the DEFAULT for opening a binary
-    [x] worker spawns under the IDA python; {"result":...} wrapping to match MCP
-    [ ] run the pilot suite against --backend worker (blocked: idalib reaping here)
-    [ ] progress reporting during analysis (worker streams notes to the overlay)
-    [ ] once solid: delete client.py, server/patch_server.py, spawn.sh, and
-        launch.py's whole supervisor/ensure_server/lock-sweep dance
-[x] RPC endpoint for robot-spectator-ida
-    -> progressssss
+fixed on the way (pre-existing, both made edits happen off screen):
+- `cursor_on` searched from row 0 of the whole segment and never scrolled, so a
+  driver's `word=` edit landed in an unrelated function, invisibly, while
+  reporting success. Now searches from the viewport (wrapping) and scrolls.
+- the `cursor` verb didn't scroll either; both go through rpc.place_cursor.
 
-ez:
-[x] opcodes (toggle) in disas view
-
-doable:
-[ ] stress test: big fucking binaries (canon rtos blob)
-
-hard:
-[ ] deal with PLT stubs and such (oh god here we go)
-[~] how to deal with non-function-body regions?
-    -> we want to be able to do data/type definitions in .data etc.
-    -> M0 done: navigating to a non-function EA opens a flat listing instead of
-       refusing; c/p/u edit verbs (define code/function/undefine) with
-       bump_items() cache invalidation + region->func upgrade.
-    -> M1 done: server `heads` walker (walks item-ends so undefined bytes show
-       as `db ?` and arbitrary addresses land exactly) + ListingModel.
-    -> M2 done: ListingView — virtualized flat listing (code+data+undefined,
-       kind-styled), wired into nav/follow/xrefs/hex/edit-verbs. region views
-       now use it (not the DisasmModel stopgap).
-    -> M3 done: `d` = typed make_data prompt in the listing (define data in
-       .data with any C type: int, char[16], my_struct, ...); undefined byte
-       runs coalesce into `db N dup(?)` rows so big .bss doesn't explode.
-    -> M4 (in progress):
-       [x] string auto-detect: 'a' = make_string in the listing (IDA's 'A').
-       [x] back-paging / streaming: listing primes the viewport instantly and
-           streams the rest in the background (was load_all -> blank pane for
-           seconds on a big .text). concurrency-safe page loads.
-       [x] struct-typed data expansion: a struct global expands into indented
-           member rows (+off name type) in the listing.
-       [x] unify the function disasm view as a filtered listing: DisasmModel now
-           sources its lines from the `heads` walker bounded to [func.start,
-           func.end) (total via disasm include_total to avoid response-size
-           truncation). Both code views render from the one listing mechanism;
-           the DisasmView UI (opcode bytes/Tab/rename) is preserved. Full suite
-           127/1 (1 = pre-existing flaky filter).
-    -> M4 COMPLETE.
-
-crazy:
-[ ] multi/split view ala ghidra?
-    -> would be interesting to make arbitrary compositions of disas/decomp/hex 
-        views and keep them all in sync cursor wise etc.
-
-done-ish:
-[x] if `drive pc` hits a decompilation error it somehow causes a long timeout on client side
-[x] remove stupid textual chrome/scaffolding
-[~] hex editor? (viewer at least)
-[x] make unit tests not suck (why unittest? because we're reward hackers!)
-[x] (re-)typing
-[x] struct editor
-[ ] cant rename local label
-    -> api limitations, might fix (not super important)
-[x] rename -> history stack pop -> old name
-[x] page up/down cursor x/y preserve
-[x] hlsearch should jump cursor
-[x] makes names pane sortable (addr/name columns)
-
-
-
-## Test hygiene (fixed, worth remembering)
-
-tests/test_scenarios.py used to run against targets/echo.i64 and IDA saved every
-edit it made, so each run inherited the previous run's damage. It cost real time
-twice: decomp_follow_self "started failing" with no code change (an earlier
-scenario had undefined an instruction), and an edit-position check looked flaky
-one run in three, which nearly got written up as an async race.
-
-Now: the suite copies the binary into a temp dir and seeds it from a golden
-database (<target>.pristine.i64, built once, never written back). Every run
-starts from identical bytes and the tracked target is never touched.
-
-The general rule this came from: a suite whose result depends on its own history
-can't be trusted to accuse the code. tests/test_blob_ui.py builds a throwaway
-binary; test_project_ui.py stages copies; test_thumb_ui.py deletes the .i64
-before each phase because the T flag and segment bitness are SAVED in it.
-
-## decomp_map was NOT the problem (corrected)
-
-I recorded here that decomp_map returned four entries for cat's main and blamed
-the tool. It doesn't: called directly it returns 769 lines, 475 with addresses,
-for exactly that function. The four-line map belonged to a PLT stub the
-decompiler had momentarily switched to, sampled mid-bounce.
-
-The real fault was the resync decision in _seek_split using _split_range, which
-is maintained by a guarded async path and lags. A stale range made every step
-look like a function change, so the decompiler thrashed
-(main -> stub -> main), each bounce paying a synchronous 769-line map fetch on
-the UI thread. Fixed by deciding from the map the trail painting already holds,
-which is keyed to what the decompiler currently HAS loaded.
-
-Still true and worth knowing: the decompiler attributes only about half of a
-function's instructions to a line, so the pseudocode cursor moves on those and
-waits on the rest. The tempting fallback — nearest mapped address at or before
-the pc — is UNSOUND: C lines are not monotonic in address, and it resolved an
-instruction early in main to a line near the end of the function.
-
-FIXED: the split view and the trace path used to keep two parallel maps of the
-same thing, fetched separately and keyed differently — the split one on _cur (the
-cursor's function), the trace one on the decompiler's loaded function. That is
-how they ended up describing different functions. There is now one index, keyed
-to what the decompiler HOLDS, and both read it.
-
-## Stale navigations (fixed for seeks; general case left alone)
-
-A navigation runs in a worker and its result is applied when it lands. The trace's
-OPENING seek goes to t=0, which for a normal binary is _start, and that
-navigation is slow — so it used to arrive after later seeks and drag the cursor
-back to _start while the trace was elsewhere. It never settled (measured stable
-for 3+ seconds), and anything cursor-based done just after a seek then acted on
-the wrong address.
-
-The listing path had no staleness guard at all; the decompiler path got one in
-756589a. Fixed by giving the listing completion the same check
-(_open_at_if_current) and bumping _nav_seq on each SEEK.
-
-Deliberately NOT bumped in _goto_ea for every navigation. That is the more
-general rule — "the last thing you asked for wins" — and I tried it, but it also
-means an ordinary follow can be dropped by whatever navigates next, and a full
-suite run turned up a follow_xrefs failure with it in place (the same check has
-flaked before, so it is not proof, but the mechanism is real and the evidence I
-have is only about seeks). If rapid follows ever show the same drift, the general
-bump is the fix — with a test that a follow in flight survives an unrelated
-navigation.
+known, NOT mine, still open:
+- tests/test_scenarios.py: `split_view`'s "a multi-instruction C line bands a
+  region" fails when asm_highlight runs immediately before it (`--only
+  asm_highlight,split_view`). Reproduced on a clean tree at 5f5c2ba, so it is an
+  order-dependent leak between scenarios, not a code regression.
+- `drive go 0x24ad` can raise TimeoutError while the cursor IS on the target
+  ("did not land within 20.0s (still at main @ 0x24ad)") — the goto predicate
+  resolves to the function entry, so a jump WITHIN the current function never
+  satisfies it.
+- enums? im too lazy to use them generally but hey we have robots
+  -> the groundwork is in: op_format already READS an enum-formatted operand
+     (and refuses to clobber it silently — it warns, because the nibble doesn't
+     record WHICH enum and we can't put it back). What's missing is
+     op_enum(ea, n, id, serial) plus a picker for the enum + a way to make one.
