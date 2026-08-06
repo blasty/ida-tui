@@ -43,6 +43,7 @@ from textual.widgets import (
 )
 from textual.widgets.option_list import Option
 
+from . import graph
 from .highlight import highlight_c
 
 from .errors import IDAToolError, IDAConnectionError
@@ -1915,6 +1916,685 @@ class HexView(ScrollView, can_focus=True):
 
 
 # --------------------------------------------------------------------------- #
+# Graph view
+# --------------------------------------------------------------------------- #
+_S_GBORDER = Style(color="#4b5565")                  # box border, idle
+_S_GBORDER_CUR = Style(color="#7aa2f7", bold=True)   # box border, cursor block
+_S_GLABEL = Style(color="#7aa2f7", bold=True)        # loc_XXXX in the border
+_S_GLABEL_CUR = Style(color="#c0caf5", bold=True)
+_S_GDIM = Style(color="#5e6875")
+_S_GENTRY = Style(color="#9ece6a", bold=True)        # the entry block's label
+#: Edge colours follow IDA's convention: green = branch taken, red = falls
+#: through, blue = the block's only successor, purple = loops back.
+_S_EDGE = {
+    graph.E_TRUE: Style(color="#5fbf5f"),
+    graph.E_FALSE: Style(color="#cf5f5f"),
+    graph.E_UNCOND: Style(color="#5f87d7"),
+    graph.E_SWITCH: Style(color="#c9a227"),
+    graph.E_BACK: Style(color="#a06fd0"),
+}
+#: Same hues, brightened: the edges touching the block you're on.
+_S_EDGE_HOT = {
+    graph.E_TRUE: Style(color="#8ff08f", bold=True),
+    graph.E_FALSE: Style(color="#ff8f8f", bold=True),
+    graph.E_UNCOND: Style(color="#9fc4ff", bold=True),
+    graph.E_SWITCH: Style(color="#ffd75f", bold=True),
+    graph.E_BACK: Style(color="#d0a0ff", bold=True),
+}
+_S_MINI_BG = Style(bgcolor="#161b22", color="#3b4453")
+_S_MINI_NODE = Style(bgcolor="#161b22", color="#5f7799")
+_S_MINI_CUR = Style(bgcolor="#161b22", color="#9ece6a", bold=True)
+_S_MINI_VIEW = Style(bgcolor="#233044", color="#c0caf5")
+_S_MINI_EDGE = Style(bgcolor="#161b22", color="#2f3945")
+
+_GPAD = 1          # columns of padding inside a box
+_MINI_W, _MINI_H = 30, 14
+
+
+class _CellRow:
+    """A row of (char, style) cells that coalesces into a Strip.
+
+    The graph is drawn per screen row from three independent sources -- edge
+    cells, boxes, then the minimap -- which overwrite each other. Composing into
+    a flat cell array and coalescing once at the end is both simpler and cheaper
+    than splicing Strips three times.
+    """
+
+    __slots__ = ("ch", "st", "width")
+
+    def __init__(self, width: int, base: Style) -> None:
+        self.width = max(width, 0)
+        self.ch = [" "] * self.width
+        self.st = [base] * self.width
+
+    def put(self, i: int, ch: str, style: Style) -> None:
+        if 0 <= i < self.width:
+            self.ch[i] = ch
+            self.st[i] = style
+
+    def text(self, i: int, s: str, style: Style) -> None:
+        for k, c in enumerate(s):
+            self.put(i + k, c, style)
+
+    def restyle(self, a: int, b: int, style: Style) -> None:
+        """Merge ``style`` over the cells in [a, b) (keeps the characters)."""
+        for i in range(max(a, 0), min(b, self.width)):
+            self.st[i] = self.st[i] + style
+
+    def strip(self) -> Strip:
+        segs: list[Segment] = []
+        if not self.width:
+            return Strip([])
+        run_start = 0
+        cur = self.st[0]
+        for i in range(1, self.width):
+            if self.st[i] is not cur and self.st[i] != cur:
+                segs.append(Segment("".join(self.ch[run_start:i]), cur))
+                run_start, cur = i, self.st[i]
+        segs.append(Segment("".join(self.ch[run_start:]), cur))
+        return Strip(segs)
+
+
+class GraphView(NavMixin, ScrollView, can_focus=True):
+    """IDA-style control-flow graph of one function, in character cells.
+
+    The layout comes from ``idatui.graph`` (pure, offline-testable); this class
+    is only presentation, navigation and hit-testing. Nothing is pre-painted: a
+    big function is millions of cells, so each screen row is composed on demand
+    from the edge index plus whichever boxes cover that row -- the same
+    discipline as ``ListingView.render_line``.
+
+    Box contents are the SAME ``Head`` rows the listing renders, so IDA's own
+    colour tags, names and operand text come along for free instead of this
+    growing a second disassembler renderer.
+    """
+
+    BINDINGS = [
+        Binding("j,down", "cursor_down", "Down", show=False),
+        Binding("k,up", "cursor_up", "Up", show=False),
+        Binding("h,left", "cursor_left", "Left", show=False),
+        Binding("l,right", "cursor_right", "Right", show=False),
+        Binding("J", "succ_block", "Next block", show=False),
+        Binding("K", "pred_block", "Prev block", show=False),
+        Binding("w", "next_block", "Block →", show=False),
+        Binding("b", "prev_block", "Block ←", show=False),
+        Binding("0", "goto_entry", "Entry", show=False),
+        Binding("z", "zoom", "Zoom"),
+        Binding("m", "minimap", "Minimap", show=False),
+        Binding("f", "center", "Centre", show=False),
+        Binding("ctrl+d", "pan(12)", "½↓", show=False),
+        Binding("ctrl+u", "pan(-12)", "½↑", show=False),
+        Binding("pagedown", "pan(24)", "PgDn", show=False),
+        Binding("pageup", "pan(-24)", "PgUp", show=False),
+        Binding("home", "col_home", "bol", show=False),
+        Binding("end", "col_end", "eol", show=False),
+        *NavMixin.NAV_BINDINGS,
+    ]
+
+    cursor_node = reactive(-1, repaint=False)
+    cursor_row = reactive(0, repaint=False)
+    cursor_x = reactive(0, repaint=False)
+
+    ZOOMS = ("full", "compact", "collapsed")
+
+    class CursorMoved(Message):
+        """Posted when the graph cursor lands on a new address."""
+
+        def __init__(self, ea: int | None, block: int) -> None:
+            super().__init__()
+            self.ea = ea
+            self.block = block
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.fc = None                  # domain.Flowchart
+        self.lay: graph.Layout | None = None
+        self.loaded_ea: int | None = None
+        self._blocks: dict[int, object] = {}
+        self._zoom = 0
+        self._show_minimap = True
+        self._mini_cache: tuple | None = None
+        self._drag: tuple[int, int, float, float] | None = None
+        self._hl_word = ""
+        self.trail: dict[int, str] | None = None
+
+    # -- content ---------------------------------------------------------- #
+    def set_graph(self, fc, ea: int | None = None) -> None:
+        """Install a flowchart and lay it out at the current zoom."""
+        self.fc = fc
+        self._blocks = {b.id: b for b in fc.blocks} if fc else {}
+        self.loaded_ea = fc.func_ea if fc else None
+        self._relayout()
+        if fc:
+            blk = fc.block_at(ea) if ea is not None else None
+            self.cursor_node = blk.id if blk else fc.entry
+            self.cursor_row = 0
+            if blk is not None and ea is not None:
+                rows = self._rows(blk.id)
+                for i, h in enumerate(rows):
+                    if h is not None and h.ea == ea:
+                        self.cursor_row = i
+                        break
+            self.cursor_x = 0
+        self._center_cursor()
+        self.refresh(layout=True)
+
+    def _relayout(self) -> None:
+        self._mini_cache = None
+        if not self.fc or not self.fc.blocks:
+            self.lay = None
+            self.virtual_size = Size(0, 0)
+            return
+        blocks = [graph.Block(id=b.id, start=b.start, end=b.end,
+                              succs=list(b.succs)) for b in self.fc.blocks]
+        self.lay = graph.layout(blocks, self._sizer, entry=self.fc.entry)
+        self.virtual_size = Size(self.lay.width + 2, self.lay.height + 1)
+
+    def _rows(self, nid: int):
+        """The Head rows shown inside block ``nid`` at the current zoom."""
+        b = self._blocks.get(nid)
+        if b is None:
+            return []
+        if self._zoom == 2:
+            return [None]                     # one synthetic summary row
+        return b.rows
+
+    def _row_plain(self, nid: int, i: int) -> str:
+        b = self._blocks.get(nid)
+        if b is None:
+            return ""
+        if self._zoom == 2:
+            n = len(b.rows)
+            return f"{n} instruction{'s' if n != 1 else ''}"
+        rows = b.rows
+        if not (0 <= i < len(rows)):
+            return ""
+        h = rows[i]
+        if self._zoom == 0:
+            return f"{h.ea:08X}  {self._head_text(h)}"
+        return self._head_text(h)
+
+    @staticmethod
+    def _head_text(h) -> str:
+        return (f"{h.name}  {h.text}" if h.name else h.text)
+
+    def _sizer(self, b: graph.Block) -> tuple[int, int]:
+        nid = b.id
+        rows = self._rows(nid)
+        n = max(len(rows), 1)
+        label = f"loc_{b.start:X}"
+        widest = max([len(label) + 4]
+                     + [len(self._row_plain(nid, i)) for i in range(n)])
+        return (widest + 2 * _GPAD + 2, n + 2)
+
+    # -- geometry --------------------------------------------------------- #
+    def _cur_node(self) -> graph.Node | None:
+        if self.lay is None:
+            return None
+        return self.lay.by_id.get(self.cursor_node)
+
+    def cur_head(self):
+        rows = self._rows(self.cursor_node)
+        if self._zoom == 2 or not rows:
+            b = self._blocks.get(self.cursor_node)
+            return b.rows[0] if (b and b.rows) else None
+        i = max(0, min(self.cursor_row, len(rows) - 1))
+        return rows[i]
+
+    def _cursor_ea(self) -> int | None:
+        h = self.cur_head()
+        return h.ea if h is not None else None
+
+    def _next_ea(self) -> int | None:
+        """The address after the cursor's instruction -- what ``follow`` uses to
+        skip the fall-through edge and land on a real branch target."""
+        b = self._blocks.get(self.cursor_node)
+        if b is None:
+            return None
+        rows = b.rows
+        i = max(0, min(self.cursor_row, len(rows) - 1)) if rows else 0
+        if rows and i + 1 < len(rows):
+            return rows[i + 1].ea
+        return b.end
+
+    def _line_plain(self, _idx=None) -> str:
+        return self._row_plain(self.cursor_node, self.cursor_row)
+
+    def word_under_cursor(self) -> str:
+        plain = self._line_plain()
+        if not plain:
+            return ""
+        a, b = _word_bounds(plain, self.cursor_x)
+        return plain[a:b] if b > a else ""
+
+    def set_highlight(self, word: str) -> None:
+        if word != self._hl_word:
+            self._hl_word = word
+            self.refresh()
+
+    def set_trail(self, trail: dict[int, str] | None) -> None:
+        self.trail = trail
+        self.refresh()
+
+    # -- cursor motion ---------------------------------------------------- #
+    def _clamp_cursor(self) -> None:
+        if self.lay is None or not self.lay.nodes:
+            return
+        if self.cursor_node not in self.lay.by_id:
+            self.cursor_node = self.lay.nodes[0].id
+        rows = self._rows(self.cursor_node)
+        self.cursor_row = max(0, min(self.cursor_row, max(len(rows) - 1, 0)))
+        plain = self._line_plain()
+        self.cursor_x = max(0, min(self.cursor_x, max(len(plain) - 1, 0)))
+
+    def _order(self) -> list[int]:
+        return [n.id for n in self.lay.nodes] if self.lay else []
+
+    def _moved(self) -> None:
+        self._clamp_cursor()
+        self._scroll_to_cursor()
+        self.refresh()
+        self.post_message(self.CursorMoved(self._cursor_ea(), self.cursor_node))
+
+    def action_cursor_down(self) -> None:
+        rows = self._rows(self.cursor_node)
+        if self.cursor_row + 1 < len(rows):
+            self.cursor_row += 1
+        else:
+            order = self._order()
+            if self.cursor_node in order:
+                i = order.index(self.cursor_node)
+                if i + 1 < len(order):
+                    self.cursor_node = order[i + 1]
+                    self.cursor_row = 0
+        self._moved()
+
+    def action_cursor_up(self) -> None:
+        if self.cursor_row > 0:
+            self.cursor_row -= 1
+        else:
+            order = self._order()
+            if self.cursor_node in order:
+                i = order.index(self.cursor_node)
+                if i > 0:
+                    self.cursor_node = order[i - 1]
+                    self.cursor_row = max(len(self._rows(self.cursor_node)) - 1, 0)
+        self._moved()
+
+    def action_cursor_left(self) -> None:
+        self.cursor_x = max(0, self.cursor_x - 1)
+        self._moved()
+
+    def action_cursor_right(self) -> None:
+        self.cursor_x = min(len(self._line_plain()), self.cursor_x + 1)
+        self._moved()
+
+    def action_col_home(self) -> None:
+        self.cursor_x = 0
+        self._moved()
+
+    def action_col_end(self) -> None:
+        self.cursor_x = max(len(self._line_plain()) - 1, 0)
+        self._moved()
+
+    def _hop(self, table: dict) -> None:
+        tgt = table.get(self.cursor_node) or []
+        if not tgt:
+            self.app._status("no edge that way")
+            return
+        self.cursor_node = tgt[0][0]
+        self.cursor_row = 0
+        self._moved()
+
+    def action_succ_block(self) -> None:
+        if self.lay:
+            self._hop(self.lay.succ)
+
+    def action_pred_block(self) -> None:
+        if self.lay:
+            self._hop(self.lay.pred)
+
+    def _step_order(self, delta: int) -> None:
+        order = self._order()
+        if not order:
+            return
+        i = order.index(self.cursor_node) if self.cursor_node in order else 0
+        self.cursor_node = order[max(0, min(len(order) - 1, i + delta))]
+        self.cursor_row = 0
+        self._moved()
+
+    def action_next_block(self) -> None:
+        self._step_order(1)
+
+    def action_prev_block(self) -> None:
+        self._step_order(-1)
+
+    def action_goto_entry(self) -> None:
+        if self.fc:
+            self.cursor_node = self.fc.entry
+            self.cursor_row = 0
+            self._moved()
+            self._center_cursor()
+
+    def action_pan(self, rows: int) -> None:
+        self.scroll_to(y=max(0, self.scroll_offset.y + rows), animate=False)
+
+    def action_zoom(self) -> None:
+        self._zoom = (self._zoom + 1) % len(self.ZOOMS)
+        self._relayout()
+        self._clamp_cursor()
+        self._center_cursor()
+        self.refresh(layout=True)
+        self.app._graph_status()      # keeps the function name; names the zoom
+
+    def action_minimap(self) -> None:
+        self._show_minimap = not self._show_minimap
+        self.refresh()
+        self.app._status(f"graph: minimap {'on' if self._show_minimap else 'off'}")
+
+    def action_center(self) -> None:
+        self._center_cursor()
+        self.refresh()
+
+    def action_copy_line(self) -> None:
+        plain = self._line_plain()
+        if not plain:
+            return
+        n = self.app._copy(plain)
+        self.app._status(f"copied line ({n} chars) to clipboard")
+
+    def goto_ea(self, ea: int) -> bool:
+        """Put the cursor on ``ea`` if it lives in this graph."""
+        if not self.fc:
+            return False
+        b = self.fc.block_at(ea)
+        if b is None:
+            return False
+        self.cursor_node = b.id
+        self.cursor_row = 0
+        for i, h in enumerate(self._rows(b.id)):
+            if h is not None and h.ea == ea:
+                self.cursor_row = i
+                break
+        self.cursor_x = 0
+        self._clamp_cursor()
+        self._center_cursor()
+        self.refresh()
+        return True
+
+    # -- scrolling -------------------------------------------------------- #
+    def _cursor_cell(self) -> tuple[int, int] | None:
+        n = self._cur_node()
+        if n is None:
+            return None
+        row = n.y + 1 + max(0, min(self.cursor_row, n.h - 3))
+        col = n.x + 1 + _GPAD + self.cursor_x
+        return (row, col)
+
+    def _scroll_to_cursor(self) -> None:
+        cell = self._cursor_cell()
+        if cell is None:
+            return
+        row, col = cell
+        w, h = self.size.width, self.size.height
+        if w <= 0 or h <= 0:
+            return
+        y, x = self.scroll_offset.y, self.scroll_offset.x
+        if row < y:
+            y = row
+        elif row >= y + h:
+            y = row - h + 1
+        if col < x + 2:
+            x = max(0, col - 2)
+        elif col >= x + w - 2:
+            x = col - w + 3
+        if (y, x) != (self.scroll_offset.y, self.scroll_offset.x):
+            self.scroll_to(y=max(0, y), x=max(0, x), animate=False)
+
+    def _center_cursor(self) -> None:
+        n = self._cur_node()
+        if n is None or self.size.width <= 0:
+            return
+        y = max(0, n.y - max(self.size.height // 2 - n.h // 2, 0))
+        x = max(0, int(n.cx) - self.size.width // 2)
+        self.scroll_to(y=y, x=x, animate=False)
+        # Setting virtual_size then scrolling immediately clamps to 0 (max_scroll
+        # isn't recomputed until layout), so apply it again after the refresh.
+        def _again() -> None:
+            self.scroll_to(y=y, x=x, animate=False)
+        self.call_after_refresh(_again)
+
+    # -- mouse ------------------------------------------------------------ #
+    def on_mouse_down(self, event) -> None:  # type: ignore[no-untyped-def]
+        off = event.get_content_offset(self)
+        if off is None:
+            return
+        self._drag = (off.x, off.y, self.scroll_offset.x, self.scroll_offset.y)
+
+    def on_mouse_up(self, event) -> None:  # type: ignore[no-untyped-def]
+        self._drag = None
+
+    def on_mouse_move(self, event) -> None:  # type: ignore[no-untyped-def]
+        if self._drag is None or not event.button:
+            return
+        off = event.get_content_offset(self)
+        if off is None:
+            return
+        x0, y0, sx, sy = self._drag
+        self.scroll_to(x=max(0, sx + (x0 - off.x)), y=max(0, sy + (y0 - off.y)),
+                       animate=False)
+
+    def on_click(self, event) -> None:  # type: ignore[no-untyped-def]
+        if self.lay is None:
+            return
+        off = event.get_content_offset(self)
+        if off is None:
+            return
+        row = off.y + int(self.scroll_offset.y)
+        col = off.x + int(self.scroll_offset.x)
+        n = self.lay.node_at(row, col)
+        if n is None or n.block is None:
+            return
+        self.focus()
+        self.cursor_node = n.id
+        self.cursor_row = max(0, min(row - n.y - 1,
+                                     max(len(self._rows(n.id)) - 1, 0)))
+        self.cursor_x = max(0, col - n.x - 1 - _GPAD)
+        self._clamp_cursor()
+        self.refresh()
+        self.post_message(self.CursorMoved(self._cursor_ea(), self.cursor_node))
+        if getattr(event, "chain", 1) >= 2:
+            self.post_message(FollowRequested(self))
+
+    # -- rendering -------------------------------------------------------- #
+    def _edge_styles(self) -> tuple[dict, set]:
+        hot = self.lay.incident.get(self.cursor_node, set()) if self.lay else set()
+        return (_S_EDGE, hot)
+
+    def render_line(self, y: int) -> Strip:
+        width = self.size.width
+        if self.lay is None or not self.lay.nodes:
+            return Strip([Segment("".ljust(width), _S_GDIM)])
+        row = int(self.scroll_offset.y) + y
+        col0 = int(self.scroll_offset.x)
+        out = _CellRow(width, _S_INSN)
+        base, hot = self._edge_styles()
+
+        # 1. edge cells (an index query, never a painted canvas)
+        for col, (ch, kind, eid) in self.lay.painting.cells_at_row(
+                row, col0, col0 + width).items():
+            st = (_S_EDGE_HOT if eid in hot else base).get(kind, _S_GDIM)
+            out.put(col - col0, ch, st)
+
+        # 2. boxes covering this row (they win over edges: nothing routes inside)
+        for n in self.lay.nodes_at_row(row):
+            self._draw_node_row(out, n, row, col0)
+
+        # 3. minimap, last, over everything
+        if self._show_minimap:
+            self._draw_minimap_row(out, y, width)
+        return out.strip().adjust_cell_length(width, _S_INSN)
+
+    def _draw_node_row(self, out: _CellRow, n: graph.Node, row: int,
+                       col0: int) -> None:
+        cur = n.id == self.cursor_node
+        bs = _S_GBORDER_CUR if cur else _S_GBORDER
+        left = n.x - col0
+        w = n.w
+        b = self._blocks.get(n.id)
+        if row == n.y:
+            # top border carries the label: ┌─ loc_1234 ─────┐
+            label = f"loc_{n.block.start:X}" if n.block else ""
+            if b is not None and b.rows and b.rows[0].name:
+                label = b.rows[0].name
+            out.put(left, graph.BOX["tl"], bs)
+            for i in range(1, w - 1):
+                out.put(left + i, graph.BOX["h"], bs)
+            out.put(left + w - 1, graph.BOX["tr"], bs)
+            tag = f" {label} "
+            if len(tag) <= w - 4:
+                st = _S_GENTRY if (self.fc and n.id == self.fc.entry) else (
+                    _S_GLABEL_CUR if cur else _S_GLABEL)
+                out.text(left + 2, tag, st)
+            if n.block is not None and n.block.selfloop:
+                out.put(left + w - 2, "↺", _S_EDGE[graph.E_BACK])
+            return
+        if row == n.y + n.h - 1:
+            out.put(left, graph.BOX["bl"], bs)
+            for i in range(1, w - 1):
+                out.put(left + i, graph.BOX["h"], bs)
+            out.put(left + w - 1, graph.BOX["br"], bs)
+            return
+        out.put(left, graph.BOX["v"], bs)
+        out.put(left + w - 1, graph.BOX["v"], bs)
+        for i in range(1, w - 1):
+            out.put(left + i, " ", _S_INSN)
+        i = row - n.y - 1
+        rows = self._rows(n.id)
+        if not (0 <= i < len(rows)):
+            return
+        text_col = left + 1 + _GPAD
+        h = rows[i]
+        plain = self._row_plain(n.id, i)
+        if h is None:                                   # collapsed summary
+            out.text(text_col, plain, _S_GDIM)
+        else:
+            c = text_col
+            if self._zoom == 0:
+                out.text(c, f"{h.ea:08X}  ", _S_ADDR)
+                c += 10
+            if h.name:
+                out.text(c, f"{h.name}  ", _S_LABEL)
+                c += len(h.name) + 2
+            fallback = {"code": _S_INSN, "data": _S_DATA}.get(h.kind, _S_UNK)
+            if h.spans:
+                for kind, t in h.spans:
+                    out.text(c, t, _S_SPAN.get(kind, fallback))
+                    c += len(t)
+            else:
+                out.text(c, h.text, fallback)
+        inner_a, inner_b = left + 1, left + w - 1
+        # execution trail (a loaded Tenet trace), same palette as the listing
+        if self.trail is not None and h is not None:
+            k = self.trail.get(h.ea)
+            if k is not None:
+                out.restyle(inner_a, inner_b,
+                            _S_TRAIL_NOW if k == "now" else
+                            _S_TRAIL_PAST if k == "past" else _S_TRAIL_FUTURE)
+        if self._hl_word and plain:
+            for a, bb in _word_occurrences(plain, self._hl_word):
+                out.restyle(text_col + a, text_col + bb, _S_WORD)
+        if cur and i == self.cursor_row:
+            out.restyle(inner_a, inner_b, _S_CURSOR)
+            x = max(0, min(self.cursor_x, max(len(plain) - 1, 0)))
+            wa, wb = _word_bounds(plain, x)
+            if wb > wa:
+                out.restyle(text_col + wa, text_col + wb, _S_WORD)
+            if self.has_focus:
+                out.restyle(text_col + x, text_col + x + 1, _S_CELL)
+
+    # -- minimap ---------------------------------------------------------- #
+    def _minimap(self) -> list[list[int]]:
+        """A coarse occupancy grid of the whole graph: 0 empty, 1 edge, 2 block,
+        3 the cursor's block. Cached per (layout, zoom, cursor block)."""
+        key = (id(self.lay), self._zoom, self.cursor_node)
+        if self._mini_cache and self._mini_cache[0] == key:
+            return self._mini_cache[1]
+        gw, gh = _MINI_W - 2, _MINI_H - 2
+        grid = [[0] * gw for _ in range(gh)]
+        lay = self.lay
+        if lay is not None and lay.width and lay.height:
+            sx = max(lay.width / gw, 1e-9)
+            sy = max(lay.height / gh, 1e-9)
+            for lo, hi, col, _kind, _eid in lay.painting.vruns:
+                c = min(int(col / sx), gw - 1)
+                for r in range(min(int(lo / sy), gh - 1),
+                               min(int(hi / sy), gh - 1) + 1):
+                    if not grid[r][c]:
+                        grid[r][c] = 1
+            for n in lay.nodes:
+                mark = 3 if n.id == self.cursor_node else 2
+                r0, r1 = int(n.y / sy), int((n.y + n.h - 1) / sy)
+                c0, c1 = int(n.x / sx), int(n.right / sx)
+                for r in range(max(r0, 0), min(r1, gh - 1) + 1):
+                    for c in range(max(c0, 0), min(c1, gw - 1) + 1):
+                        if grid[r][c] < mark:
+                            grid[r][c] = mark
+        self._mini_cache = (key, grid)
+        return grid
+
+    def _draw_minimap_row(self, out: _CellRow, y: int, width: int) -> None:
+        if width < _MINI_W + 10 or self.size.height < _MINI_H + 2 or self.lay is None:
+            return
+        if not (0 <= y < _MINI_H):
+            return
+        # Inset by one: a ScrollView paints its vertical scrollbar over the last
+        # column, which otherwise eats the minimap's right border.
+        left = width - _MINI_W - 2
+        grid = self._minimap()
+        gw, gh = _MINI_W - 2, _MINI_H - 2
+        lay = self.lay
+        sx = max(lay.width / gw, 1e-9)
+        sy = max(lay.height / gh, 1e-9)
+        vy0 = int(self.scroll_offset.y / sy)
+        vy1 = int((self.scroll_offset.y + self.size.height) / sy)
+        vx0 = int(self.scroll_offset.x / sx)
+        vx1 = int((self.scroll_offset.x + width) / sx)
+
+        if y == 0:
+            out.put(left, graph.BOX["tl"], _S_MINI_BG)
+            for i in range(1, _MINI_W - 1):
+                out.put(left + i, graph.BOX["h"], _S_MINI_BG)
+            out.put(left + _MINI_W - 1, graph.BOX["tr"], _S_MINI_BG)
+            tag = f" {len(lay.nodes)} blocks "
+            out.text(left + 2, tag, _S_MINI_BG)
+            return
+        if y == _MINI_H - 1:
+            out.put(left, graph.BOX["bl"], _S_MINI_BG)
+            for i in range(1, _MINI_W - 1):
+                out.put(left + i, graph.BOX["h"], _S_MINI_BG)
+            out.put(left + _MINI_W - 1, graph.BOX["br"], _S_MINI_BG)
+            return
+        r = y - 1
+        out.put(left, graph.BOX["v"], _S_MINI_BG)
+        out.put(left + _MINI_W - 1, graph.BOX["v"], _S_MINI_BG)
+        for c in range(gw):
+            v = grid[r][c] if r < len(grid) else 0
+            inview = vy0 <= r <= vy1 and vx0 <= c <= vx1
+            if v == 3:
+                ch, st = "█", _S_MINI_CUR
+            elif v == 2:
+                ch, st = "█", _S_MINI_NODE
+            elif v == 1:
+                ch, st = "·", _S_MINI_EDGE
+            else:
+                ch, st = " ", _S_MINI_BG
+            if inview and v != 3:
+                st = _S_MINI_VIEW if v == 0 else st + Style(bgcolor="#233044")
+            out.put(left + 1 + c, ch, st)
+
+
+# --------------------------------------------------------------------------- #
 # Function list panel
 # --------------------------------------------------------------------------- #
 class FunctionsPanel(Vertical):
@@ -2292,6 +2972,7 @@ _HELP = (
     )),
     ("Views", (
         ("Tab / F5", "disassembly \u21c4 pseudocode"),
+        ("Space", "control-flow graph \u21c4 text"),
         ("s", "split view: listing + pseudocode"),
         ("Tab", "in split: switch the driving pane"),
         ("\\", "hex view"),
@@ -2329,6 +3010,18 @@ _HELP = (
         ("Ctrl+Y", "copy the current line"),
         ("F1", "this cheatsheet"),
         ("q", "quit"),
+    )),
+    ("Graph (Space)", (
+        ("j / k", "line up/down, crossing blocks"),
+        ("h / l", "column left / right"),
+        ("J / K", "follow an edge to a successor / predecessor"),
+        ("w / b", "next / previous block in layout order"),
+        ("0", "jump to the entry block"),
+        ("z", "zoom: full \u2192 compact \u2192 collapsed"),
+        ("m", "show/hide the minimap"),
+        ("f", "centre on the current block"),
+        ("Enter", "follow (stays in the graph if it lands here)"),
+        ("drag / click", "pan / put the cursor in a block"),
     )),
 )
 
@@ -3291,6 +3984,14 @@ class IdaCommands(Provider):
             ("Hex view", "raw bytes at the cursor (\\)", app.action_hex),
             ("Split view (listing ⇄ pseudocode)",
              "side-by-side synced views (s)", app.action_toggle_split),
+            ("Graph view (control flow)",
+             "the function's basic blocks as a graph (Space)",
+             app.action_toggle_graph),
+            ("Graph: cycle zoom",
+             "full → compact → collapsed (z, in the graph)",
+             lambda: va("zoom")),
+            ("Graph: toggle minimap",
+             "the overview box (m, in the graph)", lambda: va("minimap")),
             ("Rename symbol…", "rename the symbol under the cursor (n)",
              lambda: va("rename")),
             ("Set type / prototype…", "retype the symbol under the cursor (y)",
@@ -3354,6 +4055,7 @@ class IdaTui(App):
     ListingView { width: 1fr; padding: 0 1; }
     #panes.split ListingView { border-right: tall $panel-lighten-2; }
     HexView { width: 1fr; padding: 0 1; }
+    GraphView { width: 1fr; padding: 0 1; }
     #search {
         height: 1; border: none; padding: 0 1;
         background: $primary-darken-2; color: $text;
@@ -3461,6 +4163,9 @@ class IdaTui(App):
         Binding("ctrl+t", "structs", "Structs"),
         Binding("backslash", "hex", "Hex"),
         Binding("s", "toggle_split", "Split", show=False),
+        # IDA's own key for text/graph. Graph mode is opt-in and self-contained:
+        # with it off nothing else in the app does any extra work.
+        Binding("space", "toggle_graph", "Graph", show=False),
         Binding("quotation_mark,shift+f12", "strings", "Strings", show=False),
         Binding("ctrl+o", "switch_binary", "Binaries", show=False),
         Binding("ctrl+l", "load_options", "Reload as…", show=False),
@@ -3552,6 +4257,7 @@ class IdaTui(App):
         # _pref, but it was only ever assigned "listing" — see _code_mode().
         self._active = "listing"  # currently shown view (in split: the focused pane)
         self._split = False       # side-by-side listing + pseudocode
+        self._graph_sticky = False  # stay in graph mode across navigations
         self._split_eamap: list[list[int]] = []  # split: decomp line -> instr EAs
         self._split_ea2line: dict[int, int] = {}  # split: instr EA -> decomp line
         self._split_range: tuple[int, int] | None = None  # decomp'd fn ea span
@@ -3586,6 +4292,9 @@ class IdaTui(App):
             hx = HexView()
             hx.display = False
             yield hx
+            gv = GraphView()
+            gv.display = False
+            yield gv
             # Docked right and only shown once a trace is loaded, so a normal
             # session looks exactly as it did.
             td = TraceDock()
@@ -4313,8 +5022,7 @@ class IdaTui(App):
         left = self.query_one("#left", FunctionsPanel)
         left.display = not left.display
         if not left.display:
-            self.query_one(DecompView if self._active == "decomp"
-                           else ListingView).focus()
+            self._focus_code_view()
         else:
             self.query_one("#func-table", DataTable).focus()
 
@@ -4609,6 +5317,24 @@ class IdaTui(App):
             self._active = self._code_mode()
             self._show_active()
             return
+        if self._active == "graph":
+            # F5/Tab out of the graph lands in the pseudocode at the block the
+            # cursor was on (Space is the key that returns to the listing).
+            gv = self.query_one(GraphView)
+            ea = gv._cursor_ea()
+            self._graph_sticky = False
+            if ea is None:
+                self._active = "listing"
+                self._show_active()
+                return
+            gv.display = False
+            dec = self.query_one(DecompView)
+            dec.display = True
+            dec.loading = True
+            dec.focus()
+            self._status("decompiling…")
+            self._decomp_from_listing(ea)
+            return
         if self._active == "listing":
             # F5/Tab in the continuous listing: decompile the function under the
             # cursor (IDA-style), if the cursor is inside a defined routine.
@@ -4722,6 +5448,108 @@ class IdaTui(App):
         else:
             self._show_active()
 
+    # -- graph mode -------------------------------------------------------- #
+    #: Above this, a CFG graph stops being a picture and becomes a hairball --
+    #: IDA's own is unreadable at this size too. Refusing beats rendering soup.
+    GRAPH_MAX_BLOCKS = 400
+
+    def action_toggle_graph(self) -> None:
+        """Space: swap the code view for the function's control-flow graph."""
+        if self._prompt_active():
+            return
+        if self._active == "graph":
+            self._graph_sticky = False
+            self._active = self._code_mode()
+            self._show_active()
+            return
+        if self._cur is None or self.program is None:
+            self._status("open a function first")
+            return
+        self._graph_sticky = True
+        gv = self.query_one(GraphView)
+        ea = self._graph_target_ea()
+        if gv.loaded_ea is not None and gv.fc is not None \
+                and gv.fc.func_ea == self._cur.ea:
+            self._active = "graph"
+            self._split = False
+            self._show_active()
+            if ea is not None:
+                gv.goto_ea(ea)
+            self._graph_status()
+            return
+        self._status(f"{self._cur.name} — building graph…")
+        self._load_graph(self._cur.ea, ea)
+
+    def _graph_target_ea(self) -> int | None:
+        """The address the graph should land on: wherever the code view's cursor
+        is, so Space doesn't lose your place."""
+        try:
+            if self._active in ("listing", "disasm"):
+                return self.query_one(ListingView)._cursor_ea()
+            if self._active == "decomp":
+                dv = self.query_one(DecompView)
+                return dv._line_ea(dv.cursor)
+        except Exception:  # noqa: BLE001
+            pass
+        return self._cur.ea if self._cur else None
+
+    @work(thread=True, exclusive=True, group="graph")
+    def _load_graph(self, func_ea: int, want_ea: int | None) -> None:
+        assert self.program is not None
+        err = ""
+        fc = None
+        try:
+            fc = self.program.flowchart(func_ea)
+        except IDAConnectionError:
+            raise
+        except Exception as e:  # noqa: BLE001
+            err = f"{type(e).__name__}: {e}"
+        self.app.call_from_thread(self._apply_graph, func_ea, want_ea, fc, err)
+
+    def _apply_graph(self, func_ea: int, want_ea: int | None, fc,  # type: ignore[no-untyped-def]
+                     err: str) -> None:
+        if self._cur is None or self._cur.ea != func_ea:
+            return  # a newer navigation won
+        if not self._graph_sticky and self._active != "graph":
+            # The load lost its race: the user has since left graph mode (or a
+            # rename's reload queued one behind their back). Forcing the view
+            # here drags them back into a graph they already dismissed.
+            return
+        if fc is None:
+            self._status(err or "no control-flow graph for this function "
+                                "(is it a thunk or an import?)")
+            return
+        if len(fc.blocks) > self.GRAPH_MAX_BLOCKS:
+            self._status(
+                f"{fc.name}: {len(fc.blocks)} blocks — too many to graph "
+                f"(limit {self.GRAPH_MAX_BLOCKS}); staying in the listing")
+            return
+        gv = self.query_one(GraphView)
+        gv.set_graph(fc, want_ea)
+        self._active = "graph"
+        self._split = False
+        self._show_active()
+        self._graph_status()
+
+    def _graph_status(self) -> None:
+        gv = self.query_one(GraphView)
+        if gv.lay is None or gv.fc is None:
+            return
+        s = gv.lay.stats
+        loops = f", {s['back']} loop{'s' if s['back'] != 1 else ''}" if s["back"] else ""
+        self._status(
+            f"{gv.fc.name}  @ {gv.fc.func_ea:#x}   [graph: {s['blocks']} blocks, "
+            f"{s['edges']} edges{loops}]  "
+            f"z=zoom({gv.ZOOMS[gv._zoom]}) m=map J/K=edge space=text")
+
+    def on_graph_view_cursor_moved(self, msg: "GraphView.CursorMoved") -> None:
+        gv = self.query_one(GraphView)
+        gv.set_highlight(gv.word_under_cursor())
+        if msg.ea is not None and gv.fc is not None:
+            b = gv.fc.block_at(msg.ea)
+            extra = f"  block {b.start:#x}" if b else ""
+            self._status(f"{gv.fc.name}  @ {msg.ea:#x}{extra}   [graph]")
+
     @work(thread=True, group="split")
     def _enter_split(self, ea: int, name: str) -> None:
         # Load the listing for the current function (bg) then reveal both panes.
@@ -4751,6 +5579,8 @@ class IdaTui(App):
             return
         if self._active in ("listing", "disasm"):
             ea = self.query_one(ListingView)._cursor_ea()
+        elif self._active == "graph":
+            ea = self.query_one(GraphView)._cursor_ea()
         else:
             dec = self.query_one(DecompView)
             ea = dec._line_ea(dec.cursor)
@@ -4804,8 +5634,7 @@ class IdaTui(App):
         elif self.query_one("#left", FunctionsPanel).display:
             table.focus()
         else:
-            self.query_one(DecompView if self._active == "decomp"
-                           else ListingView).focus()
+            self._focus_code_view()
 
     # -- input submit (filter / goto) ------------------------------------- #
     def on_search_requested(self, msg: SearchRequested) -> None:
@@ -4823,6 +5652,19 @@ class IdaTui(App):
     def on_follow_requested(self, msg: FollowRequested) -> None:
         view = msg.view
         word = view.word_under_cursor()
+        if isinstance(view, GraphView):
+            ea = view._cursor_ea()
+            if ea is None:
+                return
+            # Inside the graph, a jump to a block of THIS function should move
+            # the cursor, not navigate away and rebuild the whole picture.
+            tgt = self._graph_local_target(view, ea, word)
+            if tgt is not None:
+                view.goto_ea(tgt)
+                self.post_message(GraphView.CursorMoved(tgt, view.cursor_node))
+                return
+            self._follow_disasm(ea, word, view._next_ea())
+            return
         if isinstance(view, ListingView):
             ea = view._cursor_ea()
             if ea is not None:
@@ -4834,11 +5676,39 @@ class IdaTui(App):
             self._follow_decomp(view._texts[view.cursor], word,
                                 view._line_ea(view.cursor))
 
+    def _graph_local_target(self, view: "GraphView", ea: int,
+                            word: str) -> int | None:
+        """If the cursor's instruction branches somewhere inside this same
+        graph, return that address."""
+        if view.fc is None or self.program is None:
+            return None
+        try:
+            if word and self._looks_like_symbol(word):
+                t = self.program.resolve(word)
+                if t and view.fc.block_at(t) is not None:
+                    return t
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            for xr in self.program.xrefs_from(ea):
+                t = xr.to
+                if t and t != view._next_ea() and view.fc.block_at(t) is not None:
+                    return t
+        except Exception:  # noqa: BLE001
+            pass
+        return None
+
     def on_xrefs_requested(self, msg: XrefsRequested) -> None:
         if self._xref_active:  # one gather at a time; ignore a second 'x'
             return
         view = msg.view
         word = view.word_under_cursor()
+        if isinstance(view, GraphView):
+            ea = view._cursor_ea()
+            if ea is not None:
+                self._push_busy("finding xrefs…")
+                self._xrefs_disasm(ea, word, ea, view._next_ea())
+            return
         if isinstance(view, ListingView):
             ea = view._cursor_ea()
             if ea is not None:
@@ -5173,7 +6043,7 @@ class IdaTui(App):
         # label), not a symbol-by-name. This is what lets you name a bare/
         # undefined byte — e.g. the free byte at addr+1 after shrinking a u16 to
         # a u8 — which the word-under-cursor path can't do (no symbol to rename).
-        if isinstance(msg.view, ListingView):
+        if isinstance(msg.view, (ListingView, GraphView)):
             ea = msg.view._cursor_ea()
             if ea is None:
                 self._status("no address on this line to name")
@@ -6551,7 +7421,7 @@ class IdaTui(App):
             event.prevent_default()
             self._end_goto()
             (self.query_one(HexView) if self._active == "hex"
-             else self._code_view()).focus()
+             else (self._code_view() or self.query_one(ListingView))).focus()
             return
         fi = self.query_one("#func-filter", Input)
         if fi.display:
@@ -6608,7 +7478,7 @@ class IdaTui(App):
         if inp.id == "goto":
             self._end_goto()
             (self.query_one(HexView) if self._active == "hex"
-             else self._code_view()).focus()
+             else (self._code_view() or self.query_one(ListingView))).focus()
             if value:
                 self._goto(value)
             return
@@ -6625,12 +7495,24 @@ class IdaTui(App):
         return self._active_code_view()
 
     def _active_code_view(self):  # type: ignore[no-untyped-def]
-        """The currently-shown code widget (for reading the cursor address)."""
+        """The currently-shown code widget (for reading the cursor address).
+
+        Everything downstream trusts ``_active``, so a new mode that forgets to
+        appear here doesn't degrade -- it returns None and the first caller that
+        dereferences it crashes the app (which is exactly how graph mode
+        announced itself the first time it was driven).
+        """
         if self._active in ("listing", "disasm"):
             return self.query_one(ListingView)
         if self._active == "decomp":
             return self.query_one(DecompView)
+        if self._active == "graph":
+            return self.query_one(GraphView)
         return None
+
+    def _focus_code_view(self) -> None:
+        """Put focus back on whichever code view is showing."""
+        (self._active_code_view() or self.query_one(ListingView)).focus()
 
     def _palette_action(self, name: str, *args) -> None:
         """Run a cursor-scoped code-view action (rename/xrefs/follow/…) picked from
@@ -6683,6 +7565,13 @@ class IdaTui(App):
         if self._active == "hex":
             self.app.call_from_thread(self._hex_goto, ea)
             return
+        # A goto that lands inside the graph you're already looking at should
+        # move the cursor, not tear the picture down and build the same one.
+        if self._active == "graph":
+            gv = self.query_one(GraphView)
+            if gv.fc is not None and gv.fc.block_at(ea) is not None:
+                self.app.call_from_thread(gv.goto_ea, ea)
+                return
         # Navigate to the containing function at the right line (handles both a
         # function name and a mid-function address).
         self._do_navigate(ea, push=True)
@@ -6769,6 +7658,11 @@ class IdaTui(App):
                 cursor_x=entry.cursor_x, scroll_y=sy, focus=focus)
         self._active = "listing"
         self._show_active()
+        # Graph mode is sticky: following a call from the graph should land in
+        # the callee's graph, not dump you back into the listing. The rebuild is
+        # async and re-checks _cur, so a fast second jump just drops the stale one.
+        if self._graph_sticky and entry.ea:
+            self._load_graph(entry.ea, entry.ea)
 
     # Prompt overlays that own the keyboard while visible; a background
     # navigation must not yank focus out from under them (else typed keys leak
@@ -6788,12 +7682,13 @@ class IdaTui(App):
         dec = self.query_one(DecompView)
         lst = self.query_one(ListingView)
         hx = self.query_one(HexView)
+        gv = self.query_one(GraphView)
         # Don't steal focus from an open prompt (search/rename/…) — a late async
         # navigation completing here would otherwise pull it into the code view.
         grab = not self._prompt_active()
         if self._split and self._active in ("listing", "decomp"):
             # Side-by-side: listing (left) + pseudocode (right), one focused.
-            hx.display = False
+            hx.display = gv.display = False
             lst.display = dec.display = True
             self.query_one("#panes").set_class(True, "split")
             busy = self._cur is not None and dec.loaded_ea != self._cur.ea
@@ -6819,7 +7714,13 @@ class IdaTui(App):
         self._split_eamap = []
         self._split_ea2line = {}
         self._split_range = None
-        dec.display = lst.display = hx.display = False
+        dec.display = lst.display = hx.display = gv.display = False
+        if self._active == "graph":
+            gv.display = True
+            if grab:
+                gv.focus()
+            self._graph_status()
+            return
         if self._active in ("listing", "disasm"):
             lst.display = True
             if grab:
