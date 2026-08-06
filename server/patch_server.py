@@ -364,8 +364,7 @@ def _idatui_tag_map():
 
 _IDATUI_TAGS = None
 _IDATUI_OPND_TAGS = None
-_IDATUI_CTL = None   # re: the three control characters a tagged line can hold
-_IDATUI_WS = None    # re: a run of whitespace, exactly what str.isspace() calls one
+_IDATUI_CTL = None   # re: a tag = one of three control chars plus its argument
 
 
 def _idatui_opnd_tag_map():
@@ -395,7 +394,7 @@ def _idatui_spans(line):
     Unknown tags become 'text' rather than being dropped: a processor module can
     emit a colour we don't classify, and losing the characters would corrupt the
     line."""
-    global _IDATUI_TAGS, _IDATUI_OPND_TAGS, _IDATUI_CTL, _IDATUI_WS
+    global _IDATUI_TAGS, _IDATUI_OPND_TAGS, _IDATUI_CTL
     import ida_lines
     if _IDATUI_TAGS is None:
         _IDATUI_TAGS = _idatui_tag_map()
@@ -403,48 +402,54 @@ def _idatui_spans(line):
         _IDATUI_OPND_TAGS = _idatui_opnd_tag_map()
     if _IDATUI_CTL is None:
         import re as _re
-        _IDATUI_CTL = _re.compile("[\\x01\\x02\\x03]")
-        # str.isspace() is true for \\x1c-\\x1f and \\x85 as well as the \\s
-        # class, so spell those out: this substitution has to agree with the
-        # plain-text collapse character for character (checked over every
-        # codepoint) or the row silently loses its highlighting.
-        _IDATUI_WS = _re.compile("[\\\\s\\x1c\\x1d\\x1e\\x1f\\x85]+")
-    tags, opnds, ctl = _IDATUI_TAGS, _IDATUI_OPND_TAGS, _IDATUI_CTL
+        # One capturing split gives [text, tag, text, tag, ..., text] in a
+        # single C pass. A per-character python loop over the line used to be
+        # the most expensive thing the `heads` tool did, and a line is ~54
+        # characters but only ~13 tags -- everything between two tags is already
+        # exactly one span's worth of text.
+        _IDATUI_CTL = _re.compile("([\\x01\\x02\\x03][\\s\\S])")
+    tags, opnds = _IDATUI_TAGS, _IDATUI_OPND_TAGS
     on, off, esc = "\x01", "\x02", "\x03"
     addr_tag = chr(getattr(ida_lines, "COLOR_ADDR", 0x28))
     addr_len = int(getattr(ida_lines, "COLOR_ADDR_SIZE", 16))
-    # Jump between control characters and take the text in between as one slice.
-    # A per-character loop here was 68% of the whole `heads` tool: a disasm line
-    # is ~50 characters but only ~15 tags, and everything between two tags is
-    # already exactly one span's worth of text.
-    spans, stack, buf = [], [], []   # stack entries: (kind, operand index|None)
+    parts = _IDATUI_CTL.split(line)
+    spans, stack = [], []            # stack entries: (kind, operand index|None)
     kind, opnd = "text", None        # state the current run of text belongs to
-    i, n = 0, len(line)
-    for m in ctl.finditer(line):
-        j = m.start()
-        if j < i:                    # inside an address payload / after an esc
-            continue
-        if j + 1 >= n:               # a trailing control char is literal text
+    pend = ""
+    skip = 0                         # characters of an address payload still due
+    i, n = 0, len(parts)
+    while i < n:
+        txt = parts[i]
+        i += 1
+        if skip:
+            if len(txt) <= skip:
+                skip -= len(txt)
+                txt = ""
+            else:
+                txt = txt[skip:]
+                skip = 0
+        if txt:
+            pend += txt
+        if i >= n:
             break
-        ch = line[j]
-        if ch == esc:                # escaped literal: keep the char it guards
-            buf.append(line[i:j])
-            buf.append(line[j + 1])
-            i = j + 2
+        pair = parts[i]
+        i += 1
+        if skip:                     # a tag INSIDE an address payload: 2 chars
+            skip = skip - 2 if skip > 2 else 0
             continue
-        tag = line[j + 1]
+        ch = pair[0]
+        if ch == esc:                # escaped literal: keep the char it guards
+            pend += pair[1]
+            continue
+        tag = pair[1]
         if ch == on and tag == addr_tag:
             # An embedded target address, not display text: 16 hex digits that
             # must not reach the screen. Deliberately NOT a span boundary.
-            buf.append(line[i:j])
-            i = j + 2 + addr_len
+            skip = addr_len
             continue
-        buf.append(line[i:j])
-        i = j + 2
-        txt = "".join(buf)
-        if txt:
-            spans.append([kind, txt, opnd])
-        del buf[:]
+        if pend:
+            spans.append([kind, pend, opnd])
+            pend = ""
         if ch == on:
             stack.append((kind, opnd))
             kind = tags.get(tag, "text")
@@ -455,24 +460,29 @@ def _idatui_spans(line):
             kind, opnd = stack.pop()
         else:
             kind, opnd = "text", None
-    if i < n:
-        buf.append(line[i:])
-    txt = "".join(buf)
-    if txt:
-        spans.append([kind, txt, opnd])
+    if pend:
+        spans.append([kind, pend, opnd])
     # Collapse IDA's column padding EXACTLY as the plain text does. A run of
     # spaces can straddle two spans, so the leading space of a span is dropped
     # when the previous one ended in space — otherwise the spans and `text`
     # disagree about the line and the row silently loses its highlighting.
+    # ``" ".join(txt.split())`` splits on exactly what str.isspace() calls
+    # whitespace, which is what the character walk this replaces tested.
     out, prev_space = [], False
-    ws = _IDATUI_WS
     for kind, txt, opnd in spans:
-        acc = ws.sub(" ", txt)
-        if prev_space and acc[:1] == " ":
-            acc = acc[1:]
-        if acc:
-            prev_space = acc[-1] == " "
-            out.append([kind, acc, opnd])
+        core = " ".join(txt.split())
+        if not core:                 # the span is nothing but padding
+            if not prev_space:
+                prev_space = True
+                out.append([kind, " ", opnd])
+            continue
+        acc = core
+        if txt[0].isspace() and not prev_space:
+            acc = " " + acc
+        if txt[-1].isspace():
+            acc += " "
+        prev_space = acc[-1] == " "
+        out.append([kind, acc, opnd])
     while out and out[0][1] == " ":
         out.pop(0)
     while out and out[-1][1] == " ":
