@@ -49,6 +49,20 @@ don't file expectations. **Use at your own risk.**
   offset), rename (`n`), retype (`y`), comment (`;`), incremental search (`/`
   `?`), history (`back`), hex view (`\`), and `home`/`end`/`shift+home` line
   motions.
+- **Literal formats** (`o`, IDA's own key): cycle how the number under the
+  cursor is displayed — hex → decimal → binary → character → offset → IDA's
+  own choice, `O` to go the other way. Only the stops that make sense for that
+  value are visited (no `char` unless it prints as one, no `offset` unless the
+  target is something you could name), so no press is a silent no-op. It works
+  in the pseudocode too, on Hex-Rays' separate number formats. The opcode-bytes
+  column, which used to own `o`, moved to `B`.
+
+  A line usually holds more than one literal (`test byte ptr [rsi+rax*2+1], 20h`
+  has two), so **the one the cursor is on is marked** — that mark is what `o`
+  changes, and it keeps up as the text reflows (`0x30` ↔ `48` move everything
+  after them). Land on something with no format of its own — a register — and it
+  says so and names the operand that does, rather than quietly reformatting a
+  different one.
 - A **functions panel** (fuzzy symbol palette on `Ctrl+N`), a **strings browser**
   (`"`, filterable, Enter jumps to the literal), **hex viewer**, **struct
   editor**, and inline **make code/data/function/string** edits.
