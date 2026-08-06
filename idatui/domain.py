@@ -123,19 +123,22 @@ class Head:
         return None
 
     @classmethod
-    def from_raw(cls, d: dict) -> "Head":
+    def from_raw(cls, d: dict, raw: bytes | None = None) -> "Head":
         sp = d.get("spans")
         ops = d.get("ops")
+        # ``tuple(map(tuple, ...))`` rather than a per-item genexpr with str()/
+        # int() coercion: this runs once per listing row (hundreds of thousands
+        # on a real binary) and the worker's own tool already emits [str, str]
+        # and [int, int, int]. The coercion was re-proving that on every row.
         return cls(
             ea=_as_int(d["ea"]),
             kind=d.get("kind", "unknown"),
             size=int(d.get("size", 0) or 0),
             text=d.get("text", ""),
             name=d.get("name"),
-            spans=(tuple((str(k), str(t)) for k, t in sp)
-                   if isinstance(sp, list) and sp else None),
-            ops=(tuple((int(a), int(b), int(n)) for a, b, n in ops)
-                 if isinstance(ops, list) and ops else None),
+            raw=raw,
+            spans=tuple(map(tuple, sp)) if sp else None,
+            ops=tuple(map(tuple, ops)) if ops else None,
         )
 
 
@@ -654,30 +657,48 @@ class ListingModel:
     # containing a huge coalesced undefined run doesn't pull megabytes.
     _OP_SPAN_CAP = 1 << 16
 
-    def _attach_opcode_bytes(self, page: list[Head]) -> list[Head]:
-        """Fill ``raw`` (opcode bytes) for the code heads in ``page`` via one
-        bulk read over their extent (variable-length safe)."""
-        code = [h for h in page if h.kind == "code" and h.size > 0]
-        if not code:
-            return page
-        lo = code[0].ea
-        hi = code[-1].ea + code[-1].size
-        if hi - lo <= 0 or hi - lo > self._OP_SPAN_CAP:
-            return page
-        data = self._prog.read_bytes(lo, hi - lo)
+    def _build_page(self, rows: list) -> list[Head]:
+        """Turn the tool's raw rows into ``Head``s with their opcode bytes
+        already attached, via one bulk read over the code extent.
+
+        The bytes are read BEFORE the Heads are built rather than patched in
+        afterwards: ``dataclasses.replace`` re-runs ``__init__`` with every
+        field, so filling ``raw`` after the fact meant constructing each code
+        head twice -- once per listing row, on the path a jump-to-address walks
+        hundreds of thousands of times.
+        """
+        lo = hi = -1
+        for r in rows:
+            if r.get("kind") == "code" and r.get("size"):
+                ea = _as_int(r["ea"])
+                if lo < 0:
+                    lo = ea
+                hi = ea + int(r["size"])
+        data = None
+        if 0 <= lo < hi and hi - lo <= self._OP_SPAN_CAP:
+            try:
+                data = self._prog.read_bytes(lo, hi - lo)
+            except Exception:  # noqa: BLE001 -- opcode bytes are decoration
+                data = None
+        page: list[Head] = []
         biggest = self._max_raw
-        out = []
-        for h in page:
-            if h.kind == "code" and h.size > 0:
-                off = h.ea - lo
-                b = bytes(data[off:off + h.size])
-                biggest = max(biggest, len(b))
-                out.append(replace(h, raw=b))
-            else:
-                out.append(h)
-        with self._lock:
-            self._max_raw = biggest
-        return out
+        for r in rows:
+            raw = None
+            if data is not None and r.get("kind") == "code":
+                size = int(r.get("size") or 0)
+                if size > 0:
+                    off = _as_int(r["ea"]) - lo
+                    raw = bytes(data[off:off + size])
+                    if len(raw) > biggest:
+                        biggest = len(raw)
+            try:
+                page.append(Head.from_raw(r, raw))
+            except (KeyError, ValueError, TypeError):
+                continue
+        if biggest != self._max_raw:
+            with self._lock:
+                self._max_raw = biggest
+        return page
 
     def max_raw_len(self) -> int:
         with self._lock:
@@ -700,13 +721,7 @@ class ListingModel:
             "heads", addr=hex(frm), count=self.PAGE, annotate=True)
         rows = payload.get("heads", []) if isinstance(payload, dict) else []
         cur = payload.get("cursor", {}) if isinstance(payload, dict) else {}
-        page = []
-        for r in rows:
-            try:
-                page.append(Head.from_raw(r))
-            except (KeyError, ValueError, TypeError):
-                continue
-        page = self._attach_opcode_bytes(page)
+        page = self._build_page(rows)
         with self._lock:
             for h in page:
                 # Banner/label rows (function headers, separators, code labels)

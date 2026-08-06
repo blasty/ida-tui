@@ -3101,7 +3101,17 @@ async def s_graph_minimap(c: Ctx):
 
     # a big graph, so the overview actually maps to somewhere far away
     big = c.find_func(lambda f: f.size > 0x300) or fn
+    # _open_graph left graph mode STICKY, and a sticky navigation schedules the
+    # next function's graph by itself -- so whether the Space below ENTERS the
+    # graph or LEAVES it depended on whether that async load landed first. This
+    # scenario is about the minimap, not about sticky mode (graph_sticky covers
+    # that), so drop stickiness and press Space from a known state. Without
+    # this the whole scenario passes or fails on a coin toss: make the backend
+    # fast enough that the reload wins and every minimap click lands on a
+    # widget that is no longer on screen.
+    app._graph_sticky = False
     await c.open(big.addr, "listing")
+    await c.wait(lambda: app._active == "listing", 10)
     c.lst.focus()
     await c.press("space")
     await c.wait(lambda: app._active == "graph" and gv.lay is not None, 60)
