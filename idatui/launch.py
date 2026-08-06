@@ -24,9 +24,16 @@ _LOCK_SUFFIXES = (".id0", ".id1", ".id2", ".nam", ".til")
 
 
 def _load_args(load: dict) -> str:
-    """``load`` as IDA switches, for the single-binary path (no project ref)."""
+    """``load`` as IDA switches, for the single-binary path (no project ref).
+
+    The base goes through project._as_addr rather than bare int(): our own CLI
+    hands over an int, but a project file writes "0x8000000" as a string and
+    int() raises on that. One parser, so the two paths can't disagree about what
+    an address looks like.
+    """
     from .formats import load_args
-    return load_args(load.get("processor", ""), int(load.get("base", 0) or 0),
+    from .project import _as_addr
+    return load_args(load.get("processor", ""), _as_addr(load.get("base", 0)),
                      str(load.get("ida_args", "") or ""))
 
 
@@ -35,13 +42,24 @@ def _log(msg: str) -> None:
 
 
 def _sweep_locks(binary: str) -> int:
-    """Remove stale unpacked DB files next to ``binary``. Returns how many."""
+    """Remove stale unpacked DB files next to ``binary``. Returns how many.
+
+    Never touches the ``.i64`` -- that is the real database, and nothing is
+    saved unless ``idb_save`` was called -- and never the input file itself.
+    The second guard is not theoretical: ``.til`` is both an unpacked-DB suffix
+    and the extension of an IDA type library, so ``ida-tui mylib.til`` swept its
+    own argument out of existence. Same for anything named ``*.id0``/``*.nam``.
+    """
+    keep = os.path.abspath(binary)
     stem = os.path.splitext(binary)[0]
     n = 0
     for base in (binary, stem):  # IDA may key on the full name or the stem
         for suf in _LOCK_SUFFIXES:
+            victim = base + suf
+            if os.path.abspath(victim) == keep:
+                continue          # that's what the user asked us to open
             try:
-                os.remove(base + suf)
+                os.remove(victim)
                 n += 1
             except OSError:
                 pass
