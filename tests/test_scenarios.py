@@ -132,9 +132,23 @@ class Ctx:
 
     # -- discovery -------------------------------------------------------- #
     def all_funcs(self):
+        """Every function, always -- never the prefix that happens to be loaded.
+
+        This used to load_all() only when the index was EMPTY, so a partially
+        streamed index (non-empty but incomplete: exactly the state during boot,
+        and after any bump_items()) came back truncated. Every fixture chosen
+        through find_func/biggest then depended on how far streaming had got,
+        which is a race.
+
+        It bit graph_minimap: on an unlucky run `find_func(size > 0x300)` picked
+        a far larger function than usual, whose graph never finished inside the
+        scenario's 60s wait -- 3 failures and 65s, one run in several, with no
+        code change to blame. Deterministic fixtures or deterministic flakes,
+        pick one.
+        """
         idx = self.prog.functions()
-        if len(idx) == 0 and not idx.complete:
-            idx.load_all()  # a prior bump_items() cleared the index cache
+        if not idx.complete:
+            idx.load_all()  # boot streaming, or a prior bump_items()
         return idx.all_loaded()
 
     def find_func(self, pred, limit=400):
