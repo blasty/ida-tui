@@ -1967,6 +1967,68 @@ def pc_num_format(
     return out
 
 
+@tool
+@idasync
+def flowchart(
+    addr: Annotated[str, "Address or name inside the function to chart"],
+) -> dict:
+    """Basic-block control-flow graph of the function containing ``addr``.
+
+    Returns the blocks and the edges between them -- NOT their text: the block
+    body is just an address range, which the client already knows how to render
+    with ``heads``. Keeping text out means the graph view reuses the exact same
+    listing rows (colours, operand marks and all) instead of growing a second
+    disassembly renderer.
+
+    Edge ``kind`` is what the graph view colours by:
+      * ``fall``   -- control falls through to the next address (IDA draws red)
+      * ``jump``   -- a taken conditional branch (green)
+      * ``uncond`` -- the block's only successor (blue)
+      * ``switch`` -- one of an n-way dispatch
+    """
+    import ida_funcs
+    import ida_gdl
+
+    try:
+        ea = parse_address(addr)
+    except Exception as e:
+        return {"addr": str(addr), "error": str(e), "blocks": []}
+    fn = ida_funcs.get_func(ea)
+    if fn is None:
+        return {"addr": str(addr), "error": "no function at that address",
+                "blocks": []}
+
+    fc = ida_gdl.FlowChart(fn, flags=ida_gdl.FC_PREDS)
+    index = {}
+    order = []
+    for bb in fc:
+        index[bb.start_ea] = len(order)
+        order.append(bb)
+    blocks = []
+    for bb in order:
+        sl = [s for s in bb.succs() if s.start_ea in index]
+        succs = []
+        for s in sl:
+            if len(sl) > 2:
+                kind = "switch"
+            elif s.start_ea == bb.end_ea:
+                kind = "fall"
+            else:
+                kind = "jump"
+            succs.append([index[s.start_ea], kind])
+        blocks.append({
+            "id": index[bb.start_ea],
+            "start": hex(bb.start_ea),
+            "end": hex(bb.end_ea),
+            "succs": succs,
+        })
+    return {
+        "addr": hex(ea),
+        "func": {"addr": hex(fn.start_ea), "end": hex(fn.end_ea),
+                 "name": ida_funcs.get_func_name(fn.start_ea)},
+        "entry": index.get(fn.start_ea, 0),
+        "blocks": blocks,
+    }
 '''
 
 SNIPPET = f"{BEGIN}\n{BODY.strip()}\n{END}\n"
