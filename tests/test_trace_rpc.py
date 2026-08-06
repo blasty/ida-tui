@@ -2,12 +2,12 @@
 """Trace integration over the RPC socket — the path an agent actually takes.
 
 The UI tests (test_trace_ui.py) drive the trace via in-process keystrokes and
-the Textual pilot. This one spawns a real tmux pane with ``--trace`` and drives
+the Textual pilot. This one spawns a real mux pane with ``--trace`` and drives
 every trace verb through the RPC socket, validating the JSON responses an agent
 would see. It exercises the serialization, the settle/timeout machinery, and
 the response shape that a driver depends on.
 
-Requires: tmux, IDA (idalib), and a trace. Records a fresh trace with the QEMU
+Requires: tmux or zellij, IDA (idalib), and a trace. Records a fresh trace with the QEMU
 tracer if built; falls back to /tmp/echotrace.0.log if present; skips with a
 message otherwise.
 
@@ -78,8 +78,8 @@ def stop_pane(sock, timeout=60):
 
 def main() -> int:
     global PASS, FAIL
-    if not os.environ.get("TMUX"):
-        print("  skip: not inside tmux (test spawns a pane)")
+    if not os.environ.get("TMUX") and not os.environ.get("ZELLIJ"):
+        print("  skip: not inside tmux or zellij (test spawns a pane)")
         return 0
 
     with tempfile.TemporaryDirectory() as tmp:
