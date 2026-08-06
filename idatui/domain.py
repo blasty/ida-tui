@@ -139,6 +139,32 @@ class Head:
 
 
 @dataclass
+class BasicBlock:
+    """One node of a function's control-flow graph, with the listing rows that
+    make up its body (filled in by ``Program.flowchart``)."""
+
+    id: int
+    start: int
+    end: int
+    succs: list[tuple[int, str]] = field(default_factory=list)
+    rows: list[Head] = field(default_factory=list)
+
+
+@dataclass
+class Flowchart:
+    func_ea: int
+    name: str
+    entry: int
+    blocks: list[BasicBlock]
+
+    def block_at(self, ea: int) -> BasicBlock | None:
+        for b in self.blocks:
+            if b.start <= ea < b.end:
+                return b
+        return None
+
+
+@dataclass
 class Ref:
     addr: int
     name: str
@@ -984,6 +1010,10 @@ class Program:
         #: positions in the pseudocode, cached alongside the decompilation.
         self._pc_nums: dict[int, tuple[dict, int]] = {}
         self._decomp_maps: dict[int, tuple[list[list[int]], int]] = {}  # line->ea sets
+        #: {func ea: (Flowchart, name generation)} — the CFG plus its block rows.
+        #: Keyed off _name_gen, which BOTH bump_names and bump_items raise: the
+        #: rows carry live symbol names, so a rename must refetch them too.
+        self._flowcharts: dict[int, tuple["Flowchart", int]] = {}
         self._strings: list["StrLit"] | None = None  # whole-binary string literals
         self._linkage: tuple[list["Linkage"], list["Linkage"]] | None = None
         self._name_gen = 0  # bumped on rename; invalidates stale name caches
@@ -1660,6 +1690,96 @@ class Program:
                for ln in lines if isinstance(ln, dict)]
         with self._lock:
             self._decomp_maps[ea] = (out, gen)
+        return out
+
+    # -- control-flow graph ------------------------------------------------ #
+    def flowchart(self, ea: int) -> "Flowchart | None":
+        """The basic-block CFG of the function containing ``ea``, with each
+        block's listing rows attached.
+
+        Two calls, not one per block: ``flowchart`` for the shape, then a single
+        ``heads`` walk over the function's extent which is sliced up by address.
+        A hundred blocks would otherwise be a hundred round trips.
+
+        Cached per function + item generation, so it survives cursor movement
+        but not an edit that changes the code.
+        """
+        fn = self.function_of(ea)
+        key = fn.addr if fn else ea
+        with self._lock:
+            hit = self._flowcharts.get(key)
+            gen = self._name_gen
+        if hit is not None and hit[1] == gen:
+            return hit[0]
+        try:
+            payload = self.client.call("flowchart", addr=hex(ea))
+        except IDAToolError:
+            return None
+        if not isinstance(payload, dict) or payload.get("error"):
+            return None
+        raw = payload.get("blocks") or []
+        if not raw:
+            return None
+        blocks = []
+        for b in raw:
+            try:
+                blocks.append(BasicBlock(
+                    id=int(b["id"]), start=_as_int(b["start"]),
+                    end=_as_int(b["end"]),
+                    succs=[(int(d), str(k)) for d, k in (b.get("succs") or [])]))
+            except (KeyError, ValueError, TypeError):
+                continue
+        if not blocks:
+            return None
+        f = payload.get("func") or {}
+        lo = min(b.start for b in blocks)
+        hi = max(b.end for b in blocks)
+        rows = self._heads_between(lo, hi)
+        for b in blocks:
+            b.rows = [h for h in rows if b.start <= h.ea < b.end]
+        fcv = Flowchart(
+            func_ea=_as_int(f.get("addr", lo)),
+            name=str(f.get("name") or f"sub_{lo:X}"),
+            entry=int(payload.get("entry", 0) or 0),
+            blocks=blocks,
+        )
+        with self._lock:
+            self._flowcharts[key] = (fcv, gen)
+        return fcv
+
+    def _heads_between(self, lo: int, hi: int) -> list[Head]:
+        """Listing rows for [lo, hi), paged. Same tool and same ``Head`` shape
+        the listing view renders, so the graph inherits IDA's colour tags and
+        operand marks for free."""
+        out: list[Head] = []
+        addr = lo
+        for _ in range(64):                      # bounded: ~128k heads
+            if addr >= hi:
+                break
+            payload = self.client.call("heads", addr=hex(addr), end=hex(hi),
+                                       count=2000)
+            rows = payload.get("heads", []) if isinstance(payload, dict) else []
+            if not rows:
+                break
+            for r in rows:
+                try:
+                    h = Head.from_raw(r)
+                except (KeyError, ValueError, TypeError):
+                    continue
+                # Banners and separators are listing furniture; a box already
+                # has a border and a label of its own.
+                if h.kind in ("sep", "funchdr"):
+                    continue
+                if lo <= h.ea < hi:
+                    out.append(h)
+            cur = payload.get("cursor", {}) if isinstance(payload, dict) else {}
+            nxt = cur.get("next")
+            if nxt is None or cur.get("done"):
+                break
+            n = _as_int(nxt)
+            if n <= addr:
+                break
+            addr = n
         return out
 
     # -- cross-references & containing function --------------------------- #
