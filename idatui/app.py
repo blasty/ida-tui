@@ -46,6 +46,7 @@ from textual.widgets.option_list import Option
 
 from . import graph
 from . import kittygfx
+from .trace_ctl import TraceController
 from .highlight import highlight_c
 
 from .errors import IDAToolError, IDAConnectionError
@@ -4464,15 +4465,10 @@ class IdaTui(App):
         self._ttl = ttl
         self._load_args = load_args or ""   # IDA switches for a headerless blob
         self._title = (os.path.basename(open_path) if open_path else "")
-        self._trace_path = trace_path or ""  # Tenet execution trace to explore
-        self._trace = None                   # the loaded Trace, once analysed
-        self._trail_map = []                 # decomp_map for _trail_map_ea
-        self._trail_map_ea = None
-        self._pending_trace_line = None      # step waiting on a re-decompile
-        self._trail_line_of: dict[int, int] = {}   # ea -> pseudocode line
-        self._trail_span = None                   # ea span of that function
-        self._trail_eas: list[int] = []            # sorted keys of _trail_line_of
-        self._t = 0                          # current timestamp in that trace
+        #: Where we are in the execution trace, and everything that moves us.
+        #: Owns the trace state; the _trace/_t/_trail_* properties below
+        #: forward to it.
+        self.trace_ctl = TraceController(self, trace_path or "")
         self._do_keepalive = keepalive
         self._rpc_path = rpc_path
         self._rpc = None
@@ -4999,7 +4995,7 @@ class IdaTui(App):
         # otherwise pop the fuzzy symbol picker.
         self.app.call_from_thread(self._auto_land)
         self._index_binary()  # project mode: keep the cross-binary index fresh
-        if self._trace_path and self._trace is None:
+        if self.trace_ctl.armed:
             self._load_trace()   # needs the index above: rebasing reads it
 
     @work(thread=True, exclusive=True, group="prewarm")
@@ -6962,354 +6958,75 @@ class IdaTui(App):
             # this, `p` gave you a function the rest of the app couldn't see.
             self._reindex_functions()
 
+    # -- trace ------------------------------------------------------------- #
+    # Everything below delegates to TraceController (idatui/trace_ctl.py). The
+    # keys stay declared here because Textual only merges BINDINGS from DOMNode
+    # subclasses, and the @work entry points stay here because Textual's worker
+    # machinery wants a DOMNode host.
+
+    # Read-only views onto the controller's state. The pilot suite and the RPC
+    # layer read the trace position by these names; they are properties rather
+    # than attributes so there is exactly one owner and no copy to drift.
+    @property
+    def _trace(self):  # type: ignore[no-untyped-def]
+        return self.trace_ctl.trace
+
+    @property
+    def _t(self) -> int:
+        return self.trace_ctl.t
+
+    @property
+    def _trail_map(self) -> list:
+        return self.trace_ctl.trail_map
+
+    @property
+    def _trail_map_ea(self):  # type: ignore[no-untyped-def]
+        return self.trace_ctl.trail_map_ea
+
+    @property
+    def _trail_line_of(self) -> dict:
+        return self.trace_ctl.trail_line_of
+
+    @work(thread=True, exclusive=True, group="load-trace")
     def _load_trace(self) -> None:
-        """Parse the trace and line it up with the database.
+        self.trace_ctl.load()
 
-        Runs after the function index exists: rebasing needs the database's
-        addresses, and without it nothing in the trace matches anything on
-        screen (our echo trace runs at 0x7ffff6faa000; the database has that
-        code at 0x2000).
-        """
-        from .trace import Trace
-        path = self._trace_path
-        try:
-            def note(n):
-                self.app.call_from_thread(
-                    self._status, f"trace: {n:,} instructions\u2026")
-            trace = Trace.load(path, progress=note)
-        except OSError as e:
-            self.app.call_from_thread(self._status, f"trace: {e}")
-            return
-        if not trace.length:
-            self.app.call_from_thread(
-                self._status, f"trace: {os.path.basename(path)} is empty")
-            return
-        idx = self._func_index
-        addrs = [f.addr for f in idx.all_loaded()] if idx is not None else []
-        slide = trace.rebase(addrs)
-        trace.apply_slide(slide)
-        hit = sum(1 for f in (idx.all_loaded() if idx else []) if trace.executions(f.addr))
-        self.app.call_from_thread(self._trace_ready, trace, slide, hit)
-
-    def _trace_ready(self, trace, slide: int, hit: int) -> None:
-        self._trace = trace
-        self._t = 0
-        dock = self.query_one(TraceDock)
-        dock.display = True
-        dock.show(trace, 0)
-        where = (f"rebased {slide:+#x}" if slide else "no rebase needed")
-        self._status(f"trace: {trace.length:,} instructions, {hit} functions "
-                     f"touched ({where})", priority=True)
-        self._seek(0, follow=True)
-
-    # -- trace navigation --------------------------------------------------- #
     def _seek(self, idx: int, follow: bool = True) -> None:
-        """Move to timestamp ``idx``; ``follow`` takes the code view with it."""
-        t = self._trace
-        if t is None or not t.length:
-            return
-        # A seek invalidates any navigation still in flight. They run in workers
-        # and finish out of order: the trace's opening seek lands on the entry
-        # point, takes a while, and used to arrive AFTER later seeks — dragging
-        # the cursor back to _start while the trace was elsewhere, permanently.
-        #
-        # Bumped HERE and not in _goto_ea. Doing it for every navigation is the
-        # more general rule ("the last thing you asked for wins") but it also
-        # lets an ordinary follow be dropped by whatever navigates next, and the
-        # only evidence I have is about seeks. Narrow fix for the measured bug.
-        self._nav_seq += 1
-        self._t = max(0, min(int(idx), t.length - 1))
-        self.query_one(TraceDock).show(t, self._t)
-        self._paint_trail()
-        if not follow:
-            return
-        pc = t.ip(self._t)
-        if self._split and self._seek_split(pc):
-            return
-        # Stay in whichever view you're reading. Without prefer_decomp a step
-        # from the pseudocode navigates to an address, which opens the listing —
-        # so stepping through C threw you out of C on the first keypress.
-        self._goto_ea(pc, push=False,
-                      prefer_decomp=(self._active == "decomp"))
+        self.trace_ctl.seek(idx, follow)
 
-    def _seek_split(self, pc: int) -> bool:
-        """Put BOTH panes on ``pc``. True if handled.
+    def _step(self, delta: int) -> None:
+        self.trace_ctl.step(delta)
 
-        Normal navigation moves one pane and gives the companion a band, never a
-        cursor — that rule exists so the two can't chase each other. A trace step
-        isn't navigation though: time is a single global position, and both views
-        are showing the same instant, so both cursors belong on it.
+    def _step_over(self, direction: int) -> None:
+        self.trace_ctl.step_over(direction)
 
-        The scroll anchoring is unchanged: after placing the cursors, the usual
-        _sync_split still bands the companion and aligns it to the driver's
-        screen row, so the eye tracks straight across.
-        """
-        lst = self.query_one(ListingView)
-        dec = self.query_one(DecompView)
-        if lst.model is None:
-            return False
-        row = lst.model.ensure_ea(pc)
-        if row is None or row < 0:
-            return False        # not in this listing (other segment): full nav
-        lst.cursor = row
-        lst._scroll_cursor_into_view()
-
-        # Has execution actually left the decompiled function? Ask the map the
-        # trail painting keeps, which is keyed to what the decompiler currently
-        # HOLDS. _split_range comes from the guarded async path and lags, so a
-        # stale one made every step look like a function change: the decompiler
-        # bounced main -> PLT stub -> main, each bounce costing a synchronous
-        # 769-line map fetch on the UI thread.
-        span = self._trail_span
-        inside = (pc in self._trail_line_of
-                  or (span is not None and span[0] <= pc <= span[1]))
-        if not inside:
-            self._pending_trace_line = pc
-            self._resync_decomp_async(pc)
-            return True
-        self._place_decomp_at(pc)
-        self._sync_split(self._active)
-        return True
-
-    def _place_decomp_at(self, pc: int) -> None:
-        """Move the pseudocode cursor to the line covering ``pc``.
-
-        Uses the map the trail painting already keeps (keyed to the decompiler's
-        CURRENTLY loaded function), not the split view's _split_ea2line. That one
-        is refreshed by a guarded async path — it drops a result if _cur moved
-        while it was in flight — and a burst of steps moves _cur constantly, so
-        during stepping it is frequently a map of the function you just left.
-        """
-        dec = self.query_one(DecompView)
-        line = None
-        if self._trail_map_ea == dec.loaded_ea and self._trail_line_of:
-            # EXACT match only. The decompiler doesn't attribute every
-            # instruction to a line (about half of main's aren't), and the
-            # tempting fallback — the nearest mapped instruction at or before
-            # the pc — is unsound: C lines are not monotonic in address, so
-            # 0x24a8 early in main resolved to line 708, "sub_2040();", near the
-            # end. A cursor that jumps to an unrelated statement is worse than
-            # one that waits; the trail still marks where we are.
-            line = self._trail_line_of.get(pc)
-        if line is None:
-            line = self._split_ea2line.get(pc)
-        if line is None:
-            line = dec.line_for_ea(pc)
-        if line is not None:
-            dec.goto(line, dec.cursor_x)
+    def _paint_trail(self) -> None:
+        self.trace_ctl.paint_trail()
 
     @work(thread=True, exclusive=True, group="split-resync")
     def _resync_decomp_async(self, ea: int) -> None:
         self._resync_decomp(ea)
 
-    def _paint_trail(self) -> None:
-        """Push the execution trail into the code views.
-
-        Recomputed per seek rather than per repaint: it's ~200 lookups, and a
-        repaint happens far more often than a step.
-        """
-        t = self._trace
-        if t is None:
-            return
-        try:
-            hx = self.query_one(HexView)
-            hx.trace, hx.trace_idx = t, self._t
-            if hx.display:
-                hx.refresh()
-        except Exception:  # noqa: BLE001 -- not mounted yet
-            pass
-        trail = t.trail(self._t)
-        try:
-            lst = self.query_one(ListingView)
-            lst.trail = trail
-            lst.refresh()
-        except Exception:  # noqa: BLE001 -- view not mounted yet
-            pass
-        self._paint_trail_decomp(trail)
-
-    def _paint_trail_decomp(self, trail: dict) -> None:
-        """Map the instruction trail onto pseudocode lines.
-
-        This is the thing Tenet can't do: it paints disassembly, because that's
-        where a trace's addresses live. We already have decomp_map (built for
-        the split view) saying which instructions each pseudocode line covers,
-        so the same trail lands on C.
-
-        A line covers many instructions, so it takes the strongest kind present:
-        'now' wins over 'past' wins over 'future' — if the instruction you are
-        standing on is part of this line, this line is where you are.
-        """
-        try:
-            dec = self.query_one(DecompView)
-        except Exception:  # noqa: BLE001
-            return
-        ea = dec.loaded_ea
-        if not dec.display or ea is None or self.program is None:
-            dec.trail = {}
-            return
-        if self._trail_map_ea != ea:
-            # One index, built once per decompiled function and shared with the
-            # split view (_apply_split_map fills the same fields). decomp_map is
-            # an RPC and stepping is interactive, so paying it per keystroke —
-            # or twice, once for each of two parallel maps — would be felt.
-            try:
-                self._apply_split_map(ea, self.program.decomp_map(ea))
-            except Exception:  # noqa: BLE001
-                self._trail_map, self._trail_map_ea = [], ea
-                self._trail_line_of, self._trail_eas = {}, []
-                self._trail_span = None
-        rank = {"future": 0, "past": 1, "now": 2}
-        lines: dict[int, str] = {}
-        for i, eas in enumerate(self._trail_map or []):
-            best = None
-            for a in eas:
-                k = trail.get(a)
-                if k is not None and (best is None or rank[k] > rank[best]):
-                    best = k
-            if best is not None:
-                lines[i] = best
-        dec.trail = lines
-        dec.refresh()
-        pend, self._pending_trace_line = self._pending_trace_line, None
-        if pend is not None and self._split:
-            # The function was still decompiling when the step happened; land
-            # now that its line map exists.
-            self._place_decomp_at(pend)
-            self._sync_split(self._active)
-
-    def _step(self, delta: int) -> None:
-        if self._trace is None:
-            self._status("no trace loaded (--trace FILE)")
-            return
-        self._seek(self._t + delta)
-
-    def _seek_hit(self, direction: int) -> None:
-        """Seek to the next/previous time the focused view's subject was touched.
-
-        Two different questions with one pair of keys, because the answer to
-        "which thing?" is already on screen: in a code view it's the instruction
-        under the cursor ("when else did this run?"), in hex it's the byte under
-        the cursor ("who else touched this?").
-        """
-        t = self._trace
-        if t is None:
-            self._status("no trace loaded (--trace FILE)")
-            return
-        if self._active == "hex":
-            hx = self._try_view(HexView)
-            va = hx.cursor_va() if hx is not None else None
-            if va is None:
-                return
-            stamps = t.memory_accesses(va, 1)
-            what = f"access to {va:#x}"
-        else:
-            view = self._active_code_view()
-            if isinstance(view, DecompView):
-                # A C line is not one address, so ask about the whole statement:
-                # "when else did this line run?" is the question, and it's the
-                # union of its instructions' executions. Falling back to the
-                # line's single /*ea*/ marker would answer a narrower question
-                # and often no question at all, since most lines have no marker.
-                line = view.cursor
-                eas = []
-                if (self._trail_map_ea == view.loaded_ea
-                        and 0 <= line < len(self._trail_map or [])):
-                    eas = list(self._trail_map[line])
-                if not eas:
-                    one = view._line_ea(line)
-                    eas = [one] if one is not None else []
-                if not eas:
-                    self._status("this line has no instructions to seek on",
-                                 priority=True)
-                    return
-                stamps = sorted({x for e in eas for x in t.executions(e)})
-                what = f"execution of C line {line + 1}"
-            else:
-                ea = view._cursor_ea() if view is not None else None
-                if ea is None:
-                    self._status("no address on this line", priority=True)
-                    return
-                stamps = list(t.executions(ea))
-                what = f"execution of {ea:#x}"
-        if not stamps:
-            self._status(f"no {what} in this trace", priority=True)
-            return
-        import bisect as _b
-        if direction > 0:
-            i = _b.bisect_right(stamps, self._t)
-        else:
-            i = _b.bisect_left(stamps, self._t) - 1
-        if not (0 <= i < len(stamps)):
-            edge = "last" if direction > 0 else "first"
-            self._status(f"already at the {edge} {what} "
-                         f"({len(stamps)} in the trace)", priority=True)
-            return
-        self._seek(stamps[i])
-        self._status(f"{what}: {i + 1} of {len(stamps)}  @ t={stamps[i]:,}",
-                     priority=True)
-
     def action_seek_next_hit(self) -> None:
-        self._seek_hit(1)
+        self.trace_ctl.seek_hit(1)
 
     def action_seek_prev_hit(self) -> None:
-        self._seek_hit(-1)
+        self.trace_ctl.seek_hit(-1)
 
     def action_seek_reg_write(self) -> None:
-        """W: which instruction set each register to its current value."""
-        t = self._trace
-        if t is None:
-            self._status("no trace loaded (--trace FILE)")
-            return
-        rows = []
-        for name in t.registers:
-            v = t.register(name, self._t)
-            if v is None:
-                continue
-            rows.append((name, v, t.last_write(name, self._t),
-                         t.next_write(name, self._t)))
-        if rows:
-            self.push_screen(RegWriteScreen(rows, self._t), self._on_reg_write_chosen)
-
-    def _on_reg_write_chosen(self, idx) -> None:  # type: ignore[no-untyped-def]
-        if idx is not None:
-            self._seek(int(idx))
+        self.trace_ctl.seek_reg_write()
 
     def action_step_fwd(self) -> None:
-        self._step(1)
+        self.trace_ctl.step(1)
 
     def action_step_back(self) -> None:
-        self._step(-1)
-
-    def _step_over(self, direction: int) -> None:
-        """Step over a call by following the stack pointer.
-
-        A call pushes, so the callee runs with SP BELOW where we started;
-        stepping until SP comes back up lands after the call returns. Cheaper
-        and more robust than recognising call instructions per architecture,
-        which is what the mode makes it: if this instruction doesn't call
-        anything, SP is already >= the start and it degenerates to one step.
-        """
-        t = self._trace
-        if t is None:
-            self._status("no trace loaded (--trace FILE)")
-            return
-        sp_name = "rsp" if "rsp" in t.reg_at else ("esp" if "esp" in t.reg_at else "sp")
-        sp0 = t.register(sp_name, self._t)
-        i = self._t + direction
-        limit = 200000          # a runaway search must not hang the UI
-        while 0 <= i < t.length and limit > 0:
-            sp = t.register(sp_name, i)
-            if sp0 is None or sp is None or sp >= sp0:
-                break
-            i += direction
-            limit -= 1
-        self._seek(max(0, min(i, t.length - 1)))
+        self.trace_ctl.step(-1)
 
     def action_step_over_fwd(self) -> None:
-        self._step_over(1)
+        self.trace_ctl.step_over(1)
 
     def action_step_over_back(self) -> None:
-        self._step_over(-1)
+        self.trace_ctl.step_over(-1)
 
     @work(thread=True, exclusive=True, group="load-funcs")
     def _reindex_functions(self) -> None:
@@ -8255,10 +7972,7 @@ class IdaTui(App):
         # ONE index, shared with the trace path: it used to keep a parallel copy
         # of exactly this, fetched separately and keyed differently, which is how
         # the two ended up describing different functions.
-        self._trail_map, self._trail_map_ea = m, ea
-        self._trail_line_of = dict(self._split_ea2line)
-        self._trail_eas = sorted(self._trail_line_of)
-        self._trail_span = self._split_range
+        self.trace_ctl.adopt_map(ea, m, self._split_ea2line, self._split_range)
         if self._split:
             self._sync_split(self._active)  # re-link with the region map
 

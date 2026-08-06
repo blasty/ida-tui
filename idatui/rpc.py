@@ -890,9 +890,10 @@ class RpcServer:
 
         # -- projects ------------------------------------------------------ #
         if method == "trace":
-            if app._trace is None:
+            tc = app.trace_ctl
+            if tc.trace is None:
                 raise ValueError("no trace loaded (launch with --trace FILE)")
-            t = app._trace
+            t = tc.trace
             if "seek" in params:
                 v = params["seek"]
                 # "!50" seeks a percentage, like Tenet's timestamp shell.
@@ -900,7 +901,7 @@ class RpcServer:
                     idx = int(float(v[1:]) * (t.length - 1) / 100.0)
                 else:
                     idx = int(str(v).replace(",", ""), 0) if isinstance(v, str) else int(v)
-                app._seek(idx)
+                tc.seek(idx)
             elif "goto" in params:      # first execution of an address/name
                 tgt = params["goto"]
                 ea = (int(str(tgt), 0) if str(tgt).lower().startswith("0x")
@@ -908,17 +909,17 @@ class RpcServer:
                 first = t.first_execution(ea)
                 if first is None:
                     raise ValueError(f"{tgt} never executed in this trace")
-                app._seek(first)
+                tc.seek(first)
             elif "step" in params:
                 n = int(params.get("step") or 1)
                 over = bool(params.get("over"))
                 for _ in range(abs(n)):
-                    (app._step_over if over else app._step)(1 if n > 0 else -1)
+                    (tc.step_over if over else tc.step)(1 if n > 0 else -1)
             await settle(app, timeout=float(params.get("timeout", 20.0)))
             snap = snapshot(app)
-            snap["trace"] = {"idx": app._t, "length": t.length,
-                             "pc": hex(t.ip(app._t)),
-                             "changed": sorted(t.changed(app._t))}
+            snap["trace"] = {"idx": tc.t, "length": t.length,
+                             "pc": hex(t.ip(tc.t)),
+                             "changed": sorted(t.changed(tc.t))}
             return snap
 
         if method == "binaries":
