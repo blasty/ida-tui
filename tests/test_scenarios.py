@@ -61,6 +61,12 @@ def scenario(name):
 # --------------------------------------------------------------------------- #
 # Shared context + helpers
 # --------------------------------------------------------------------------- #
+#: What the app says when Hex-Rays can't decompile (idatui/app.py,
+#: _apply_decomp). Waiting on the wrong text here doesn't fail a test -- it
+#: times out and then lets a weaker check pass, which is far more expensive.
+_CANNOT_DECOMP = "cannot decompile"
+
+
 class Ctx:
     def __init__(self, app, pilot):
         self.app = app
@@ -785,10 +791,16 @@ async def s_fallback(c: Ctx):
     await c.open(failing.addr, "listing")
     c.dis.focus()
     await c.press("tab")
-    await c.wait(lambda: app._active == "listing"
-                 and "fail" in c.status().lower(), 25)
-    c.check("F5/Tab on an undecompilable function falls back to the listing",
-            app._active == "listing" and c.dis.display,
+    # "cannot decompile" is what _apply_decomp actually says. This waited on
+    # "fail", which never appears, so it burned the full 25s timeout and the
+    # check below then passed on _active == "listing" -- already true before Tab
+    # was pressed, since the function was opened in the listing. It asserted
+    # nothing, slowly.
+    landed = await c.wait(lambda: _CANNOT_DECOMP in c.status().lower(), 25)
+    c.check("F5/Tab on an undecompilable function says so", landed,
+            f"active={app._active} status={c.status()!r}")
+    c.check("F5/Tab on an undecompilable function falls back to a code view",
+            app._active in ("listing", "disasm") and c.dis.display,
             f"active={app._active} status={c.status()!r}")
     # a decompilable function F5s into pseudocode
     await c.open("main", "decomp")
@@ -1306,7 +1318,8 @@ async def s_follow_xrefs(c: Ctx):
         await c.press("tab")
         landed = await c.wait(
             lambda: (app._active == "decomp" and dec.loaded_ea == xref.fn_addr)
-            or (app._active == "listing" and "fail" in c.status().lower()), 25)
+            or (app._active in ("listing", "disasm")
+                and _CANNOT_DECOMP in c.status().lower()), 25)
         if app._active == "decomp":
             c.check("F5 at the xref site decompiles the referencing function",
                     dec.loaded_ea == xref.fn_addr, f"loaded={dec.loaded_ea}")
@@ -2281,7 +2294,8 @@ async def s_continuous_view(c: Ctx):
     c.lst.focus()
     await c.press("tab")
     await c.wait(lambda: (app._active == "decomp" and c.dec.loaded_ea == fn_ea)
-                 or (app._active == "listing" and "fail" in c.status().lower()), 25)
+                 or (app._active in ("listing", "disasm")
+                and _CANNOT_DECOMP in c.status().lower()), 25)
     if app._active == "decomp":
         c.check("F5/Tab decompiles the function under the cursor",
                 c.dec.loaded_ea == fn_ea, f"loaded={c.dec.loaded_ea}")
