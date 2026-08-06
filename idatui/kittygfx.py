@@ -48,6 +48,10 @@ LOGO_ID = 0x1DA7
 
 _supported: bool | None = None
 _uploaded: dict[int, tuple[int, int]] = {}   # image id -> (pixel w, pixel h)
+#: Terminal cell size in pixels, asked for in the same round trip as the
+#: graphics query. Cells are nothing like a fixed 1:2 -- this box reports 9x22,
+#: i.e. 1:2.44 -- and getting it wrong stretches the image.
+_cell: tuple[int, int] | None = None
 
 
 def log(msg: str) -> None:
@@ -81,7 +85,9 @@ def _query_tty(timeout: float = 2.0) -> bool:
         return False
     try:
         ttymod.setraw(fd)
-        os.write(fd, b"\033_Gi=31,s=1,v=1,a=q,t=d,f=24;AAAA\033\\\033[c")
+        # graphics query + cell-size query + DA1. DA1 is answered by everything,
+        # so it marks the end of the replies and nothing has to be timed.
+        os.write(fd, b"\033_Gi=31,s=1,v=1,a=q,t=d,f=24;AAAA\033\\\033[16t\033[c")
         buf = b""
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
@@ -92,8 +98,15 @@ def _query_tty(timeout: float = 2.0) -> bool:
             if not chunk:
                 break
             buf += chunk
-            if re.search(rb"\033\[\?[0-9;]*c", buf):    # DA1: the answer is in
+            if re.search(rb"\033\[\?[0-9;]*c", buf):    # DA1: the answers are in
                 break
+        global _cell
+        m = re.search(rb"\033\[6;(\d+);(\d+)t", buf)    # CSI 6 ; height ; width t
+        if m:
+            ch, cw = int(m.group(1)), int(m.group(2))
+            if 0 < cw < 100 and 0 < ch < 200:
+                _cell = (cw, ch)
+                log(f"cell size {cw}x{ch}px")
         return bool(re.search(rb"\033_G[^\033]*;OK\033\\", buf))
     except OSError:
         return False
@@ -226,13 +239,26 @@ def delete(image_id: int = LOGO_ID) -> None:
     _uploaded.pop(image_id, None)
 
 
+def cell_size() -> tuple[int, int]:
+    """(width, height) of a terminal cell in pixels.
+
+    Measured during the graphics query when the terminal answers CSI 16 t;
+    otherwise a 10x20 guess, which is only ever used to keep the aspect ratio
+    honest.
+    """
+    return _cell or (10, 20)
+
+
 def fit(px: tuple[int, int], max_cols: int, max_rows: int,
-        cell: tuple[int, int] = (10, 20)) -> tuple[int, int]:
+        cell: tuple[int, int] | None = None) -> tuple[int, int]:
     """Cell size that fits ``max_cols`` x ``max_rows`` keeping the aspect ratio.
 
-    Cells are about twice as tall as they are wide, so a naive cols=rows box
-    would squash the image; ``cell`` is that ratio in pixels.
+    Cells are far from square -- this box reports 9x22 px -- so a naive
+    cols==rows box stretches the image; ``cell`` is that ratio in pixels and
+    defaults to what the terminal actually said.
     """
+    if cell is None:
+        cell = cell_size()
     w, h = px
     if w <= 0 or h <= 0:
         return (max_cols, max_rows)

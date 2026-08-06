@@ -3757,9 +3757,25 @@ class ConfirmScreen(ModalScreen):
 _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _LOGO_PATH = os.path.join(_REPO_ROOT, "logo.ans")
 #: The same artwork as a real image, for terminals that can draw one. logo.ans
-#: is 60x33 cells of half-blocks, i.e. 60x66 pixels; this is 474x516.
+#: is half-blocks (two pixels per cell); this is a transparent PNG at 768px.
 LOGO_PNG = os.path.join(_REPO_ROOT, "logo.png")
-_LOGO_CELLS = (60, 33)   # what logo.ans occupies, so either path lays out the same
+_LOGO_BOX = (60, 33)     # the most room the splash will give the art
+_logo_cells: tuple[int, int] | None = None
+
+
+def logo_cells() -> tuple[int, int]:
+    """Cell footprint for the image, derived from the artwork and the terminal's
+    real cell size rather than hardcoded.
+
+    Cells are nowhere near square (9x22 px here, 1:2.44), so a fixed box picked
+    for one aspect ratio stretches any other. Recomputing means the art can be
+    replaced without anyone remembering to edit a constant.
+    """
+    global _logo_cells
+    if _logo_cells is None:
+        px = kittygfx.png_size(LOGO_PNG)
+        _logo_cells = kittygfx.fit(px, *_LOGO_BOX) if px else _LOGO_BOX
+    return _logo_cells
 _logo_cache: object = False  # False == not yet loaded (None == absent/unreadable)
 
 
@@ -3805,9 +3821,10 @@ class LoadingScreen(ModalScreen):
             # The image is anchored to screen cells rather than composited by
             # Textual (no unicode-placeholder support here), so the widget is
             # only reserved blank space -- see _place_logo.
-            cols, rows = _LOGO_CELLS
+            cols, rows = logo_cells()
             kittygfx.log(f"compose: supported={kittygfx.supported()} "
-                         f"app.size={self.app.size} fits={self._fits(rows)}")
+                         f"app.size={self.app.size} cells={cols}x{rows} "
+                         f"fits={self._fits(rows)}")
             if kittygfx.supported() and self._fits(rows):
                 self._image = True
                 blank = Static("\n" * (rows - 1), id="loading-image")
@@ -3859,7 +3876,7 @@ class LoadingScreen(ModalScreen):
         kittygfx.log(f"place_logo: region={region}")
         if not region.width or not region.height:
             return
-        cols, rows = _LOGO_CELLS
+        cols, rows = logo_cells()
         col = region.x + max((region.width - cols) // 2, 0)   # centre it
         kittygfx.place(region.y, col, min(cols, region.width), rows)
 
