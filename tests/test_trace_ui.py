@@ -11,15 +11,15 @@ the trace is part of this repo.
 NEEDS_IDA = True
 import asyncio
 import os
-import shutil
 import subprocess
 import sys
-import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from textual.widgets import Input, OptionList, Static  # noqa: E402
 
+from _fixtures import staged  # noqa: E402
 from idatui.app import (DecompView, IdaTui, ListingView,  # noqa: E402
                         RegWriteScreen, TraceDock)
 
@@ -63,11 +63,14 @@ def make_trace(tmp, binary):
 
 async def run() -> int:
     binary = os.path.join(REPO, "targets", "echo")
-    with tempfile.TemporaryDirectory() as tmp:
-        # Scratch copy: opening a binary writes a database beside it, and the
-        # suite must not edit anything tracked.
-        target = os.path.join(tmp, "echo")
-        shutil.copy2(binary, target)
+    # Scratch copy seeded from the golden database (tests/_fixtures.py):
+    # opening a binary writes a .i64 beside it and the suite must not touch
+    # anything tracked. On echo the seeding saves only ~0.2s (it analyses fast);
+    # it is here so a suite pointed at a bigger target doesn't pay for analysis
+    # on every run.
+    async with staged(binary, lambda p: IdaTui(open_path=p, keepalive=False),
+                      prefix="idatui-traceui-") as target:
+        tmp = os.path.dirname(target)
         log = make_trace(tmp, target)
         if not log:
             print(f"  skip: could not record a trace (tracer at {TRACER})")
@@ -152,7 +155,9 @@ async def run() -> int:
             # image would have nothing to show.
             dock = app.query_one(TraceDock)
             app._seek(min(60, t.length - 1))
-            await pilot.pause(0.8)
+            await wait(lambda: "stack (" in
+                       str(dock.query_one("#trace-stack", Static).render()),
+                       pilot, 5)
             stack = str(dock.query_one("#trace-stack", Static).render())
             check("the dock shows the stack at this timestamp",
                   "stack (" in stack and len(stack.splitlines()) > 4, stack[:60])
@@ -175,7 +180,9 @@ async def run() -> int:
             # Stepping must move the memory view with time.
             before = stack
             app._seek(min(80, t.length - 1))
-            await pilot.pause(0.8)
+            await wait(lambda: str(dock.query_one("#trace-stack",
+                                                  Static).render()) != before,
+                       pilot, 5)
             check("and it follows as you move through time",
                   str(dock.query_one("#trace-stack", Static).render()) != before)
 
@@ -184,7 +191,7 @@ async def run() -> int:
             # program that's almost everything and says nothing. The last/next
             # few dozen steps say how you got here and where you're going.
             app._seek(min(40, t.length - 1))
-            await pilot.pause(0.6)
+            await wait(lambda: bool(lst.trail), pilot, 5)
             trail = lst.trail
             kinds = {k for k in trail.values()}
             check("the listing is painted with an execution trail",
@@ -219,7 +226,7 @@ async def run() -> int:
                 dec = app.query_one(DecompView)
                 check("pseudocode is available for the traced function", got)
                 app._seek(first + 12)
-                await pilot.pause(1.0)
+                await wait(lambda: len(dec.trail) > 2, pilot, 5)
                 check("pseudocode lines are painted with the trail",
                       len(dec.trail) > 2, f"{len(dec.trail)} lines")
                 now = [i for i, k in dec.trail.items() if k == "now"]
@@ -252,7 +259,8 @@ async def run() -> int:
             # navigation though: both panes show the same instant, so the
             # listing cursor must sit on the current instruction.
             app.action_toggle_split()
-            await pilot.pause(2.0)
+            await wait(lambda: app._split and lst.display
+                       and app.query_one(DecompView).display, pilot, 10)
             if not app._split:
                 check("split view toggled on", False)
             else:
@@ -260,8 +268,11 @@ async def run() -> int:
                 tracked = 0
                 for k in range(2, 8):
                     app._seek(base + k)
-                    await pilot.pause(0.5)
-                    if lst._cursor_ea() == t.ip(app._t):
+                    # Wait for the cursor to arrive rather than sleeping a flat
+                    # 0.5s and hoping. Same question -- does the listing follow
+                    # the pc? -- but it costs what it costs instead of 3s.
+                    if await wait(lambda: lst._cursor_ea() == t.ip(app._t),
+                                  pilot, 5):
                         tracked += 1
                 check("stepping in split moves the listing cursor to the pc",
                       tracked == 6, f"{tracked}/6 steps tracked")
@@ -280,11 +291,23 @@ async def run() -> int:
                 mapped = missed = 0
                 for k in range(2, 30):
                     app._seek(base + k)
-                    await pilot.pause(0.3)
                     pc = t.ip(app._t)
+                    # Settle on something that does NOT presuppose the answer:
+                    # the listing cursor reaching the pc (checked just above)
+                    # and the trail map belonging to the loaded function. Waiting
+                    # on `pc in _trail_line_of` instead would burn the timeout on
+                    # every unmapped instruction -- about half of them -- and be
+                    # slower than the flat sleep it replaces.
+                    await wait(lambda: lst._cursor_ea() == pc
+                               and app._trail_map_ea == dec.loaded_ea, pilot, 5)
                     if app._trail_map_ea == dec.loaded_ea and pc in app._trail_line_of:
                         mapped += 1
-                        if dec.cursor != app._trail_line_of[pc]:
+                        # Mapped: the pseudocode cursor is expected, so it's fair
+                        # to wait for it -- and this is the assertion, so the
+                        # miss is still counted if it never arrives.
+                        line = app._trail_line_of[pc]
+                        await wait(lambda: dec.cursor == line, pilot, 3)
+                        if dec.cursor != line:
                             missed += 1
                 check("the pseudocode cursor follows every mapped instruction",
                       mapped > 3 and missed == 0,

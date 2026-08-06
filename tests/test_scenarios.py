@@ -24,12 +24,12 @@ import asyncio
 import fnmatch
 import os
 import re
-import shutil
 import sys
-import tempfile
 import traceback
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from _fixtures import staged  # noqa: E402
 from idatui.app import (  # noqa: E402
     ConfirmScreen, DecompView, FunctionsPanel, GraphView, HexView, IdaTui,
     HelpScreen, ListingView, QuitScreen, StringsPalette, StructEditor,
@@ -3137,25 +3137,6 @@ async def s_graph_sticky(c: Ctx):
 # --------------------------------------------------------------------------- #
 # Runner
 # --------------------------------------------------------------------------- #
-async def _build_pristine(binary, cache):
-    """Analyse ``binary`` once and keep the resulting database as a golden copy.
-
-    Costs one full analysis, then every later run starts from it instead of
-    re-analysing.
-    """
-    print(f"  (building pristine database for {os.path.basename(binary)}\u2026)")
-    app = IdaTui(open_path=binary, keepalive=False)
-    async with app.run_test(size=(140, 44)) as pilot:
-        for _ in range(6000):
-            await pilot.pause(0.05)
-            if app._func_index is not None and app._func_index.complete:
-                break
-        app.program.client.call("idb_save", timeout=600.0)
-    db = binary + ".i64"
-    if os.path.exists(db):
-        shutil.copy2(db, cache)
-
-
 async def run(binary, only=None):
     # The suite EDITS the database — it defines code, undefines items, renames
     # and comments — and IDA saves those edits. Run that against the tracked
@@ -3167,15 +3148,8 @@ async def run(binary, only=None):
     #
     # So: work on a scratch copy, seeded from a golden database that nothing
     # ever writes back to.
-    with tempfile.TemporaryDirectory(prefix="idatui-pilot-") as scratch:
-        target = os.path.join(scratch, os.path.basename(binary))
-        shutil.copy2(binary, target)
-        cache = binary + ".pristine.i64"
-        if not (os.path.exists(cache)
-                and os.path.getmtime(cache) >= os.path.getmtime(binary)):
-            await _build_pristine(target, cache)
-        if os.path.exists(cache):
-            shutil.copy2(cache, target + ".i64")
+    async with staged(binary, lambda p: IdaTui(open_path=p, keepalive=False),
+                      prefix="idatui-pilot-") as target:
         await _run_on(target, only)
 
 

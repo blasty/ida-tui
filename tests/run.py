@@ -20,6 +20,14 @@ first time someone adds a test, **each test file declares it**::
 modules run their suite at import time). A test file with no marker is a hard
 error, so a new test can't quietly join the fast set and start needing IDA.
 
+Deliberately **serial**. Running the IDA suites concurrently looks like the
+obvious win (they are independent processes with their own worker and temp dir,
+on a 12-core box) and it is measurably a loss: 4 at a time took the suite from
+153s to 296s and killed three of them with broken-pipe worker failures --
+thumb_ui alone went 10.4s to 287.8s. idalib contends hard enough that the extra
+processes only starve each other, and a starved worker gets reaped mid-analysis,
+which reads as a flaky test rather than as load. Don't re-add --jobs.
+
 Usage::
 
     python3 tests/run.py              # everything
