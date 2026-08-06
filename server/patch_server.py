@@ -309,10 +309,15 @@ def _idatui_head_row(ea):
         # Keep IDA's own token classification for syntax highlighting. Built from
         # the SAME line as `text`, then whitespace-collapsed identically so the
         # two never disagree about what the row says.
-        spans = _idatui_spans(line)
+        spans, ops = _idatui_spans(line)
         joined = "".join(t for _k, t in spans)
         if " ".join(joined.split()) == text:
             row["spans"] = spans
+            # Where each operand sits in `text`. Comes out of the same tag walk
+            # (free), and is what lets the client show WHICH literal a keypress
+            # would reformat before you press it.
+            if ops:
+                row["ops"] = ops
     nm = ida_name.get_ea_name(ea)
     if nm:
         row["name"] = nm
@@ -358,27 +363,58 @@ def _idatui_tag_map():
 
 
 _IDATUI_TAGS = None
+_IDATUI_OPND_TAGS = None
+
+
+def _idatui_opnd_tag_map():
+    """{tag character: operand index}. IDA wraps each operand of a disassembly
+    line in COLOR_OPND1..8, so the line already says where operand N starts and
+    ends -- no need to re-render operands with print_operand to find out (and
+    the two agree exactly; checked over thousands of instructions)."""
+    import ida_lines
+    out = {}
+    for i in range(1, 9):
+        v = getattr(ida_lines, "COLOR_OPND%d" % i, None)
+        if isinstance(v, int):
+            out[chr(v)] = i - 1
+        elif isinstance(v, str) and v:
+            out[v[0]] = i - 1
+    return out
 
 
 def _idatui_spans(line):
-    """A tagged disasm line as [[kind, text], ...], colour tags resolved.
+    """(spans, ops) for a tagged disasm line.
+
+    ``spans`` is [[kind, text], ...] with colour tags resolved; ``ops`` is
+    [[start, end, n], ...], the extent of each operand in the SAME (collapsed)
+    coordinates the row's ``text`` uses -- which is what lets a cursor column
+    name the operand it is standing on.
 
     Unknown tags become 'text' rather than being dropped: a processor module can
     emit a colour we don't classify, and losing the characters would corrupt the
     line."""
-    global _IDATUI_TAGS
+    global _IDATUI_TAGS, _IDATUI_OPND_TAGS
     import ida_lines
     if _IDATUI_TAGS is None:
         _IDATUI_TAGS = _idatui_tag_map()
+    if _IDATUI_OPND_TAGS is None:
+        _IDATUI_OPND_TAGS = _idatui_opnd_tag_map()
     on, off, esc = "\x01", "\x02", "\x03"
     addr_tag = chr(getattr(ida_lines, "COLOR_ADDR", 0x28))
     addr_len = int(getattr(ida_lines, "COLOR_ADDR_SIZE", 16))
-    spans, stack, buf = [], [], []
+    spans, stack, buf = [], [], []   # stack entries: (kind, operand index|None)
     i, n = 0, len(line)
+
+    def _opnd():
+        for _k, o in reversed(stack):
+            if o is not None:
+                return o
+        return None
 
     def flush():
         if buf:
-            spans.append([stack[-1] if stack else "text", "".join(buf)])
+            spans.append([stack[-1][0] if stack else "text", "".join(buf),
+                          _opnd()])
             del buf[:]
 
     while i < n:
@@ -391,7 +427,8 @@ def _idatui_spans(line):
                 i += 2 + addr_len
                 continue
             flush()
-            stack.append(_IDATUI_TAGS.get(tag, "text"))
+            stack.append((_IDATUI_TAGS.get(tag, "text"),
+                          _IDATUI_OPND_TAGS.get(tag)))
             i += 2
             continue
         if ch == off and i + 1 < n:
@@ -412,7 +449,7 @@ def _idatui_spans(line):
     # collapsing each span on its own — otherwise the spans and `text` disagree
     # about the line and the row silently loses its highlighting.
     out, prev_space = [], False
-    for kind, txt in spans:
+    for kind, txt, opnd in spans:
         acc = []
         for ch in txt:
             if ch.isspace():
@@ -424,7 +461,7 @@ def _idatui_spans(line):
                 acc.append(ch)
                 prev_space = False
         if acc:
-            out.append([kind, "".join(acc)])
+            out.append([kind, "".join(acc), opnd])
     while out and out[0][1] == " ":
         out.pop(0)
     while out and out[-1][1] == " ":
@@ -433,7 +470,31 @@ def _idatui_spans(line):
         out[0][1] = out[0][1].lstrip()
     if out and out[-1][1].endswith(" "):
         out[-1][1] = out[-1][1].rstrip()
-    return [[k, t] for k, t in out if t]
+    out = [s for s in out if s[1]]
+    # Operand extents, in the coordinates of the collapsed text these spans
+    # spell out. Adjacent spans of the same operand merge, so an operand like
+    # ``[rbp+var_40]`` (five differently-coloured tokens) comes back as ONE
+    # range -- which is the thing a cursor is inside of, and the thing a format
+    # change applies to.
+    ops, pos, cur, start = [], 0, None, 0
+    for _kind, txt, opnd in out:
+        if opnd != cur:
+            if cur is not None and pos > start:
+                ops.append([start, pos, cur])
+            cur, start = opnd, pos
+        pos += len(txt)
+    if cur is not None and pos > start:
+        ops.append([start, pos, cur])
+    text = "".join(t for _k, t, _o in out)
+    trimmed = []
+    for lo, hi, k in ops:                 # don't let a range own trailing space
+        while hi > lo and text[hi - 1].isspace():
+            hi -= 1
+        while lo < hi and text[lo].isspace():
+            lo += 1
+        if hi > lo:
+            trimmed.append([lo, hi, k])
+    return [[k, t] for k, t, _o in out], trimmed
 
 
 def _idatui_unknown_row(ea, size):
@@ -1206,6 +1267,706 @@ def thumb_scan(
         applied += 1
     return {"start": hex(lo), "end": hex(hi), "found": found,
             "applied": applied, "n": len(found)}
+
+
+# --------------------------------------------------------------------------- #
+# operand display formats (IDA's 'o' family: hex / dec / char / offset / ...)
+# --------------------------------------------------------------------------- #
+#: The stops a cycle walks, in order, before filtering to the ones that make
+#: sense for the operand in hand. Octal is deliberately NOT one of them -- every
+#: extra stop is another keypress and nobody reads octal -- but it is still
+#: reachable by name. "default" hands the operand back to IDA's own choice,
+#: which for data is how you get an auto-detected offset/string back.
+_IDATUI_FMT_CYCLE = ("hex", "dec", "bin", "char", "offset", "default")
+
+#: Formats we can re-apply from a name alone. enum/stroff/custom carry an id
+#: (which enum, which struct) that a nibble doesn't record, so they are never
+#: cycled INTO -- and cycling out of one is called out in ``warn``.
+_IDATUI_FMT_SETTABLE = ("hex", "dec", "oct", "bin", "char", "offset", "seg",
+                        "float", "stack", "default")
+
+
+def _idatui_fmt_nibbles():
+    """{format name: IDA operand-type nibble}. Built on call, not at import:
+    this module is injected into a file that is imported before a database is
+    open."""
+    import ida_bytes
+    return {
+        "default": ida_bytes.FF_N_VOID, "hex": ida_bytes.FF_N_NUMH,
+        "dec": ida_bytes.FF_N_NUMD, "char": ida_bytes.FF_N_CHAR,
+        "seg": ida_bytes.FF_N_SEG, "offset": ida_bytes.FF_N_OFF,
+        "bin": ida_bytes.FF_N_NUMB, "oct": ida_bytes.FF_N_NUMO,
+        "enum": ida_bytes.FF_N_ENUM, "forced": ida_bytes.FF_N_FOP,
+        "stroff": ida_bytes.FF_N_STRO, "stack": ida_bytes.FF_N_STK,
+        "float": ida_bytes.FF_N_FLT, "custom": ida_bytes.FF_N_CUST,
+    }
+
+
+def _idatui_fmt_name(nib):
+    for name, v in _idatui_fmt_nibbles().items():
+        if v == nib:
+            return name
+    return "default"
+
+
+def _idatui_op_fmt(ea, n):
+    """The format operand ``n`` of the item at ``ea`` is currently displayed in.
+
+    Reads the nibble IDA keeps per operand rather than guessing from the text --
+    ``1`` renders identically in hex and decimal, so the rendered line cannot
+    answer this."""
+    import ida_bytes
+    F = ida_bytes.get_flags(ea)
+    nib = (F >> ida_bytes.get_operand_type_shift(int(n))) & 0xF
+    return _idatui_fmt_name(nib)
+
+
+def _idatui_op_value(ea, n):
+    """(value, byte width) of operand ``n``, or (None, 0) if it hasn't got one.
+
+    The value is what decides which formats are OFFERED: a character constant
+    for 0x38A9 or an offset to an unmapped address are stops worth skipping."""
+    import ida_bytes
+    import ida_ua
+
+    F = ida_bytes.get_flags(ea)
+    if ida_bytes.is_code(F):
+        insn = ida_ua.insn_t()
+        if ida_ua.decode_insn(insn, ea) <= 0:
+            return None, 0
+        try:
+            op = insn.ops[int(n)]
+        except Exception:
+            return None, 0
+        if op.type == ida_ua.o_void:
+            return None, 0
+        v = op.value if op.type == ida_ua.o_imm else op.addr
+        try:
+            size = int(ida_ua.get_dtype_size(op.dtype))
+        except Exception:
+            size = 0
+        return int(v), size
+    size = int(ida_bytes.get_item_size(ea))
+    read = {1: ida_bytes.get_byte, 2: ida_bytes.get_word,
+            4: ida_bytes.get_dword, 8: ida_bytes.get_qword}.get(size)
+    if read is None:
+        return None, size
+    try:
+        return int(read(ea)), size
+    except Exception:
+        return None, size
+
+
+def _idatui_printable(v):
+    """Whether ``v`` would actually render as a character constant. IDA accepts
+    op_chr on anything and then prints the number anyway, so a cycle that offers
+    'char' for 0x18 has a stop where nothing visibly happens."""
+    if v is None or v < 0 or v > 0xFFFFFFFF:
+        return False
+    bs, x = [], int(v)
+    while True:
+        bs.append(x & 0xFF)
+        x >>= 8
+        if not x:
+            break
+    return all(0x20 <= b <= 0x7E or b in (9, 10, 13) for b in bs)
+
+
+def _idatui_offset_worth(v):
+    """Whether 'offset' is worth OFFERING as a cycle stop for value ``v``.
+
+    Making an offset is not free: IDA invents a dummy name at the target
+    (``off_18``) and that name STAYS once you cycle past it. So the ring only
+    stops there when the target is already something you could name -- a symbol,
+    a function, or an item something else references. In a PIE at base 0 half
+    the small constants in a function are 'mapped' (they land in the ELF
+    header); ``sub rsp, 18h`` is not a reference and must not offer to become
+    one on the way past.
+
+    An explicit request still converts anything mapped: that's a decision, not a
+    keypress that happened to land here. After it, the target HAS a name, so the
+    ring includes the stop from then on."""
+    import ida_bytes
+    import ida_name
+
+    return bool(v and ida_bytes.is_mapped(v) and ida_name.get_ea_name(v))
+
+
+def _idatui_op_candidates(ea):
+    """Operand indices at ``ea`` whose display format is worth changing.
+
+    Immediates and displacements -- the literals. Deliberately NOT:
+
+    * branch targets (o_near/o_far), or every jump on the listing would offer to
+      become a bare number, on a view you navigate by label;
+    * memory references (o_mem), e.g. x86-64's RIP-relative ``lea rdi, name``.
+      IDA prints those from the reference, not from the operand's number format,
+      so setting one is accepted and changes nothing on screen -- a keypress
+      that appears to do nothing is worse than one that says it can't.
+
+    An explicit ``n`` still reaches them; this is what a bare cursor picks."""
+    import ida_bytes
+    import ida_ua
+
+    F = ida_bytes.get_flags(ea)
+    if ida_bytes.is_data(F):
+        return [0]              # a data item's value is operand 0
+    if not ida_bytes.is_code(F):
+        return []               # undefined bytes: IDA refuses a format outright
+    insn = ida_ua.insn_t()
+    if ida_ua.decode_insn(insn, ea) <= 0:
+        return []
+    want = (ida_ua.o_imm, ida_ua.o_displ)
+    out = []
+    for i in range(len(insn.ops)):
+        op = insn.ops[i]
+        if op.type == ida_ua.o_void:
+            break
+        if op.type in want:
+            out.append(i)
+    return out
+
+
+def _idatui_op_spans(ea, text):
+    """[(start, end, n)] -- where each operand sits inside ``text`` (the
+    whitespace-collapsed line the TUI shows), so a cursor column can name the
+    operand it is standing on.
+
+    Read out of IDA's own COLOR_OPND markers on the line, which is both free
+    (the line is generated anyway) and exact. print_operand is kept as a
+    fallback for a processor module that emits no operand markers -- it agrees
+    with the tags where both exist, but it re-renders every operand to say so.
+    """
+    import ida_lines
+    import ida_ua
+
+    line = ida_lines.generate_disasm_line(ea, 0)
+    if line:
+        _spans, ops = _idatui_spans(line)
+        if ops:
+            return [tuple(o) for o in ops]
+
+    out, pos = [], 0
+    for n in range(8):
+        try:
+            raw = ida_ua.print_operand(ea, n)
+        except Exception:
+            raw = None
+        if not raw:
+            continue
+        op = " ".join(ida_lines.tag_remove(raw).split())
+        if not op:
+            continue
+        i = text.find(op, pos)
+        if i < 0:                      # duplicated operand text (mov eax, eax)
+            i = text.find(op)
+        if i < 0:
+            continue
+        out.append((i, i + len(op), n))
+        pos = i + len(op)
+    return out
+
+
+def _idatui_line_text(ea):
+    import ida_lines
+    line = ida_lines.generate_disasm_line(ea, 0)
+    return " ".join(ida_lines.tag_remove(line).split()) if line else ""
+
+
+def _idatui_op_text(ea, text, n):
+    """How operand ``n`` reads on the line, for a message that names it."""
+    for lo, hi, i in _idatui_op_spans(ea, text):
+        if i == int(n):
+            return text[lo:hi].strip()
+    return ""
+
+
+def _idatui_apply_fmt(ea, n, fmt):
+    """Set operand ``n``'s display format. Returns (ok, error)."""
+    import ida_bytes
+    import ida_offset
+    import idaapi
+
+    n = int(n)
+    if fmt == "default":
+        return bool(ida_bytes.clr_op_type(ea, n)), ""
+    if fmt == "offset":
+        base = ida_offset.calc_offset_base(ea, n)
+        if base in (idaapi.BADADDR, None) or base < 0:
+            base = 0
+        return bool(ida_offset.op_plain_offset(ea, n, base)), ""
+    fn = {"hex": ida_bytes.op_hex, "dec": ida_bytes.op_dec,
+          "oct": ida_bytes.op_oct, "bin": ida_bytes.op_bin,
+          "char": ida_bytes.op_chr, "seg": ida_bytes.op_seg,
+          "float": ida_bytes.op_flt, "stack": ida_bytes.op_stkvar}.get(fmt)
+    if fn is None:
+        return False, (f"can't set {fmt!r} from a name alone"
+                       if fmt in _idatui_fmt_nibbles() else
+                       f"unknown format {fmt!r}")
+    return bool(fn(ea, n)), ""
+
+
+@tool
+@idasync
+def op_format(
+    addr: Annotated[str, "Address of the instruction or data item"],
+    mode: Annotated[str, "cycle | back | show | hex | dec | oct | bin | char | offset | stack | default"] = "cycle",
+    col: Annotated[int, "Cursor column inside the rendered line (-1: first literal)"] = -1,
+    n: Annotated[int, "Operand index; -1 derives it from ``col``"] = -1,
+) -> dict:
+    """Change how a literal is DISPLAYED (IDA's 'o' family): hex, decimal,
+    binary, character, or an offset to the address it names.
+
+    The value in the bytes never changes -- only the representation IDA renders
+    and remembers. ``cycle``/``back`` step the stops that make sense for THIS
+    operand: 'char' is skipped unless the value prints as one, 'offset' unless
+    the target is already named, so no press is ever a no-op you have to press
+    again. ``show`` reports without changing anything.
+
+    A format the ring can't hold (a stack variable, an enum) is reported in
+    ``warn`` on the way out, with what to do about it -- ``mode`` takes any of
+    the names above outright, which is also how you put one back.
+
+    Which operand: ``n`` if given, else the one under ``col`` (a column in the
+    whitespace-collapsed line, as ``heads`` renders it), else the first literal
+    on the line."""
+    import ida_bytes
+
+    try:
+        ea = ida_bytes.get_item_head(parse_address(addr))
+    except Exception as e:
+        return {"addr": str(addr), "error": str(e)}
+
+    before = _idatui_line_text(ea)
+    cands = _idatui_op_candidates(ea)
+    n = int(n)
+    if n < 0:
+        n = -1
+        if int(col) >= 0:
+            for lo, hi, i in _idatui_op_spans(ea, before):
+                if not (lo <= int(col) < hi):
+                    continue
+                if i in cands:
+                    n = i
+                    break
+                # The cursor IS on an operand, just not one with a format. The
+                # client highlights what the cursor is on, so quietly moving to
+                # a different operand would make that highlight a lie -- say
+                # which one can be changed instead.
+                where = before[lo:hi].strip()
+                alt = (f"; the literal on this line is operand {cands[0]} "
+                       f"({_idatui_op_text(ea, before, cands[0])})"
+                       if cands else "")
+                return {"addr": hex(ea), "n": i, "text": before,
+                        "error": f"operand {i} ({where}) has no format to "
+                                 f"change{alt}"}
+        if n < 0:
+            if not cands:
+                F = ida_bytes.get_flags(ea)
+                why = ("no literal on this line to reformat"
+                       if ida_bytes.is_code(F) or ida_bytes.is_data(F) else
+                       "undefined bytes have no format to change -- define "
+                       "them first ('d' makes data, 'c' makes code)")
+                return {"addr": hex(ea), "text": before, "error": why}
+            n = cands[0]
+
+    cur = _idatui_op_fmt(ea, n)
+    value, width = _idatui_op_value(ea, n)
+    mapped = value is not None and value != 0 and ida_bytes.is_mapped(value)
+    # The ring is a property of the OPERAND, not of what you last pressed: every
+    # stop is one that changes what you see for this value, and it is the same
+    # ring at every step, so a lap always comes home.
+    choices = [f for f in _IDATUI_FMT_CYCLE
+               if (f != "char" or _idatui_printable(value))
+               and (f != "offset" or _idatui_offset_worth(value))]
+    # A stack variable is deliberately NOT a stop: ``[rbp+var_40]`` is a frame
+    # member, not a way of writing a number, and IDA's own "is this a stack
+    # variable" test isn't exposed to Python here (calc_stkvar_struc_offset
+    # happily answers for ``[r14+8]`` too, which would put a bogus stop in the
+    # ring). Leaving one is reported instead, with the command that undoes it.
+    lossy = cur not in choices and cur != "default"
+
+    mode = str(mode or "cycle").lower()
+    if mode == "show":
+        return {"addr": hex(ea), "n": n, "format": cur, "prev": cur,
+                "choices": choices, "text": before, "before": before,
+                "value": None if value is None else hex(value),
+                "width": width, "applied": False}
+    if mode in ("cycle", "back"):
+        step = 1 if mode == "cycle" else -1
+        if cur in choices:
+            want = choices[(choices.index(cur) + step) % len(choices)]
+        else:
+            # Standing on a format the ring can't hold (an enum names a type a
+            # nibble doesn't record): enter the ring at its end, don't skip a
+            # stop working out where we "would have" been.
+            want = choices[0] if step > 0 else choices[-1]
+    else:
+        want = mode
+        if want not in _idatui_fmt_nibbles():
+            return {"addr": hex(ea), "n": n, "text": before,
+                    "error": f"unknown format {mode!r}; one of "
+                             + ", ".join(_IDATUI_FMT_SETTABLE)}
+        if want == "offset" and not mapped:
+            return {"addr": hex(ea), "n": n, "text": before, "format": cur,
+                    "error": (f"{'0x%x' % value if value is not None else 'this operand'}"
+                              " isn't a mapped address -- an offset to it would"
+                              " invent a name for nothing")}
+
+    ok, err = _idatui_apply_fmt(ea, n, want)
+    if err:
+        return {"addr": hex(ea), "n": n, "text": before, "format": cur,
+                "error": err}
+    got = _idatui_op_fmt(ea, n)
+    out = {"addr": hex(ea), "n": n, "prev": cur, "format": got,
+           "requested": want, "applied": bool(ok), "choices": choices,
+           "before": before, "text": _idatui_line_text(ea),
+           "value": None if value is None else hex(value), "width": width}
+    if not ok:
+        out["error"] = f"IDA refused {want} on operand {n}"
+    elif lossy:
+        out["warn"] = (
+            f"operand {n} was {cur} and the ring has no stop there -- "
+            + (f"'{cur}' sets it again" if cur in _IDATUI_FMT_SETTABLE else
+               f"{cur} names a type this can't put back, reassign it by hand"))
+    return out
+
+
+# --------------------------------------------------------------------------- #
+# the same thing in the decompiler (Hex-Rays keeps its own number formats)
+# --------------------------------------------------------------------------- #
+#: Hex-Rays prints C, so two of the listing's stops are missing here: binary
+#: (C has no binary literal -- the format takes and then renders decimal, which
+#: would be a lie on screen) and offset (it makes the function fail to
+#: decompile outright).
+_IDATUI_PC_FMT_CYCLE = ("hex", "dec", "oct", "char", "default")
+
+
+def _idatui_compact(line):
+    """The ida-pro-mcp whitespace collapse the pseudocode is served through, so
+    a column in what the client SHOWS can be mapped back to Hex-Rays' line."""
+    try:
+        from ida_pro_mcp.ida_mcp.utils import compact_whitespace
+        return compact_whitespace(line)
+    except Exception:
+        import re as _re
+        stripped = line.lstrip(" \t")
+        lead = line[: len(line) - len(stripped)]
+        return lead + _re.sub(r"[ \t]{2,}", " ", stripped)
+
+
+def _idatui_compact_col(plain, compact, col):
+    """The inverse of ``_idatui_uncompact_col``: a column in Hex-Rays' own line,
+    expressed in the collapsed line the client shows."""
+    j = 0
+    for i in range(min(int(col), len(plain))):
+        if j < len(compact) and plain[i] == compact[j]:
+            j += 1
+    return j
+
+
+def _idatui_uncompact_col(plain, compact, col):
+    """Map a column in the collapsed line back to the same character in the
+    original. The transform only ever DELETES spaces, so walking both in step
+    and skipping what vanished is exact."""
+    i = 0
+    for j in range(min(int(col), len(compact))):
+        c = compact[j]
+        while i < len(plain) and plain[i] != c:
+            i += 1
+        i += 1
+    return min(i, max(len(plain) - 1, 0))
+
+
+#: Characters that can be part of a C number literal as Hex-Rays prints one
+#: (digits, hex letters, the 0x prefix, u/L suffixes).
+_IDATUI_LIT_CHARS = frozenset("0123456789abcdefABCDEFxXuUlL")
+
+
+def _idatui_lit_extent(plain, x):
+    """The [start, end) of the literal token containing column ``x``.
+
+    Hex-Rays says WHICH item a column belongs to, but not how wide the printed
+    literal is -- and it attributes neighbouring punctuation to the same item,
+    so ``if ( a1 > 1 )`` reports the closing paren as part of the number. The
+    identity comes from the ctree; the extent is the run of literal characters
+    around the column, which cannot reach a ``)`` or a space."""
+    if x >= len(plain):
+        return None
+    if plain[x] == "'":                       # a character constant: '-'
+        end = plain.find("'", x + 1)
+        return (x, end + 1) if end > x else None
+    lo = plain.rfind("'", 0, x)
+    if lo >= 0 and plain.find("'", x) > x and "'" in plain[lo:x] and \
+            plain[lo:x].count("'") == 1 and " " not in plain[lo:x]:
+        return (lo, plain.find("'", x) + 1)   # inside 'c'
+    if plain[x] not in _IDATUI_LIT_CHARS:
+        return None
+    lo = x
+    while lo > 0 and plain[lo - 1] in _IDATUI_LIT_CHARS:
+        lo -= 1
+    hi = x
+    while hi < len(plain) and plain[hi] in _IDATUI_LIT_CHARS:
+        hi += 1
+    if lo > 0 and plain[lo - 1] == "-":       # a unary minus is part of it
+        lo -= 1
+    return (lo, hi)
+
+
+def _idatui_pc_nums(cf, sl):
+    """Every number literal on one pseudocode line, as
+    [{x0, x1, ea, opnum, value, nbytes, fmt}].
+
+    Asks Hex-Rays what each column belongs to rather than pattern-matching the
+    text: a regex over ``v6 = a1 - 1;`` has to guess which of those characters
+    are a literal, and ``v11`` looks like one."""
+    import ida_bytes
+    import ida_hexrays
+    import ida_lines
+    import idaapi
+
+    plain = ida_lines.tag_remove(sl.line)
+    out = []
+    x = 0
+    while x < len(plain):
+        ch = plain[x]
+        if ch not in _IDATUI_LIT_CHARS and ch != "'":
+            x += 1
+            continue
+        head, item, tail = (ida_hexrays.ctree_item_t() for _ in range(3))
+        if not cf.get_line_item(sl.line, x, True, head, item, tail):
+            x += 1
+            continue
+        if item.citype != ida_hexrays.VDI_EXPR:
+            x += 1
+            continue
+        e = item.e
+        if e.op != ida_hexrays.cot_num:
+            x += 1
+            continue
+        extent = _idatui_lit_extent(plain, x)
+        if extent is None:
+            x += 1
+            continue
+        nf = e.n.nf
+        opnum = ord(nf.opnum) if isinstance(nf.opnum, str) else int(nf.opnum)
+        nbytes = (ord(nf.org_nbytes) if isinstance(nf.org_nbytes, str)
+                  else int(nf.org_nbytes))
+        ea = int(e.ea)
+        if ea == idaapi.BADADDR:
+            x = extent[1]
+            continue                      # synthesised: nothing to key on
+        nib = (nf.flags >> ida_bytes.get_operand_type_shift(opnum)) & 0xF
+        # Whether this format is the USER's or Hex-Rays' own guess. The nibble
+        # can't say: an untouched number reads back as whatever it happens to
+        # be printed as, and cycling from there would skip that stop forever
+        # (default already looks like it) and never come back to it.
+        loc = ida_hexrays.operand_locator_t(ea, opnum)
+        user = (ida_hexrays.user_numforms_find(cf.numforms, loc)
+                != ida_hexrays.user_numforms_end(cf.numforms))
+        out.append({"x0": extent[0], "x1": extent[1], "ea": ea,
+                    "opnum": opnum, "value": int(e.n._value),
+                    "nbytes": nbytes, "user": user,
+                    "fmt": _idatui_fmt_name(nib) if user else "default",
+                    "shown": _idatui_fmt_name(nib)})
+        x = extent[1]                     # past this literal, not into it
+    return out
+
+
+@tool
+@idasync
+def pc_nums(
+    addr: Annotated[str, "Function address (or any address inside it)"],
+) -> dict:
+    """Every number literal in a function's pseudocode, as
+    [{line, x0, x1, ea, opnum, value, fmt, user}].
+
+    One call per decompilation, so a client can show WHICH literal the cursor is
+    on (and reformat exactly that one) without a round trip per cursor move.
+    Columns are in the same collapsed coordinates the decompile tool serves its
+    text in, i.e. what the client actually displays."""
+    import ida_hexrays
+    import ida_lines
+    import idaapi
+
+    if not ida_hexrays.init_hexrays_plugin():
+        return {"addr": str(addr), "error": "no decompiler", "nums": []}
+    try:
+        f = idaapi.get_func(parse_address(addr))
+    except Exception as e:
+        return {"addr": str(addr), "error": str(e), "nums": []}
+    if f is None:
+        return {"addr": str(addr), "error": "no function here", "nums": []}
+    try:
+        cf = ida_hexrays.decompile(f.start_ea)
+    except Exception as e:
+        return {"addr": hex(f.start_ea), "error": f"decompile failed: {e}",
+                "nums": []}
+    if cf is None:
+        return {"addr": hex(f.start_ea), "error": "decompilation failed",
+                "nums": []}
+    sv = cf.get_pseudocode()
+    out = []
+    for i in range(len(sv)):
+        plain = ida_lines.tag_remove(sv[i].line)
+        compact = _idatui_compact(plain)
+        for rec in _idatui_pc_nums(cf, sv[i]):
+            out.append({
+                "line": i,
+                "x0": _idatui_compact_col(plain, compact, rec["x0"]),
+                "x1": _idatui_compact_col(plain, compact, rec["x1"]),
+                "ea": hex(rec["ea"]), "opnum": rec["opnum"],
+                "value": hex(rec["value"]), "fmt": rec["fmt"],
+                "shown": rec["shown"], "user": bool(rec["user"]),
+            })
+    return {"addr": hex(f.start_ea), "nums": out, "lines": len(sv)}
+
+
+@tool
+@idasync
+def pc_num_format(
+    addr: Annotated[str, "Function address (or any address inside it)"],
+    mode: Annotated[str, "cycle | back | show | hex | dec | oct | char | default"] = "cycle",
+    line: Annotated[int, "0-based pseudocode line index"] = -1,
+    col: Annotated[int, "Cursor column in the DISPLAYED line (-1: first literal)"] = -1,
+    ea: Annotated[str, "Address of the number instead of line/col"] = "",
+    opnum: Annotated[int, "Operand number, with ``ea``"] = -1,
+) -> dict:
+    """Change how a number is displayed in the DECOMPILATION (Hex-Rays keeps its
+    own number formats, per (address, operand), independent of the listing).
+
+    Same stops as ``op_format`` minus the two C can't express: binary (no such
+    literal -- IDA takes the format and prints decimal anyway) and offset (it
+    makes the function stop decompiling). Returns the re-rendered line, and
+    marks the function dirty so the next decompile is the new text."""
+    import ida_hexrays
+    import ida_lines
+    import idaapi
+
+    if not ida_hexrays.init_hexrays_plugin():
+        return {"addr": str(addr), "error": "no decompiler"}
+    try:
+        f = idaapi.get_func(parse_address(addr))
+    except Exception as e:
+        return {"addr": str(addr), "error": str(e)}
+    if f is None:
+        return {"addr": str(addr), "error": "no function here"}
+    try:
+        cf = ida_hexrays.decompile(f.start_ea)
+    except Exception as e:
+        return {"addr": hex(f.start_ea), "error": f"decompile failed: {e}"}
+    if cf is None:
+        return {"addr": hex(f.start_ea), "error": "decompilation failed"}
+
+    sv = cf.get_pseudocode()
+    line = int(line)
+    target = None
+    if ea:
+        try:
+            want_ea = parse_address(ea)
+        except Exception as e:
+            return {"addr": hex(f.start_ea), "error": str(e)}
+        for i in range(len(sv)):
+            for rec in _idatui_pc_nums(cf, sv[i]):
+                if rec["ea"] == want_ea and (int(opnum) < 0
+                                             or rec["opnum"] == int(opnum)):
+                    target, line = rec, i
+                    break
+            if target:
+                break
+    elif 0 <= line < len(sv):
+        nums = _idatui_pc_nums(cf, sv[line])
+        if nums:
+            if int(col) >= 0:
+                plain = ida_lines.tag_remove(sv[line].line)
+                x = _idatui_uncompact_col(plain, _idatui_compact(plain), int(col))
+                target = next((r for r in nums if r["x0"] <= x < r["x1"]), None)
+            target = target or nums[0]
+    else:
+        return {"addr": hex(f.start_ea),
+                "error": f"line {line} is outside the {len(sv)}-line decompilation"}
+    if target is None:
+        return {"addr": hex(f.start_ea), "line": line,
+                "text": (ida_lines.tag_remove(sv[line].line).strip()
+                         if 0 <= line < len(sv) else ""),
+                "error": "no number literal on this line"}
+
+    cur, value = target["fmt"], target["value"]
+    choices = [c for c in _IDATUI_PC_FMT_CYCLE
+               if c != "char" or _idatui_printable(value)]
+    # Same rule as the listing: one ring per literal, every step. A format the
+    # ring can't hold (an enum set in the GUI) is reported on the way out
+    # instead of being kept for one lap and then lost.
+    lossy = cur not in choices and cur != "default"
+    out = {"addr": hex(f.start_ea), "ea": hex(target["ea"]),
+           "opnum": target["opnum"], "line": line, "prev": cur,
+           "format": cur, "shown": target["shown"], "choices": choices,
+           "value": hex(value),
+           "before": ida_lines.tag_remove(sv[line].line).strip()}
+
+    mode = str(mode or "cycle").lower()
+    if mode == "show":
+        out["text"] = out["before"]
+        out["applied"] = False
+        return out
+    if mode in ("cycle", "back"):
+        step = 1 if mode == "cycle" else -1
+        if cur in choices:
+            want = choices[(choices.index(cur) + step) % len(choices)]
+        else:
+            want = choices[0] if step > 0 else choices[-1]
+    else:
+        want = mode
+        if want in ("bin", "offset", "stack", "seg", "float"):
+            out["error"] = (f"Hex-Rays has no {want} format for a number "
+                            f"-- set it on the listing instead")
+            out["text"] = out["before"]
+            return out
+        if want not in ("hex", "dec", "oct", "char", "default"):
+            out["error"] = (f"unknown format {mode!r}; one of hex, dec, oct, "
+                            f"char, default")
+            out["text"] = out["before"]
+            return out
+
+    loc = ida_hexrays.operand_locator_t(target["ea"], target["opnum"])
+    it = ida_hexrays.user_numforms_find(cf.numforms, loc)
+    if it != ida_hexrays.user_numforms_end(cf.numforms):
+        # std::map::insert is a no-op on an existing key, so a format already
+        # set here would silently win over the new one.
+        ida_hexrays.user_numforms_erase(cf.numforms, it)
+    if want != "default":
+        import ida_bytes
+        nf = ida_hexrays.number_format_t(target["opnum"])
+        nf.flags = ida_bytes.get_operand_flag(_idatui_fmt_nibbles()[want],
+                                              target["opnum"])
+        try:
+            nf.org_nbytes = target["nbytes"]
+        except Exception:
+            pass
+        ida_hexrays.user_numforms_insert(cf.numforms, loc, nf)
+    cf.save_user_numforms()
+    try:
+        ida_hexrays.mark_cfunc_dirty(f.start_ea)
+    except Exception:
+        pass
+
+    out["format"] = want
+    out["applied"] = True
+    if lossy:
+        out["warn"] = (f"this number was {cur}, which names a type a radix "
+                       f"can't put back -- reassign it in IDA")
+    try:
+        cf2 = ida_hexrays.decompile(f.start_ea,
+                                    flags=ida_hexrays.DECOMP_NO_CACHE)
+        sv2 = cf2.get_pseudocode() if cf2 is not None else None
+        out["text"] = (ida_lines.tag_remove(sv2[line].line).strip()
+                       if sv2 is not None and line < len(sv2) else out["before"])
+    except Exception as e:
+        out["text"] = out["before"]
+        out["warn"] = f"re-render failed: {e}"
+    return out
+
+
 '''
 
 SNIPPET = f"{BEGIN}\n{BODY.strip()}\n{END}\n"
