@@ -2956,6 +2956,67 @@ async def s_graph_click(c: Ctx):
             f"node={gv.cursor_node} want={target.id}")
 
 
+@scenario("graph_minimap")
+async def s_graph_minimap(c: Ctx):
+    """The minimap floats over the canvas, so it must be hit-tested BEFORE the
+    canvas -- otherwise a click on it reads as canvas coordinates and drops the
+    cursor into whatever block happens to lie underneath."""
+    app = c.app
+    fn, gv = await _open_graph(c)
+    if gv.lay is None:
+        c.check("graph loaded", False)
+        return
+    rect = gv._minimap_rect()
+    c.check("the minimap has a hit-box while it's shown", rect is not None,
+            f"size={gv.size} shown={gv._show_minimap}")
+    if rect is None:
+        return
+    left, top, mw, mh = rect
+    c.check("it sits inside the pane, clear of the scrollbar",
+            left + mw <= gv.size.width - 1,
+            f"left={left} w={mw} pane={gv.size.width}")
+
+    # a big graph, so the overview actually maps to somewhere far away
+    big = c.find_func(lambda f: f.size > 0x300) or fn
+    await c.open(big.addr, "listing")
+    c.lst.focus()
+    await c.press("space")
+    await c.wait(lambda: app._active == "graph" and gv.lay is not None, 60)
+    if gv.lay is None or gv.lay.height < gv.size.height * 2:
+        c.check("a graph tall enough to scrub", True, "(skipped: too small)")
+        return
+
+    gv.scroll_to(y=0, x=0, animate=False)
+    await c.pause(0.1)
+    node_before = gv.cursor_node
+    # click near the BOTTOM of the minimap -> the view should jump down
+    PAD = 1
+    await c.pilot.click(GraphView, offset=(PAD + left + mw // 2, top + mh - 2))
+    await c.pause(0.2)
+    c.check("clicking low on the minimap scrolls the view down",
+            gv.scroll_offset.y > 0, f"scroll_y={gv.scroll_offset.y}")
+    landed = gv.lay.by_id.get(gv.cursor_node)
+    c.check("the cursor moved to a block near where we pointed, not a stray one",
+            landed is not None
+            and (gv.cursor_node == node_before
+                 or landed.y >= int(gv.scroll_offset.y) - gv.size.height),
+            f"node={gv.cursor_node} y={landed.y if landed else None} "
+            f"scroll={gv.scroll_offset.y}")
+
+    # and the top of the minimap brings it back
+    await c.pilot.click(GraphView, offset=(PAD + left + mw // 2, top + 1))
+    await c.pause(0.2)
+    c.check("clicking high on the minimap scrolls back up",
+            gv.scroll_offset.y == 0, f"scroll_y={gv.scroll_offset.y}")
+
+    # with the minimap hidden the same click is an ordinary canvas click
+    await c.press("m")
+    await c.pause(0.1)
+    c.check("no hit-box once it's hidden", gv._minimap_rect() is None)
+    await c.press("m")
+    await c.pause(0.1)
+
+
 @scenario("graph_rename")
 async def s_graph_rename(c: Ctx):
     """Editing verbs must work from inside a box -- that is the whole point of

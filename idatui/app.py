@@ -2057,6 +2057,7 @@ class GraphView(NavMixin, ScrollView, can_focus=True):
         self._show_minimap = True
         self._mini_cache: tuple | None = None
         self._drag: tuple[int, int, float, float] | None = None
+        self._drag_map = False      # the drag started on the minimap
         self._hl_word = ""
         self.trail: dict[int, str] | None = None
 
@@ -2366,21 +2367,82 @@ class GraphView(NavMixin, ScrollView, can_focus=True):
             self.scroll_to(y=y, x=x, animate=False)
         self.call_after_refresh(_again)
 
-    # -- mouse ------------------------------------------------------------ #
+    # -- minimap hit-testing ----------------------------------------------- #
+    def _minimap_rect(self) -> tuple[int, int, int, int] | None:
+        """(left, top, w, h) of the minimap in CONTENT coordinates, or None.
+
+        The minimap is pinned to the viewport, not the canvas, so these are
+        screen-relative and the scroll offset must NOT be added. Must agree with
+        _draw_minimap_row, which is why both take the inset from here.
+        """
+        if not self._show_minimap or self.lay is None:
+            return None
+        w, h = self.size.width, self.size.height
+        if w < _MINI_W + 10 or h < _MINI_H + 2:
+            return None
+        return (w - _MINI_W - 2, 0, _MINI_W, _MINI_H)
+
+    def _minimap_seek(self, x: int, y: int, move_cursor: bool = False) -> bool:
+        """Treat (x, y) as a point on the minimap and centre the view there.
+
+        Returns False if the point isn't on the minimap, so the caller can fall
+        through to ordinary canvas hit-testing.
+        """
+        rect = self._minimap_rect()
+        if rect is None or self.lay is None:
+            return False
+        left, top, _w, _h = rect
+        gw, gh = _MINI_W - 2, _MINI_H - 2
+        c, r = x - left - 1, y - top - 1        # inside the border
+        if not (0 <= c < gw and 0 <= r < gh):
+            return False
+        lay = self.lay
+        sx = max(lay.width / gw, 1e-9)
+        sy = max(lay.height / gh, 1e-9)
+        cx, cy = (c + 0.5) * sx, (r + 0.5) * sy   # centre of that mini-cell
+        self.scroll_to(x=max(0, int(cx - self.size.width / 2)),
+                       y=max(0, int(cy - self.size.height / 2)), animate=False)
+        if move_cursor:
+            # Land the cursor on a block if the click was over one, so the
+            # keyboard carries on from where you pointed instead of snapping
+            # back to wherever it was.
+            n = lay.node_at(int(cy), int(cx))
+            if n is not None and n.block is not None:
+                self.cursor_node = n.id
+                self.cursor_row = 0
+                self.cursor_x = 0
+                self._clamp_cursor()
+                self.post_message(
+                    self.CursorMoved(self._cursor_ea(), self.cursor_node))
+        self.refresh()
+        return True
+
+    # -- mouse ------------------------------------------------------------- #
     def on_mouse_down(self, event) -> None:  # type: ignore[no-untyped-def]
         off = event.get_content_offset(self)
         if off is None:
             return
+        if self._minimap_seek(off.x, off.y):
+            self._drag = None
+            self._drag_map = True    # keep scrubbing while the button is held
+            return
+        self._drag_map = False
         self._drag = (off.x, off.y, self.scroll_offset.x, self.scroll_offset.y)
 
     def on_mouse_up(self, event) -> None:  # type: ignore[no-untyped-def]
         self._drag = None
+        self._drag_map = False
 
     def on_mouse_move(self, event) -> None:  # type: ignore[no-untyped-def]
-        if self._drag is None or not event.button:
+        if not event.button:
             return
         off = event.get_content_offset(self)
         if off is None:
+            return
+        if self._drag_map:
+            self._minimap_seek(off.x, off.y)   # drag = scrub the overview
+            return
+        if self._drag is None:
             return
         x0, y0, sx, sy = self._drag
         self.scroll_to(x=max(0, sx + (x0 - off.x)), y=max(0, sy + (y0 - off.y)),
@@ -2391,6 +2453,12 @@ class GraphView(NavMixin, ScrollView, can_focus=True):
             return
         off = event.get_content_offset(self)
         if off is None:
+            return
+        # The minimap floats over the canvas, so it has to be tested FIRST --
+        # otherwise a click on it is read as canvas coordinates and drops the
+        # cursor into whatever block happens to lie underneath.
+        if self._minimap_seek(off.x, off.y, move_cursor=True):
+            self.focus()
             return
         row = off.y + int(self.scroll_offset.y)
         col = off.x + int(self.scroll_offset.x)
@@ -2546,13 +2614,11 @@ class GraphView(NavMixin, ScrollView, can_focus=True):
         return grid
 
     def _draw_minimap_row(self, out: _CellRow, y: int, width: int) -> None:
-        if width < _MINI_W + 10 or self.size.height < _MINI_H + 2 or self.lay is None:
-            return
-        if not (0 <= y < _MINI_H):
-            return
-        # Inset by one: a ScrollView paints its vertical scrollbar over the last
+        # Inset by two: a ScrollView paints its vertical scrollbar over the last
         # column, which otherwise eats the minimap's right border.
-        left = width - _MINI_W - 2
+        if self._minimap_rect() is None or not (0 <= y < _MINI_H):
+            return
+        left = self._minimap_rect()[0]   # one source of truth with the hit-test
         grid = self._minimap()
         gw, gh = _MINI_W - 2, _MINI_H - 2
         lay = self.lay
@@ -3024,6 +3090,7 @@ _HELP = (
         ("f", "centre on the current block"),
         ("Enter", "follow (stays in the graph if it lands here)"),
         ("drag / click", "pan / put the cursor in a block"),
+        ("click minimap", "jump the view there (drag to scrub)"),
     )),
 )
 
