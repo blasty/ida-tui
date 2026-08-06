@@ -64,7 +64,7 @@ def _fmt_where(st: dict) -> str:
     ea = fn.get("ea")
     loc = f"{name} @ {ea:#x}" if isinstance(ea, int) else "(none)"
     extra = ""
-    if cur.get("kind") in ("decomp", "disasm"):
+    if cur.get("kind") in ("decomp", "listing"):
         extra = f"  L{cur.get('line')} C{cur.get('col')} word={cur.get('word')!r}"
     elif cur.get("kind") == "hex":
         extra = f"  va={cur.get('va'):#x}" if isinstance(cur.get("va"), int) else ""
@@ -87,10 +87,10 @@ def cmd_go(c, args):
 def _show_view(c, want):
     """Make the requested code pane the visibly-active view (best effort).
 
-    Tab toggles disasm<->decomp, and leaves hex back to the preferred code
+    Tab toggles listing<->decomp, and leaves hex back to the preferred code
     view; so at most two toggles reach either code view from any state. If
-    the decompiler fails for the current function the view falls back to
-    disasm and we simply stop — the caller still returns its text as before.
+    the decompiler fails for the current function the view falls back to the
+    listing and we simply stop — the caller still returns its text as before.
     """
     for _ in range(2):
         if c.call("state").get("active") == want:
@@ -132,7 +132,7 @@ def cmd_dis(c, args):
     # Drive the real UI so viewers see the disassembly, not just the driver.
     if target is not None:
         c.call("goto", target=target, delay_ms=0)
-    _show_view(c, "disasm")
+    _show_view(c, "listing")
     d = c.call("disassembly", target=target, max=n)
     return "\n".join(f"{ln['ea']:#010x}  {ln['text']}" for ln in d.get("lines", []))
 

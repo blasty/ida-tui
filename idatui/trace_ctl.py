@@ -143,7 +143,7 @@ class TraceController:
         # from the pseudocode navigates to an address, which opens the listing —
         # so stepping through C threw you out of C on the first keypress.
         app._goto_ea(pc, push=False,
-                     prefer_decomp=(app._active == "decomp"))
+                     prefer_decomp=(app.is_decomp))
 
     def seek_split(self, pc: int) -> bool:
         """Put BOTH panes on ``pc``. True if handled.
@@ -342,7 +342,7 @@ class TraceController:
         if not self._need_trace():
             return
         t = self.trace
-        if app._active == "hex":
+        if app.is_hex:
             hx = app._try_view(M.HexView)
             va = hx.cursor_va() if hx is not None else None
             if va is None:

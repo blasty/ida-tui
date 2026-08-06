@@ -632,6 +632,55 @@ async def s_strings(c: Ctx):
         await c.press("escape")
 
 
+@scenario("view_modes_all_handled")
+async def s_view_modes_all_handled(c: Ctx):
+    """Every ViewMode must be handled by every switch that reads _active.
+
+    Adding "graph" meant auditing each `_active ==` in the app, and the one that
+    was missed -- _active_code_view returning None -- crashed the app the first
+    time a prompt closed in graph mode. There used to be a fifth value,
+    "disasm", assigned on one path and understood by four sites out of nine.
+
+    So: walk the enum, and for each member show it and ask the app the questions
+    it asks itself. Cheap (no worker calls, just mode switches) and it fails on
+    the next mode that forgets to appear somewhere.
+    """
+    from idatui.app import ViewMode
+    app = c.app
+    fn = await c.open_biggest("listing")
+    try:
+        for mode in ViewMode:
+            app._active = mode
+            app._show_active()          # must not raise for any member
+            await c.pause(0.05)
+            view = app._active_code_view()
+            if mode in ViewMode.code_modes():
+                c.check(f"{mode.value}: _active_code_view resolves a widget",
+                        view is not None, f"{mode.value} -> None")
+            c.check(f"{mode.value}: exactly one predicate is true",
+                    sum((app.is_listing, app.is_decomp,
+                         app.is_hex, app.is_graph)) == 1,
+                    f"{mode.value}: listing={app.is_listing} "
+                    f"decomp={app.is_decomp} hex={app.is_hex} graph={app.is_graph}")
+            c.check(f"{mode.value}: in_code agrees with code_modes()",
+                    app.in_code == (mode in ViewMode.code_modes()),
+                    f"in_code={app.in_code} for {mode.value}")
+        c.check("every mode is a plain string over the wire",
+                all(isinstance(m, str) and m == m.value for m in ViewMode),
+                str([repr(m) for m in ViewMode]))
+        c.check("'disasm' is not a mode any more",
+                "disasm" not in {m.value for m in ViewMode},
+                str([m.value for m in ViewMode]))
+    finally:
+        # Restore through a real navigation, not by poking _active back.
+        # _show_active() tears down split state and re-points the panes as a
+        # side effect, and reset() doesn't rebuild any of that -- leaving it
+        # half-torn-down made split_view fail two scenarios later with an empty
+        # listing model, which reads as split_view's bug and isn't.
+        app._active = ViewMode.LISTING
+        await c.open(fn.addr, "listing")
+
+
 @scenario("split_view")
 async def s_split_view(c: Ctx):
     app, lst, dec = c.app, c.lst, c.dec
@@ -841,7 +890,7 @@ async def s_fallback(c: Ctx):
     c.check("F5/Tab on an undecompilable function says so", landed,
             f"active={app._active} status={c.status()!r}")
     c.check("F5/Tab on an undecompilable function falls back to a code view",
-            app._active in ("listing", "disasm") and c.dis.display,
+            app.is_listing and c.dis.display,
             f"active={app._active} status={c.status()!r}")
     # a decompilable function F5s into pseudocode
     await c.open("main", "decomp")
@@ -1359,7 +1408,7 @@ async def s_follow_xrefs(c: Ctx):
         await c.press("tab")
         landed = await c.wait(
             lambda: (app._active == "decomp" and dec.loaded_ea == xref.fn_addr)
-            or (app._active in ("listing", "disasm")
+            or (app.is_listing
                 and _CANNOT_DECOMP in c.status().lower()), 25)
         if app._active == "decomp":
             c.check("F5 at the xref site decompiles the referencing function",
@@ -2335,7 +2384,7 @@ async def s_continuous_view(c: Ctx):
     c.lst.focus()
     await c.press("tab")
     await c.wait(lambda: (app._active == "decomp" and c.dec.loaded_ea == fn_ea)
-                 or (app._active in ("listing", "disasm")
+                 or (app.is_listing
                 and _CANNOT_DECOMP in c.status().lower()), 25)
     if app._active == "decomp":
         c.check("F5/Tab decompiles the function under the cursor",

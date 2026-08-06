@@ -22,6 +22,7 @@ import re
 import subprocess
 import time
 from dataclasses import dataclass, field
+from enum import StrEnum
 
 from rich.align import Align
 from rich.segment import Segment
@@ -89,6 +90,42 @@ _OP_LIMIT = 8         # opcode bytes shown in the 'limited' column mode
 _JUMP_CONTEXT = 4     # lines of context kept above a jump target (cursor stays on it)
 _SPLIT_MIN_WIDTH = 100  # need room for two usable code panes side by side
 
+
+class ViewMode(StrEnum):
+    """Which pane is showing (in split: which one has focus). ``IdaTui._active``.
+
+    A ``StrEnum`` rather than an enum, deliberately: ``_active`` is handed
+    straight to drivers as ``cursor.kind`` over the RPC socket, and the pilot
+    suite compares it to plain strings. Members ARE strings, so every existing
+    comparison and every JSON payload keeps working -- what this buys is one
+    place that says which modes exist, and an AttributeError instead of silence
+    when one is misspelled.
+
+    There used to be a fifth value, ``"disasm"``, assigned on exactly one path
+    (a decompile that failed with nowhere to return to) and meaning the same
+    widget as ``LISTING``. Four sites handled it and five compared against
+    ``"listing"`` alone, so it silently took the wrong branch in half the app --
+    Tab out of a failed decompile flipped to the listing instead of retrying the
+    decompiler, and rpc.py carried a workaround for a mode change that never
+    arrived. It is gone; the failure path lands on LISTING like every other
+    route into the listing.
+
+    Adding a mode means auditing every ``_active`` comparison. Prefer the
+    predicates on IdaTui (``is_listing``/``in_code``/...) over bare ``==`` so
+    the next one has fewer places to reach.
+    """
+
+    LISTING = "listing"   # the unified continuous listing (code + data)
+    DECOMP = "decomp"     # Hex-Rays pseudocode
+    HEX = "hex"           # the hex viewer
+    GRAPH = "graph"       # the CFG graph view
+
+    #: The two that show a code view over a NavEntry, i.e. where a follow, an
+    #: xref or a rename makes sense.
+    @classmethod
+    def code_modes(cls) -> frozenset["ViewMode"]:
+        return frozenset({cls.LISTING, cls.DECOMP, cls.GRAPH})
+
 # Tokens that look like identifiers but aren't renamable symbols (so 'n' on them
 # in the listing names the address instead of trying to rename the token).
 _ASM_KEYWORDS = frozenset({
@@ -144,7 +181,7 @@ class BinaryState:
     func_index: object | None = None
     nav: list = field(default_factory=list)
     cur: object | None = None
-    active: str = "listing"
+    active: ViewMode = ViewMode.LISTING
     split: bool = False
     filter_term: str = ""
     dirty: bool = False
@@ -4489,7 +4526,7 @@ class IdaTui(App):
         # ONE notion of "which pane you're in": _active, kept in step with focus
         # (on_descendant_focus does that while split). There used to be a second,
         # _pref, but it was only ever assigned "listing" — see _code_mode().
-        self._active = "listing"  # currently shown view (in split: the focused pane)
+        self._active = ViewMode.LISTING  # currently shown view (in split: the focused pane)
         self._split = False       # side-by-side listing + pseudocode
         self._graph_sticky = False  # stay in graph mode across navigations
         self._split_eamap: list[list[int]] = []  # split: decomp line -> instr EAs
@@ -5424,7 +5461,7 @@ class IdaTui(App):
         self._pool.set_active(label)
         self._open_path = self._project.by_label(label).staged
         self._title = os.path.basename(self._open_path)
-        self._active = st.active if st else "listing"
+        self._active = st.active if st else ViewMode.LISTING
         self._split = st.split if st else False
         self._filter_term = st.filter_term if st else ""
         self._dirty = st.dirty if st else False
@@ -5542,24 +5579,24 @@ class IdaTui(App):
             return
         if self._split:
             # In split mode Tab/F5 just moves focus between the two panes.
-            self._active = "decomp" if self._active == "listing" else "listing"
-            (self.query_one(DecompView) if self._active == "decomp"
+            self._active = ViewMode.DECOMP if self.is_listing else ViewMode.LISTING
+            (self.query_one(DecompView) if self.is_decomp
              else self.query_one(ListingView)).focus()
             self._sync_split(self._active)  # re-link from the new driver
             self._status_for_cur("split")
             return
-        if self._active == "hex":
+        if self.is_hex:
             self._active = self._code_mode()
             self._show_active()
             return
-        if self._active == "graph":
+        if self.is_graph:
             # F5/Tab out of the graph lands in the pseudocode at the block the
             # cursor was on (Space is the key that returns to the listing).
             gv = self.query_one(GraphView)
             ea = gv._cursor_ea()
             self._graph_sticky = False
             if ea is None:
-                self._active = "listing"
+                self._active = ViewMode.LISTING
                 self._show_active()
                 return
             gv.display = False
@@ -5570,7 +5607,7 @@ class IdaTui(App):
             self._status("decompiling…")
             self._decomp_from_listing(ea)
             return
-        if self._active == "listing":
+        if self.is_listing:
             # F5/Tab in the continuous listing: decompile the function under the
             # cursor (IDA-style), if the cursor is inside a defined routine.
             ea = self.query_one(ListingView)._cursor_ea()
@@ -5595,7 +5632,7 @@ class IdaTui(App):
         self._decomp_return = None
         if ret is not None:
             self._cur = ret
-            self._active = "listing"
+            self._active = ViewMode.LISTING
             self._open_entry(ret, push=False)
         elif self._cur is not None:
             # No F5 snapshot (we arrived via a decomp navigation): show THIS entry
@@ -5606,7 +5643,7 @@ class IdaTui(App):
             ea = dec._line_ea(dec.cursor)
             self._toggle_to_listing(ea if ea is not None else self._cur.ea)
         else:
-            self._active = "listing"
+            self._active = ViewMode.LISTING
             self._show_active()
 
     @work(thread=True, group="nav")
@@ -5619,14 +5656,14 @@ class IdaTui(App):
     def _apply_toggle_listing(self, idx: int) -> None:
         cur = self._cur
         if cur is None:
-            self._active = "listing"
+            self._active = ViewMode.LISTING
             self._show_active()
             return
         cur.view = "listing"
         cur.cursor = idx
         cur.cursor_x = 0
         cur.scroll_y = -1  # derive a viewport (keeps the target in context)
-        self._active = "listing"
+        self._active = ViewMode.LISTING
         self._open_entry(cur, push=False)
 
     @work(thread=True, group="nav")
@@ -5645,7 +5682,7 @@ class IdaTui(App):
         # We optimistically raised the pseudocode overlay; drop back to the
         # listing since there's nothing to decompile here.
         self.query_one(DecompView).loading = False
-        self._active = "listing"
+        self._active = ViewMode.LISTING
         self._show_active()
         self._status(msg)
 
@@ -5661,7 +5698,7 @@ class IdaTui(App):
         entry = NavEntry(ea=fn_addr, name=fn_name, is_region=False,
                          dec_cursor=max(dec_idx, 0))
         self._cur = entry
-        self._active = "decomp"
+        self._active = ViewMode.DECOMP
         self._show_active()
 
     def action_toggle_split(self) -> None:
@@ -5677,7 +5714,7 @@ class IdaTui(App):
             return
         self._split = not self._split
         if self._active not in ("listing", "decomp"):
-            self._active = "listing"
+            self._active = ViewMode.LISTING
         if self._split:
             self._enter_split(self._cur.ea, self._cur.name)
         else:
@@ -5692,7 +5729,7 @@ class IdaTui(App):
         """Space: swap the code view for the function's control-flow graph."""
         if self._prompt_active():
             return
-        if self._active == "graph":
+        if self.is_graph:
             self._graph_sticky = False
             self._active = self._code_mode()
             self._show_active()
@@ -5705,7 +5742,7 @@ class IdaTui(App):
         ea = self._graph_target_ea()
         if gv.loaded_ea is not None and gv.fc is not None \
                 and gv.fc.func_ea == self._cur.ea:
-            self._active = "graph"
+            self._active = ViewMode.GRAPH
             self._split = False
             self._show_active()
             if ea is not None:
@@ -5719,9 +5756,9 @@ class IdaTui(App):
         """The address the graph should land on: wherever the code view's cursor
         is, so Space doesn't lose your place."""
         try:
-            if self._active in ("listing", "disasm"):
+            if self.is_listing:
                 return self.query_one(ListingView)._cursor_ea()
-            if self._active == "decomp":
+            if self.is_decomp:
                 dv = self.query_one(DecompView)
                 return dv._line_ea(dv.cursor)
         except Exception:  # noqa: BLE001
@@ -5745,7 +5782,7 @@ class IdaTui(App):
                      err: str) -> None:
         if self._cur is None or self._cur.ea != func_ea:
             return  # a newer navigation won
-        if not self._graph_sticky and self._active != "graph":
+        if not self._graph_sticky and not self.is_graph:
             # The load lost its race: the user has since left graph mode (or a
             # rename's reload queued one behind their back). Forcing the view
             # here drags them back into a graph they already dismissed.
@@ -5761,7 +5798,7 @@ class IdaTui(App):
             return
         gv = self.query_one(GraphView)
         gv.set_graph(fc, want_ea)
-        self._active = "graph"
+        self._active = ViewMode.GRAPH
         self._split = False
         self._show_active()
         self._graph_status()
@@ -5808,19 +5845,19 @@ class IdaTui(App):
         cursor; press again (or Tab/Esc) to return to the code view."""
         if self._cur is None or self.program is None:
             return
-        if self._active == "hex":
+        if self.is_hex:
             self._active = self._code_mode()
             self._show_active()
             return
-        if self._active in ("listing", "disasm"):
+        if self.is_listing:
             ea = self.query_one(ListingView)._cursor_ea()
-        elif self._active == "graph":
+        elif self.is_graph:
             ea = self.query_one(GraphView)._cursor_ea()
         else:
             dec = self.query_one(DecompView)
             ea = dec._line_ea(dec.cursor)
         self._hex_pending_ea = ea if ea is not None else self._cur.ea
-        self._active = "hex"
+        self._active = ViewMode.HEX
         self._show_active()
 
     def action_filter(self) -> None:
@@ -5833,7 +5870,7 @@ class IdaTui(App):
 
     def action_goto(self) -> None:
         inp = self.query_one("#goto", Input)
-        inp.placeholder = ("hex goto: 0xADDR or name — Enter" if self._active == "hex"
+        inp.placeholder = ("hex goto: 0xADDR or name — Enter" if self.is_hex
                            else "goto: name or 0xADDR — Enter")
         inp.can_focus = True
         inp.display = True
@@ -6256,7 +6293,7 @@ class IdaTui(App):
         # If xrefs was invoked from the decompiler, land the jump back in the
         # decompiler (when the target is decompilable) rather than the listing.
         self._goto_ea(addr, push=True, focus_name=self._xref_focus_name,
-                      prefer_decomp=(self._active == "decomp"))
+                      prefer_decomp=(self.is_decomp))
 
     # -- database edits ---------------------------------------------------- #
     # The bodies live in EditController (idatui/edit_ctl.py). What stays here is
@@ -6493,7 +6530,7 @@ class IdaTui(App):
             # Snapshot where we jumped from so 'back' returns there. If that was
             # the pseudocode (F5 makes a transient _cur not yet on the stack),
             # record its position and push it as a decomp entry.
-            if self._active == "decomp" and self._cur is not None:
+            if self.is_decomp and self._cur is not None:
                 dv = self.query_one(DecompView)
                 src = self._cur
                 src.view = "decomp"
@@ -6720,7 +6757,7 @@ class IdaTui(App):
                 self._end_search(cancel=True)
             elif prompt.id == "goto":
                 self._end_goto()
-                (self.query_one(HexView) if self._active == "hex"
+                (self.query_one(HexView) if self.is_hex
                  else (self._code_view() or self.query_one(ListingView))).focus()
             else:
                 prompt.close()
@@ -6762,7 +6799,7 @@ class IdaTui(App):
             return
         if inp.id == "goto":
             self._end_goto()
-            (self.query_one(HexView) if self._active == "hex"
+            (self.query_one(HexView) if self.is_hex
              else (self._code_view() or self.query_one(ListingView))).focus()
             if value:
                 self._goto(value)
@@ -6791,6 +6828,30 @@ class IdaTui(App):
             return view._line_ea(view.cursor)
         return None
 
+    # Read _active through these rather than comparing strings. The bare
+    # comparisons are what let the old "disasm" value take the wrong branch in
+    # five places, and they are what the next new mode would have to hunt down.
+    @property
+    def is_listing(self) -> bool:
+        return self._active == ViewMode.LISTING
+
+    @property
+    def is_decomp(self) -> bool:
+        return self._active == ViewMode.DECOMP
+
+    @property
+    def is_hex(self) -> bool:
+        return self._active == ViewMode.HEX
+
+    @property
+    def is_graph(self) -> bool:
+        return self._active == ViewMode.GRAPH
+
+    @property
+    def in_code(self) -> bool:
+        """A code view over a NavEntry -- where follow/xrefs/rename mean something."""
+        return self._active in ViewMode.code_modes()
+
     def _active_code_view(self):  # type: ignore[no-untyped-def]
         """The currently-shown code widget (for reading the cursor address).
 
@@ -6799,11 +6860,11 @@ class IdaTui(App):
         dereferences it crashes the app (which is exactly how graph mode
         announced itself the first time it was driven).
         """
-        if self._active in ("listing", "disasm"):
+        if self.is_listing:
             return self.query_one(ListingView)
-        if self._active == "decomp":
+        if self.is_decomp:
             return self.query_one(DecompView)
-        if self._active == "graph":
+        if self.is_graph:
             return self.query_one(GraphView)
         return None
 
@@ -6859,12 +6920,12 @@ class IdaTui(App):
         except Exception as e:  # noqa: BLE001
             self.app.call_from_thread(self._status, f"goto: {e}")
             return
-        if self._active == "hex":
+        if self.is_hex:
             self.app.call_from_thread(self._hex_goto, ea)
             return
         # A goto that lands inside the graph you're already looking at should
         # move the cursor, not tear the picture down and build the same one.
-        if self._active == "graph":
+        if self.is_graph:
             gv = self.query_one(GraphView)
             if gv.fc is not None and gv.fc.block_at(ea) is not None:
                 self.app.call_from_thread(gv.goto_ea, ea)
@@ -6911,9 +6972,9 @@ class IdaTui(App):
         self._do_navigate(ea, push)
 
 
-    def _code_mode(self) -> str:
+    def _code_mode(self) -> ViewMode:
         """The code view to return to from hex — always the unified listing."""
-        return "listing"
+        return ViewMode.LISTING
 
     def _open_entry(self, entry: NavEntry, push: bool) -> None:
         if self.program is None:
@@ -6924,7 +6985,7 @@ class IdaTui(App):
         if entry.view == "decomp":
             # This entry was viewed in the decompiler (a jump from pseudocode, or
             # a back/forward to one) — restore it there instead of the listing.
-            self._active = "decomp"
+            self._active = ViewMode.DECOMP
             dec = self.query_one(DecompView)
             if dec.loaded_ea == entry.ea:
                 # already decompiled: reposition without a recompile
@@ -6953,7 +7014,7 @@ class IdaTui(App):
             lst.load(
                 lm, entry.name, cursor=entry.cursor,
                 cursor_x=entry.cursor_x, scroll_y=sy, focus=focus)
-        self._active = "listing"
+        self._active = ViewMode.LISTING
         self._show_active()
         # Graph mode is sticky: following a call from the graph should land in
         # the callee's graph, not dump you back into the listing. The rebuild is
@@ -6983,7 +7044,7 @@ class IdaTui(App):
         # Don't steal focus from an open prompt (search/rename/…) — a late async
         # navigation completing here would otherwise pull it into the code view.
         grab = not self._prompt_active()
-        if self._split and self._active in ("listing", "decomp"):
+        if self._split and self._active in (ViewMode.LISTING, ViewMode.DECOMP):
             # Side-by-side: listing (left) + pseudocode (right), one focused.
             hx.display = gv.display = False
             lst.display = dec.display = True
@@ -6995,7 +7056,7 @@ class IdaTui(App):
             else:
                 dec.loading = False
             if grab:
-                (dec if self._active == "decomp" else lst).focus()
+                (dec if self.is_decomp else lst).focus()
             if busy and self._cur is not None:
                 # Keep the in-flight message: the idle status used to overwrite
                 # it, so travelling history in split showed nothing at all while
@@ -7012,18 +7073,18 @@ class IdaTui(App):
         self._split_ea2line = {}
         self._split_range = None
         dec.display = lst.display = hx.display = gv.display = False
-        if self._active == "graph":
+        if self.is_graph:
             gv.display = True
             if grab:
                 gv.focus()
             self._graph_status()
             return
-        if self._active in ("listing", "disasm"):
+        if self.is_listing:
             lst.display = True
             if grab:
                 lst.focus()
             self._status_for_cur("listing")
-        elif self._active == "hex":
+        elif self.is_hex:
             hx.display = True
             if grab:
                 hx.focus()
@@ -7064,7 +7125,7 @@ class IdaTui(App):
             self._status("hex: no loaded segments")
             return
         hx.load(model, ea)
-        if self._active == "hex":
+        if self.is_hex:
             hx.focus()
 
     def _hex_status(self, va: int) -> None:
@@ -7117,14 +7178,14 @@ class IdaTui(App):
             detail = f" \u2014 {why}" if why else ""
             # No pseudocode for this function: fall back to the code view rather
             # than an error panel. If we came from the continuous listing (F5),
-            # return there; otherwise show the disassembly.
+            # return to exactly where we left; otherwise just show the listing.
             if self._cur is None or self._cur.ea != ea:
                 return  # navigated away; stale result
             if self._decomp_return is not None:
                 ret = self._decomp_return
                 self._decomp_return = None
                 self._cur = ret
-                self._active = "listing"
+                self._active = ViewMode.LISTING
                 # Hand the reason over as a flash BEFORE reopening: going back
                 # to the listing reloads it, and the reload writes its own
                 # status afterwards — which is precisely how "F5 does nothing"
@@ -7133,11 +7194,14 @@ class IdaTui(App):
                 self._status(msg, priority=True)
                 self._open_entry(ret, push=False)
                 return
-            self._active = "disasm"
+            # LISTING, not the old "disasm": it is the same widget, and a value
+            # only this path produced meant half the app took the wrong branch
+            # for it (see ViewMode).
+            self._active = ViewMode.LISTING
             self._status(f"{name}: cannot decompile{detail}", priority=True)
             self._show_active()
             return
-        if self._active == "decomp":
+        if self.is_decomp:
             view.focus()  # loading cover had blurred it; restore focus
         # Restore the saved pseudocode position when returning to this function.
         cur = self._cur
@@ -7231,11 +7295,11 @@ class IdaTui(App):
         return top, 0
 
     def on_listing_view_scrolled(self, msg: "ListingView.Scrolled") -> None:
-        if self._split and self._active == "listing":
+        if self._split and self.is_listing:
             self._sync_split("listing")
 
     def on_decomp_view_scrolled(self, msg: "DecompView.Scrolled") -> None:
-        if self._split and self._active == "decomp":
+        if self._split and self.is_decomp:
             self._sync_split("decomp")
 
     @work(thread=True, group="split-resync", exclusive=True)
@@ -7267,7 +7331,7 @@ class IdaTui(App):
         """A split-aware status line reflecting the focused pane + the link."""
         if self._cur is None:
             return
-        if self._active == "decomp":
+        if self.is_decomp:
             dec = self.query_one(DecompView)
             ea = dec._line_ea(dec.cursor)
             n = (len(self._split_eamap[dec.cursor])
@@ -7340,7 +7404,7 @@ class IdaTui(App):
             self._nav[-1].dec_cursor = msg.index
             self._nav[-1].dec_cursor_x = dv.cursor_x
         if self._split:
-            if self._active == "decomp":
+            if self.is_decomp:
                 self._sync_split("decomp")
             self._split_status()
             return
@@ -7366,7 +7430,7 @@ class IdaTui(App):
             if msg.index >= 0:
                 self._nav[-1].scroll_y = round(lst.scroll_offset.y)
         if self._split:
-            if self._active == "listing":
+            if self.is_listing:
                 self._sync_split("listing")
             self._split_status()
             return

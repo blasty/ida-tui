@@ -64,7 +64,7 @@ class EditController:
         cur = app._cur
         if cur is None:
             return
-        if app._active == "decomp":
+        if app.is_decomp:
             # Snapshot the LIVE pseudocode position before forcing a recompile.
             # dec_scroll_y isn't tracked on every move, so without this the reload
             # falls into show()'s derive path (a bare scroll_to) and leaves a

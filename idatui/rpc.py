@@ -28,7 +28,7 @@ from typing import Any
 from rich.console import Console
 
 from ._sync import drain, settle
-from .app import DecompView, GraphView, HexView, ListingView
+from .app import DecompView, GraphView, HexView, ListingView, ViewMode
 
 PROTO_VERSION = 1
 TYPE_DELAY_MS = 35  # default per-char delay for high-level typed ops (aesthetic)
@@ -128,11 +128,11 @@ _MOVE_KEYS = {
 # --------------------------------------------------------------------------- #
 def _active_widget(app):
     """The currently *shown* code widget (mirrors app._active)."""
-    if app._active == "hex":
+    if app.is_hex:
         return app.query_one(HexView)
-    if app._active == "graph":
+    if app.is_graph:
         return app.query_one(GraphView)
-    if app._active in ("listing", "disasm"):
+    if app.is_listing:
         return app.query_one(ListingView)
     return app.query_one(DecompView)
 
@@ -142,11 +142,11 @@ def graph_info(app, blocks: bool = True) -> dict[str, Any]:
     rather than the box-drawing characters it is rendered as."""
     gv = app.query_one(GraphView)
     if gv.fc is None or gv.lay is None:
-        return {"open": app._active == "graph", "loaded": False,
+        return {"open": app.is_graph, "loaded": False,
                 "note": "press space (or graph {action:'open'}) on a function"}
     lay, fc = gv.lay, gv.fc
     out: dict[str, Any] = {
-        "open": app._active == "graph",
+        "open": app.is_graph,
         "loaded": True,
         "func": {"name": fc.name, "ea": fc.func_ea, "entry": fc.entry},
         "zoom": gv.ZOOMS[gv._zoom],
@@ -631,20 +631,20 @@ class RpcServer:
         if action == "show":
             return {**snapshot(app), "graph": graph_info(app, blocks=want_blocks)}
         if action in ("open", "toggle", "close"):
-            if action == "open" and app._active == "graph":
+            if action == "open" and app.is_graph:
                 return {**snapshot(app), "graph": graph_info(app, blocks=want_blocks)}
-            if action == "close" and app._active != "graph":
+            if action == "close" and not app.is_graph:
                 return {**snapshot(app), "graph": graph_info(app, blocks=want_blocks)}
             want = "graph" if action in ("open", "toggle") and \
-                app._active != "graph" else None
+                not app.is_graph else None
             res = await self._press(
                 ["space"],
-                (lambda: app._active == "graph") if want else
-                (lambda: app._active != "graph"),
+                (lambda: app.is_graph) if want else
+                (lambda: not app.is_graph),
                 timeout, f"graph {action}")
             return {**res, "graph": graph_info(app, blocks=want_blocks)}
 
-        if app._active != "graph":
+        if not app.is_graph:
             raise ValueError(f"graph {action}: the graph is not open "
                              f"(graph {{action:'open'}} first)")
         if action == "zoom":
@@ -795,7 +795,7 @@ class RpcServer:
             ea = app.program.resolve(target)
         except Exception:  # noqa: BLE001 — unknown name; caller falls back to generic
             return None
-        if app._active == "hex":
+        if app.is_hex:
             return lambda: app.query_one(HexView).cursor_va() == ea
         fn = app.program.function_of(ea)
         want = fn.addr if fn else ea
@@ -1025,17 +1025,17 @@ class RpcServer:
                 await self._fill_prompt("g", "goto", str(target), delay,
                                         clear=False)
                 await settle(app, timeout=timeout)
-            if app._active == "hex":
+            if app.is_hex:
                 # backslash leaves hex for the code view (which may be decomp).
                 await self._press(["backslash"],
-                                  lambda: app._active != "hex", timeout,
+                                  lambda: not app.is_hex, timeout,
                                   "leave the hex view")
-            if app._active == "decomp":
+            if app.is_decomp:
                 # These bindings live on the listing; in the decompiler the key
                 # would be swallowed or do something else entirely.
-                await self._press(["tab"], lambda: app._active == "listing",
+                await self._press(["tab"], lambda: app.is_listing,
                                   timeout, "switch to the listing")
-            if app._active != "listing":
+            if not app.is_listing:
                 raise RuntimeError(
                     f"define needs the listing view, but the active pane is "
                     f"{app._active!r}")
@@ -1054,8 +1054,8 @@ class RpcServer:
                 await self._fill_prompt("g", "goto", str(target), delay,
                                         clear=False)
                 await settle(app, timeout=timeout)
-            if app._active == "hex":
-                await self._press(["backslash"], lambda: app._active != "hex",
+            if app.is_hex:
+                await self._press(["backslash"], lambda: not app.is_hex,
                                   timeout, "leave the hex view")
             view = _active_widget(app)
             if isinstance(view, HexView):
@@ -1122,13 +1122,13 @@ class RpcServer:
                 if app._active != before:
                     return True
                 # Fallback case: a tab toward pseudocode on a function Hex-Rays
-                # can't decompile snaps `_active` back to disasm (see
+                # can't decompile lands back on the LISTING (see
                 # App._apply_decomp), so `_active` never changes and the naive
                 # `_active != before` predicate would block for the full
                 # timeout. Treat "requested decomp but it's known-failed" as
                 # settled (the decompile is cached, so this is cheap).
                 cur = app._cur
-                if before == "disasm" and cur is not None:
+                if before == ViewMode.LISTING and cur is not None:
                     try:
                         return app.program.decompile(cur.ea).failed
                     except Exception:  # noqa: BLE001
@@ -1137,7 +1137,7 @@ class RpcServer:
 
             return await self._press(["tab"], _toggled, timeout, "toggle_view")
         if method == "hex":
-            return await self._press(["backslash"], lambda: app._active == "hex",
+            return await self._press(["backslash"], lambda: app.is_hex,
                                      timeout, "hex")
         if method == "graph":
             return await self._graph(params, timeout)
