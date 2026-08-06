@@ -38,7 +38,7 @@ _PROGRAM_METHODS = {
     "goto", "open", "rename", "comment", "retype", "follow", "xrefs", "symbols",
     "structs", "search", "select", "save", "hex", "toggle_view",
     "pseudocode", "disassembly", "xrefs_to", "xrefs_from", "resolve",
-    "define", "rename_many",
+    "define", "rename_many", "opfmt", "graph",
 }
 
 # Self-documenting method table (returned by the 'methods' verb).
@@ -84,6 +84,13 @@ METHODS = {
     "rename_many": "{items:[{addr,name}] | file:JSON} bulk-apply a symbol file "
                    "in ONE call (no typing, no navigation)",
 }
+
+#: `opfmt` modes that have a real key on the code views. Driving the key keeps
+#: the pane honest (a viewer sees the same thing a human would do); the named
+#: formats have no key, so those go through the view's action directly.
+_OPFMT_KEYS = {"cycle": "o", "back": "O"}
+_OPFMT_MODES = ("cycle", "back", "show", "hex", "dec", "oct", "bin", "char",
+                "offset", "stack", "default")
 
 # `define` kinds -> the ListingView key that runs them. Driving the real key
 # keeps the pane honest (a viewer sees the same thing a human would do) and
@@ -278,12 +285,41 @@ def screen_text(app, fmt: str = "text") -> dict[str, Any]:
     return out
 
 
+def place_cursor(w, line=None, col=None) -> None:
+    """Move a code view's cursor and BRING IT INTO VIEW.
+
+    Setting the cursor without scrolling leaves the pane showing somewhere else
+    entirely, and the next verb then edits a line the operator cannot see — the
+    status describes one thing, the screen shows another. Every programmatic
+    cursor move goes through here for that reason.
+    """
+    if line is not None:
+        w.cursor = max(0, min(getattr(w, "total", 1) - 1, int(line)))
+    if col is not None:
+        w.cursor_x = max(0, int(col))
+    if hasattr(w, "_after_cursor_move"):
+        w._after_cursor_move()
+    if hasattr(w, "_scroll_cursor_into_view"):
+        w._scroll_cursor_into_view()
+    if hasattr(w, "_hscroll"):
+        w._hscroll()
+    w.refresh()
+
+
 def cursor_on(app, word: str, line: int | None = None, occurrence: int = 1) -> bool:
     """Place the cursor on the ``occurrence``-th token equal to ``word`` in the
     active code pane (optionally restricted to ``line``). Verified with the app's
     own tokenizer so 'main' won't match inside 'domain'. Disasm scan is limited to
     already-cached lines (what's on/near screen); decomp searches the whole body.
-    Returns whether it found and moved."""
+    Returns whether it found and moved.
+
+    Search starts at the VIEWPORT, not at row 0. A continuous listing is the
+    whole segment, so counting from the top finds an occurrence in some unrelated
+    function thousands of rows away -- and the cursor then lands there, off
+    screen, where the next verb edits something the operator cannot see. Wrapping
+    to the rows above keeps every match reachable; landing scrolls, so wherever
+    it goes is visible.
+    """
     w = _active_widget(app)
     if isinstance(w, HexView):
         raise ValueError("cursor_on: not supported in the hex view")
@@ -292,7 +328,12 @@ def cursor_on(app, word: str, line: int | None = None, occurrence: int = 1) -> b
     else:
         texts = [(w._line_plain(i) or "") for i in range(getattr(w, "total", 0))]
     orig = (w.cursor, w.cursor_x)
-    rows = [line] if line is not None else range(len(texts))
+    if line is not None:
+        rows = [line]
+    else:
+        # From the top of the viewport, then wrap round to what's above it.
+        top = round(w.scroll_offset.y)
+        rows = list(range(top, len(texts))) + list(range(0, top))
     hits = 0
     for i in rows:
         if not (0 <= i < len(texts)):
@@ -304,9 +345,7 @@ def cursor_on(app, word: str, line: int | None = None, occurrence: int = 1) -> b
             if w.word_under_cursor() == word:
                 hits += 1
                 if hits >= max(1, occurrence):
-                    if hasattr(w, "_after_cursor_move"):
-                        w._after_cursor_move()
-                    w.refresh()
+                    place_cursor(w)   # scrolls: an off-screen cursor edits blind
                     return True
             col = t.find(word, col + 1)
     w.cursor, w.cursor_x = orig  # not found: leave the cursor untouched
@@ -929,6 +968,8 @@ class RpcServer:
         if method == "hex":
             return await self._press(["backslash"], lambda: app._active == "hex",
                                      timeout, "hex")
+        if method == "graph":
+            return await self._graph(params, timeout)
         if method == "xrefs":
             return await self._press(
                 ["x"], lambda: type(app.screen).__name__ == "XrefsScreen",
@@ -989,13 +1030,7 @@ class RpcServer:
             w = _active_widget(app)
             if isinstance(w, HexView):
                 raise ValueError("cursor: not supported in the hex view (use goto)")
-            if "line" in params and params["line"] is not None:
-                w.cursor = max(0, min(getattr(w, "total", 1) - 1, int(params["line"])))
-            if "col" in params and params["col"] is not None:
-                w.cursor_x = max(0, int(params["col"]))
-            if hasattr(w, "_after_cursor_move"):
-                w._after_cursor_move()
-            w.refresh()
+            place_cursor(w, params.get("line"), params.get("col"))
             await drain(app)
             return snapshot(app)
 

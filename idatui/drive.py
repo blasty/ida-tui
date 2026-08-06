@@ -258,6 +258,25 @@ def cmd_define(c, args):
     return "\n".join(out)
 
 
+def cmd_fmt(c, args):
+    """fmt [mode] [word] — how the literal under the cursor is DISPLAYED.
+
+    ``fmt`` alone cycles (IDA's 'o'); a mode name sets it outright. A trailing
+    word puts the cursor on that token first, so you can name the literal
+    instead of steering the column there.
+
+        fmt                # cycle the literal under the cursor
+        fmt dec            # show it in decimal
+        fmt hex 18h        # find '18h' on screen, then make it hex
+    """
+    mode = args[0] if args else "cycle"
+    params = {"mode": mode}
+    if len(args) > 1:
+        params["word"] = args[1]
+    st = c.call("opfmt", **params)
+    return "  " + (st.get("opfmt", {}).get("status") or st.get("status", ""))
+
+
 def cmd_syms(c, args):
     """syms <file.json> — bulk-apply a symbol file ([{addr|start|ea, name}])."""
     if len(args) != 1:
@@ -295,7 +314,7 @@ COMMANDS = {
     "callees": cmd_callees, "callers": cmd_callers, "names": cmd_names,
     "rename": cmd_rename, "mv": cmd_mv, "note": cmd_note, "retype": cmd_retype,
     "save": cmd_save, "screen": cmd_screen, "raw": cmd_raw, "define": cmd_define,
-    "syms": cmd_syms,
+    "syms": cmd_syms, "fmt": cmd_fmt,
     "binaries": cmd_binaries, "switch": cmd_switch,
 }
 

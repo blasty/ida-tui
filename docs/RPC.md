@@ -87,6 +87,7 @@ predicate so the returned state is final.
 | `back` | — | Escape: pop the nav stack. |
 | `toggle_view` | — | Tab: disasm ⇄ pseudocode. |
 | `hex` | — | `\`: hex view. |
+| `graph` | `action?=show`, `target?`, `blocks?` | the control-flow graph (Space). `show` is a pure read — blocks, typed edges, ranks, box geometry and the cursor, **not** the box-drawing characters; `screen` gives you the drawing. `open`/`close`/`toggle` switch mode, `zoom` cycles full→compact→collapsed, `entry` jumps to the entry block, `succ`/`pred` follow one edge (`J`/`K`), `block target=<id\|0xADDR>` puts the cursor in a block. `blocks=false` omits the per-block list. See `docs/GRAPH_VIEW.md`. |
 | `xrefs` | — | `x`: open the xref picker. |
 | `symbols` | `query?` | Ctrl+N palette, optionally pre-typed. |
 | `structs` | — | Ctrl+T struct editor. |
@@ -109,8 +110,15 @@ prompt round-trips, i.e. tens of minutes for a few hundred symbols, where
 | method | params | effect |
 |--------|--------|--------|
 | `move` | `dir`, `n?=1`, `settle?` | `dir` ∈ down/up/left/right/word/wordback/bol/eol/top/bottom/halfdown/halfup/pagedown/pageup. |
-| `cursor` | `line?`, `col?` | set the cursor directly on the active code pane (disasm/decomp). |
+| `cursor` | `line?`, `col?` | set the cursor directly on the active code pane (disasm/decomp), scrolling it into view. |
 | `cursor_on` | `word`, `line?`, `occurrence?=1` | place the cursor on the *n*-th token equal to `word` (verified with the app's tokenizer). Decomp searches the whole body; disasm only cached/visible lines. Returns `{found, ...state}`. |
+
+**Both cursor verbs scroll to what they selected, and `cursor_on` searches from
+the viewport** (wrapping round to the rows above). A continuous listing is the
+whole segment: counting occurrences from row 0 used to land the cursor in an
+unrelated function thousands of rows away, off screen, and the next edit then
+happened somewhere the operator could not see — with the driver reporting
+success. If you mean a specific occurrence far away, pass `line=`.
 
 ## Driving pattern for an agent
 
