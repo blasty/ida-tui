@@ -46,6 +46,8 @@ from textual.widgets.option_list import Option
 
 from . import graph
 from . import kittygfx
+from .edit_ctl import EditController
+from .prompt import PromptBar
 from .trace_ctl import TraceController
 from .highlight import highlight_c
 
@@ -4502,11 +4504,12 @@ class IdaTui(App):
         self._conn_screen: LoadingScreen | None = None
         self._reconnecting = False  # a reconnect attempt is in flight
         self._search_ctx: tuple[object | None, int] = (None, 1)
-        self._rename_ctx: tuple[object | None, str] = (None, "")
-        self._rename_addr: int | None = None  # set for address-based (listing) naming
-        self._comment_ctx: tuple[object | None, int, str] = (None, 0, "")
-        self._retype_ctx: tuple[object | None, str, int, str] = (None, "", 0, "")
-        self._makedata_ctx: tuple[object | None, int] = (None, 0)
+        #: The one-line prompts above the footer. Each holds its own context
+        #: for exactly as long as it is on screen; see idatui/prompt.py.
+        self.prompts = PromptBar(self, "search", "rename", "comment",
+                                 "retype", "makedata", "goto")
+        #: Everything that writes to the database (idatui/edit_ctl.py).
+        self.edits = EditController(self)
         self._xref_focus_name: str | None = None
         self._dirty = False
 
@@ -6255,708 +6258,69 @@ class IdaTui(App):
         self._goto_ea(addr, push=True, focus_name=self._xref_focus_name,
                       prefer_decomp=(self._active == "decomp"))
 
-    # -- rename ------------------------------------------------------------ #
-    @staticmethod
-    def _is_pseudocode_label(view, name: str) -> bool:
-        """True if ``name`` is a Hex-Rays goto label in ``view``. The rename tool
-        has no label category (only func/global/local/stack), so renaming one
-        fails with a misleading 'local variable not found'; detect it up front
-        and explain instead. A label is the default ``LABEL_n`` or any token used
-        as a ``goto`` target."""
-        if not isinstance(view, DecompView):
-            return False
-        if re.fullmatch(r"LABEL_\d+", name):
-            return True
-        body = "\n".join(getattr(view, "_texts", []) or [])
-        return re.search(rf"\bgoto\s+{re.escape(name)}\b", body) is not None
+    # -- database edits ---------------------------------------------------- #
+    # The bodies live in EditController (idatui/edit_ctl.py). What stays here is
+    # what Textual insists on owning: on_<Message> handlers, which it dispatches
+    # by name on the DOMNode, and @work entry points, whose worker machinery
+    # wants a DOMNode host. Both are one-line delegates.
 
     def on_rename_requested(self, msg: RenameRequested) -> None:
-        # In the flat listing, 'n' names the ADDRESS under the cursor (create a
-        # label), not a symbol-by-name. This is what lets you name a bare/
-        # undefined byte — e.g. the free byte at addr+1 after shrinking a u16 to
-        # a u8 — which the word-under-cursor path can't do (no symbol to rename).
-        if isinstance(msg.view, (ListingView, GraphView)):
-            ea = msg.view._cursor_ea()
-            if ea is None:
-                self._status("no address on this line to name")
-                return
-            head = msg.view.cur_head()
-            word = msg.view.word_under_cursor()
-            mnem = head.text.split(" ", 1)[0] if (head and head.text) else ""
-            # If the cursor is on a symbol token (a call/branch target, a data
-            # reference, or this head's own label) rename THAT symbol; otherwise
-            # create/rename a label at the head's address (bare/undefined bytes).
-            if (word and self._looks_like_symbol(word) and word != mnem
-                    and word.lower() not in _ASM_KEYWORDS):
-                self._rename_ctx = (msg.view, word)
-                self._rename_addr = None
-                placeholder = f"rename '{word}' —  Enter=apply  Esc=cancel"
-                prefill = word
-            else:
-                cur = head.name if (head is not None and head.name) else ""
-                self._rename_ctx = (msg.view, cur)
-                self._rename_addr = ea
-                placeholder = f"name @ {ea:#x} —  Enter=apply  Esc=cancel"
-                prefill = cur
-            self.query_one("#status", Static).display = False
-            inp = self.query_one("#rename", Input)
-            inp.placeholder = placeholder
-            inp.can_focus = True
-            inp.display = True
-            inp.value = prefill
-            inp.focus()
-            return
-        if not msg.name:
-            self._status("nothing to rename under the cursor")
-            return
-        if self._is_pseudocode_label(msg.view, msg.name):
-            self._status(
-                f"can't rename pseudocode label '{msg.name}' "
-                "(Hex-Rays goto labels aren't renamable via the API)")
-            return
-        self._rename_ctx = (msg.view, msg.name)
-        self._rename_addr = None
-        self.query_one("#status", Static).display = False
-        inp = self.query_one("#rename", Input)
-        inp.placeholder = f"rename '{msg.name}' —  Enter=apply  Esc=cancel"
-        inp.can_focus = True
-        inp.display = True
-        inp.value = msg.name
-        inp.focus()
-
-    def _end_rename(self) -> None:
-        inp = self.query_one("#rename", Input)
-        inp.display = False
-        inp.can_focus = False
-        self._rename_addr = None
-        self.query_one("#status", Static).display = True
-        view, _ = self._rename_ctx
-        if view is not None:
-            view.focus()
-
-    # -- comments ---------------------------------------------------------- #
-    def _line_ea_for(self, view) -> int | None:  # type: ignore[no-untyped-def]
-        """Address of the line under the cursor in either code view."""
-        if isinstance(view, ListingView):
-            return view._cursor_ea()
-        if isinstance(view, DecompView):
-            return view._line_ea(view.cursor)
-        return None
-
-    @staticmethod
-    def _existing_comment(view) -> str:
-        """Current line comment (for prefill), parsed from the rendered text. In
-        pseudocode a comment is `// text` before the trailing /*0xEA*/ markers;
-        C has no `//` operator, so the last `//` is unambiguously the comment."""
-        if isinstance(view, DecompView) and 0 <= view.cursor < len(view._texts):
-            s = re.sub(r"(?:/\*\s*0x[0-9A-Fa-f]+\s*\*/\s*)+$", "", view._texts[view.cursor])
-            i = s.rfind("//")
-            return s[i + 2:].strip() if i >= 0 else ""
-        return ""
+        self.edits.request_rename(msg)
 
     def on_comment_requested(self, msg: CommentRequested) -> None:
-        ea = self._line_ea_for(msg.view)
-        # Signature / local-declaration lines carry no address; fall back to the
-        # function's entry ea so commenting the header annotates the function.
-        func_level = ea is None
-        if func_level:
-            ea = self._cur.ea if self._cur else None
-        if ea is None:
-            self._status("no address on this line to comment")
-            return
-        existing = "" if func_level else self._existing_comment(msg.view)
-        self._comment_ctx = (msg.view, ea, existing)
-        self.query_one("#status", Static).display = False
-        inp = self.query_one("#comment", Input)
-        inp.placeholder = (
-            f"function comment @ {ea:#x} —  Enter=apply (empty=clear)  Esc=cancel"
-            if func_level else
-            f"comment @ {ea:#x} —  Enter=apply (empty=clear)  Esc=cancel")
-        inp.can_focus = True
-        inp.display = True
-        inp.value = existing
-        inp.focus()
+        self.edits.request_comment(msg)
 
-    def _end_comment(self) -> None:
-        inp = self.query_one("#comment", Input)
-        inp.display = False
-        inp.can_focus = False
-        self.query_one("#status", Static).display = True
-        view, _, _ = self._comment_ctx
-        if view is not None:
-            view.focus()
-
-    @work(thread=True, exclusive=True, group="comment")
-    def _do_comment(self, ea: int, text: str) -> None:
-        assert self.program is not None
-        # The prompt is single-line, so a literal '\n' (backslash-n) means a real
-        # newline — Hex-Rays renders each as its own '//' line. Lets long notes
-        # wrap instead of running off the right edge and clipping.
-        text = text.replace("\\n", "\n")
-        try:
-            res = self.program.set_comment(ea, text)
-        except IDAToolError as e:
-            self.app.call_from_thread(self._status, f"comment failed: {e.message}")
-            return
-        data = res.get("result") if isinstance(res, dict) else None
-        if isinstance(data, list) and data and isinstance(data[0], dict) and data[0].get("error"):
-            self.app.call_from_thread(self._status, f"comment failed: {data[0]['error']}")
-            return
-        self.app.call_from_thread(self._after_comment, ea, text)
-
-    def _reload_active_code(self) -> None:
-        """Refresh whichever code view is showing after an edit (comment/rename/
-        retype), in place: re-decompile if in the decompiler, else reload the
-        listing."""
-        cur = self._cur
-        if cur is None:
-            return
-        if self._active == "decomp":
-            # Snapshot the LIVE pseudocode position before forcing a recompile.
-            # dec_scroll_y isn't tracked on every move, so without this the reload
-            # falls into show()'s derive path (a bare scroll_to) and leaves a
-            # stale frame until the next cursor move; capturing the real scroll
-            # makes show() take the robust _apply_scroll path and repaint now.
-            dec = self.query_one(DecompView)
-            if cur.ea == dec.loaded_ea:
-                cur.dec_cursor = dec.cursor
-                cur.dec_cursor_x = dec.cursor_x
-                cur.dec_scroll_y = round(dec.scroll_offset.y)
-                cur.dec_scroll_x = round(dec.scroll_offset.x)
-            dec.loaded_ea = None  # force re-decompile
-            self._show_active()
-        else:
-            # Capture the LIVE position from the widget (the source of truth)
-            # rather than trusting nav-entry tracking, which goes stale. Capture
-            # it as ADDRESSES via the anchor: bump_names() discards the segment
-            # model so the reload rebuilds it, and an edit that changes how many
-            # rows an item takes makes the old indices point somewhere else.
-            # Index capture is CORRECT here and an anchor is not: a rename or
-            # comment doesn't change how many rows anything takes, and the model
-            # this rebuilds is constructed empty — index_of_ea on it returns -1
-            # until pages load, so an anchor would resolve to nothing while
-            # costing an extra model build on the UI thread. Address anchoring is
-            # for the edit paths that DO change row structure (see _do_edit_item).
-            lst = self.query_one(ListingView)
-            cur.view = "listing"
-            if lst.model is not None:
-                cur.cursor = lst.cursor
-                cur.cursor_x = lst.cursor_x
-                cur.scroll_y = round(lst.scroll_offset.y)
-            self._open_entry(cur, push=False)
-
-    def _after_comment(self, ea: int, text: str) -> None:
-        # A comment shows in both views but only after Hex-Rays recompiles, so
-        # reuse the name-generation invalidation (bumps gen -> decompile is
-        # force_recompiled lazily; disasm/listing caches are cleared).
-        self.program.bump_names()
-        self._reload_active_code()
-        self._dirty = True
-        verb = "cleared comment" if not text else "commented"
-        self._status(f"{verb} @ {ea:#x}   (Ctrl+S to save)")
-
-    # -- retype (set type, IDA 'y') --------------------------------------- #
     def on_retype_requested(self, msg: RetypeRequested) -> None:
         if self._cur is None or self.program is None:
             return
         self._prepare_retype(msg.view, msg.name)
 
-    @work(thread=True, exclusive=True, group="retype")
-    def _prepare_retype(self, view, word: str | None) -> None:  # type: ignore[no-untyped-def]
-        """Work out whether the cursor is on a local variable or a function, and
-        fetch the current type/prototype to prefill the prompt."""
-        assert self.program is not None and self._cur is not None
-        ft = self.program.func_types(self._cur.ea)
-        kind: str | None = None
-        subject: int = self._cur.ea
-        prefill = ""
-        # 1) a local variable (or arg) of the current function
-        if word and ft is not None:
-            lv = next((v for v in ft.lvars if v.name == word), None)
-            if lv is not None:
-                kind, prefill = "lvar", lv.type
-        # 2) a symbol under the cursor: a function (retype its prototype) or a
-        #    global/data item (retype the variable). Without the data case a
-        #    global fell through to (3) and silently retyped the ENCLOSING
-        #    function's prototype instead.
-        if kind is None and self._looks_like_symbol(word):
-            try:
-                tgt = self.program.resolve(word)
-            except Exception:  # noqa: BLE001
-                tgt = None
-            if tgt is not None:
-                tft = self.program.func_types(tgt)
-                if tft is not None:
-                    kind, subject, prefill = "func", tgt, tft.prototype
-                else:
-                    dt = self.program.data_type(tgt)
-                    if dt is not None and not dt.get("is_func"):
-                        kind, subject = "data", tgt
-                        prefill = dt.get("type") or self._guess_data_type(
-                            dt.get("size") or 0)
-        # 3) fall back to the current function itself
-        if kind is None and ft is not None:
-            kind, subject, prefill = "func", self._cur.ea, ft.prototype
-        if kind is None:
-            self.app.call_from_thread(self._status, "nothing to retype under the cursor")
-            return
-        self.app.call_from_thread(self._open_retype, view, kind, subject, word or "", prefill)
-
-    @staticmethod
-    def _guess_data_type(size: int) -> str:
-        """A sensible prefill when a global carries no type yet."""
-        return {1: "unsigned __int8", 2: "unsigned __int16",
-                4: "unsigned __int32", 8: "unsigned __int64"}.get(
-                    size, f"char[{size}]" if size > 0 else "void *")
-
-    def _open_retype(self, view, kind: str, subject: int, word: str,  # type: ignore[no-untyped-def]
-                     prefill: str) -> None:
-        self._retype_ctx = (view, kind, subject, word)
-        self.query_one("#status", Static).display = False
-        inp = self.query_one("#retype", Input)
-        label = "prototype" if kind == "func" else f"type for '{word}'"
-        inp.placeholder = f"{label} —  Enter=apply  Esc=cancel"
-        inp.can_focus = True
-        inp.display = True
-        inp.value = prefill
-        inp.focus()
-
-    def _end_retype(self) -> None:
-        inp = self.query_one("#retype", Input)
-        inp.display = False
-        inp.can_focus = False
-        self.query_one("#status", Static).display = True
-        view = self._retype_ctx[0]
-        if view is not None:
-            view.focus()
-
-    @work(thread=True, exclusive=True, group="retype-apply")
-    def _do_retype(self, kind: str, subject: int, word: str, new: str) -> None:
-        assert self.program is not None
-        if kind == "func":
-            err = self.program.set_function_type(subject, new)
-        elif kind == "data":  # a global / data item referenced in the body
-            err = self.program.set_data_type(subject, new)
-        else:  # lvar of the current function
-            err = self.program.set_lvar_type(self._cur.ea, word, new)
-        if err:
-            self.app.call_from_thread(self._status, f"retype failed: {err}")
-            return
-        self.app.call_from_thread(self._after_retype, kind, word)
-
-    def _after_retype(self, kind: str, word: str) -> None:
-        # A type change alters the pseudocode (and disasm operand types), so
-        # recompile via the name-generation invalidation and reopen in place.
-        self.program.bump_names()
-        self._reload_active_code()
-        self._dirty = True
-        what = "prototype" if kind == "func" else f"'{word}'"
-        self._status(f"retyped {what}   (Ctrl+S to save)")
-
-    # -- typed data definition (make_data, IDA 'd') ----------------------- #
-    @staticmethod
-    def _default_data_type(head) -> str:  # type: ignore[no-untyped-def]
-        """A sensible prefill C type for defining data over ``head``."""
-        sz = getattr(head, "size", 0) or 0
-        return {1: "unsigned __int8", 2: "unsigned __int16",
-                4: "unsigned __int32", 8: "unsigned __int64"}.get(
-                    sz, f"char[{sz}]" if sz > 0 else "unsigned __int8")
-
     def on_make_data_requested(self, msg: MakeDataRequested) -> None:
-        view = msg.view
-        ea = view._cursor_ea() if isinstance(view, ListingView) else None
-        if ea is None:
-            self._status("no address on this line to define data")
-            return
-        self._makedata_ctx = (view, ea)
-        self.query_one("#status", Static).display = False
-        inp = self.query_one("#makedata", Input)
-        inp.placeholder = (f"data type @ {ea:#x} (e.g. int, char[16], my_struct)"
-                           "  —  Enter=apply  Esc=cancel")
-        inp.can_focus = True
-        inp.display = True
-        head = view.cur_head() if isinstance(view, ListingView) else None
-        inp.value = self._default_data_type(head) if head is not None else "int"
-        inp.focus()
+        self.edits.request_make_data(msg)
 
-    def _end_makedata(self) -> None:
-        inp = self.query_one("#makedata", Input)
-        inp.display = False
-        inp.can_focus = False
-        self.query_one("#status", Static).display = True
-        view = self._makedata_ctx[0]
-        if view is not None:
-            view.focus()
+    def on_op_format_requested(self, msg: OpFormatRequested) -> None:
+        self.edits.request_op_format(msg)
 
-    @work(thread=True, exclusive=True, group="makedata")
-    def _do_make_data(self, ea: int, type_decl: str,
-                      anchor: ViewAnchor | None = None) -> None:  # worker context
-        assert self.program is not None
-        try:
-            self.program.make_data(ea, type_decl)
-        except Exception as e:  # noqa: BLE001
-            self.app.call_from_thread(self._status, f"make data: {e}")
-            return
-        self.program.bump_items()
-        anchor = anchor or ViewAnchor()
-        anchor.flash = f"data ({type_decl}) @ {ea:#x}   (Ctrl+S to save)"
-        name = self.program.region_label(ea)
-        lm = self.program.listing(ea)
-        idx = max(lm.ensure_ea(ea), 0) if lm is not None else 0
-        _cur, top = self._anchor_rows(anchor, lm, ea)
-        self.app.call_from_thread(
-            self._open_at, ea, name, idx, False, -1, 0, True, None, top)
-        self.app.call_from_thread(self._edit_done, anchor)
+    def on_edit_item_requested(self, msg: EditItemRequested) -> None:
+        self.edits.request_edit_item(msg)
 
     @work(thread=True, exclusive=True, group="rename")
     def _do_rename(self, view, old: str, new: str) -> None:  # type: ignore[no-untyped-def]
-        assert self.program is not None
-        prog, cur = self.program, self._cur
-        kind = "data"
-        addr: int | None = None
-        batch: dict = {"data": {"old": old, "new": new}}
-        resolved: int | None = None
-        try:
-            resolved = prog.resolve(old)
-        except Exception:  # noqa: BLE001
-            resolved = None
-        if resolved is not None:
-            fn = prog.function_of(resolved)
-            if fn is not None and fn.addr == resolved:
-                kind, addr = "func", resolved
-                batch = {"func": {"addr": hex(resolved), "name": new}}
-            else:
-                kind, batch = "data", {"data": {"old": old, "new": new}}
-        elif isinstance(view, DecompView) and cur is not None:
-            dec = prog.decompile(cur.ea)
-            ref = next((r for r in dec.refs if r.name == old), None)
-            if ref is not None:
-                fn = prog.function_of(ref.addr)
-                if fn is not None and fn.addr == ref.addr:
-                    kind, addr = "func", ref.addr
-                    batch = {"func": {"addr": hex(ref.addr), "name": new}}
-                else:
-                    kind, batch = "data", {"data": {"old": old, "new": new}}
-            else:
-                kind = "local"
-                batch = {"local": {"func_addr": hex(cur.ea), "old": old, "new": new}}
-        elif cur is not None:  # disasm view
-            if old.startswith(("var_", "arg_")):
-                kind = "stack"
-                batch = {"stack": {"func_addr": hex(cur.ea), "old": old, "new": new}}
-        try:
-            res = prog.client.call("rename", batch=batch)
-        except IDAToolError as e:
-            self.app.call_from_thread(self._status, f"rename failed: {e.message}")
-            return
-        summary = res.get("summary", {}) if isinstance(res, dict) else {}
-        if not (summary.get("ok", 0) > 0 and summary.get("failed", 0) == 0):
-            msg = "rename failed"
-            for catk in ("func", "data", "local", "stack"):
-                items = res.get(catk) if isinstance(res, dict) else None
-                if isinstance(items, list) and items and items[0].get("error"):
-                    msg = f"rename failed: {items[0]['error']}"
-            self.app.call_from_thread(self._status, msg)
-            return
-        self.app.call_from_thread(self._after_rename, kind, addr, old, new)
-
-    def _after_rename(self, kind: str, addr: int | None, old: str, new: str) -> None:
-        cur = self._cur
-        # A renamed symbol can appear in many functions, so invalidate globally;
-        # each function refreshes its names the next time it's viewed.
-        self.program.bump_names()
-        self._reload_active_code()
-        if kind == "func" and addr is not None and self._func_index is not None:
-            self._func_index.update_name(addr, new)
-            for e in self._nav:
-                if e.ea == addr:
-                    e.name = new
-            # Update the one cell in place (a full rebuild would race the
-            # initial streaming load and duplicate row keys).
-            table = self.query_one("#func-table", DataTable)
-            try:
-                name_col = list(table.columns.keys())[1]
-                table.update_cell(str(addr), name_col, new)
-            except Exception:  # noqa: BLE001 -- row filtered out / not yet streamed
-                pass
-        self._dirty = True
-        self._status(f"renamed  {old} → {new}   (Ctrl+S to save)")
+        self.edits.do_rename(view, old, new)
 
     @work(thread=True, exclusive=True, group="rename")
-    def _do_name_addr(self, addr: int, name: str) -> None:  # worker context
-        """Set a label at ``addr`` (listing 'n'). Works on a bare/undefined byte
-        — unlike the symbol-by-name path, this names the address directly."""
-        assert self.program is not None
-        try:
-            res = self.program.client.call(
-                "rename", batch={"data": {"addr": hex(addr), "new": name}})
-        except IDAToolError as e:
-            self.app.call_from_thread(self._status, f"name failed: {e.message}")
-            return
-        summary = res.get("summary", {}) if isinstance(res, dict) else {}
-        if not (summary.get("ok", 0) > 0 and summary.get("failed", 0) == 0):
-            err = "name failed"
-            items = res.get("data") if isinstance(res, dict) else None
-            if isinstance(items, list) and items and items[0].get("error"):
-                err = f"name failed: {items[0]['error']}"
-            self.app.call_from_thread(self._status, err)
-            return
-        # The label shows in the listing's head rows -> invalidate + reopen.
-        self.program.bump_items()
-        # Naming the address *of a function start* is a function rename by any
-        # other name. Without this the cached index kept the old name, so
-        # `functions`/`names`/resolve/the palette all reported the rename had
-        # not happened -- and a driver that trusts those readbacks redoes work
-        # it already did.
-        fn = None
-        try:
-            fn = self.program.function_of(addr)
-        except Exception:  # noqa: BLE001
-            fn = None
-        is_func_start = fn is not None and fn.addr == addr
-        lm = self.program.listing(addr)
-        label = name if is_func_start else self.program.region_label(addr)
-        idx = max(lm.ensure_ea(addr), 0) if lm is not None else 0
-        self.app.call_from_thread(self._open_at_named, label, addr, idx, name,
-                                  is_func_start)
+    def _do_name_addr(self, addr: int, name: str) -> None:
+        self.edits.do_name_addr(addr, name)
 
-    def _open_at_named(self, label: str, addr: int, idx: int, name: str,
-                       is_func_start: bool = False) -> None:
-        if is_func_start:
-            self.program.bump_names()
-            if self._func_index is not None:
-                self._func_index.update_name(addr, name)
-            for e in self._nav:
-                if e.ea == addr:
-                    e.name = name
-            try:
-                table = self.query_one("#func-table", DataTable)
-                name_col = list(table.columns.keys())[1]
-                table.update_cell(str(addr), name_col, name)
-            except Exception:  # noqa: BLE001 -- row filtered out / not streamed
-                pass
-        self._open_at(addr, label, idx, False, -1, 0, True)
-        self._dirty = True
-        self._status(f"named {addr:#x} → {name}   (Ctrl+S to save)")
+    @work(thread=True, exclusive=True, group="comment")
+    def _do_comment(self, ea: int, text: str) -> None:
+        self.edits.do_comment(ea, text)
 
-    # -- literal display formats (IDA 'o') -------------------------------- #
-    def on_op_format_requested(self, msg: OpFormatRequested) -> None:
-        if self.program is None or self._cur is None:
-            return
-        view = msg.view
-        if isinstance(view, ListingView):
-            ea = view._cursor_ea()
-            if ea is None:
-                self._status("no address on this line to reformat")
-                return
-            head = view.cur_head()
-            if head is not None and head.kind in ("sep", "funchdr", "label"):
-                # A banner/label row carries the NEXT item's address so that
-                # navigation lands somewhere real — but it has no operands of
-                # its own, and a column measured against it would point into
-                # that item at random.
-                self._status("no literal on this line to reformat", priority=True)
-                return
-            self._do_op_format(msg.mode, "listing", ea, view.op_col())
-            return
-        if isinstance(view, DecompView):
-            # The pseudocode's formats are keyed on the FUNCTION Hex-Rays
-            # decompiled, not on the line's own address.
-            fn = view.loaded_ea if view.loaded_ea is not None else self._cur.ea
-            self._do_op_format(msg.mode, "decomp", fn, view.cursor_x, view.cursor)
+    @work(thread=True, exclusive=True, group="retype")
+    def _prepare_retype(self, view, word: str | None) -> None:  # type: ignore[no-untyped-def]
+        self.edits.prepare_retype(view, word)
+
+    @work(thread=True, exclusive=True, group="retype-apply")
+    def _do_retype(self, kind: str, subject: int, word: str, new: str) -> None:
+        self.edits.do_retype(kind, subject, word, new)
+
+    @work(thread=True, exclusive=True, group="makedata")
+    def _do_make_data(self, ea: int, type_decl: str,
+                      anchor: ViewAnchor | None = None) -> None:
+        self.edits.do_make_data(ea, type_decl, anchor)
 
     @work(thread=True, exclusive=True, group="opformat")
     def _do_op_format(self, mode: str, where: str, ea: int, col: int,
-                      line: int = -1) -> None:  # worker context
-        assert self.program is not None
-        try:
-            if where == "listing":
-                r = self.program.op_format(ea, mode=mode, col=col)
-                what = f"op{r.get('n', 0)} "
-            else:
-                r = self.program.pc_num_format(ea, mode=mode, line=line, col=col)
-                what = ""
-        # These are the RESULT of a keypress, so they go on the bar with
-        # priority. Without it a refusal is swallowed by the previous edit's
-        # flash and both the screen and the RPC snapshot still show the last
-        # success -- a call that did nothing reads as one that worked.
-        except IDAToolError as e:
-            self.app.call_from_thread(self._status, f"format: {e.message}",
-                                      True)
-            return
-        except Exception as e:  # noqa: BLE001 -- surface transport failures too
-            self.app.call_from_thread(self._status, f"format: {e}", True)
-            return
-        text = " ".join((r.get("text") or "").split())
-        prev, fmt = r.get("prev", ""), r.get("format", "?")
-        if mode == "show":
-            # A question, not an edit: say what this literal is and what it
-            # could be, and leave the database (and the view) alone.
-            self.app.call_from_thread(
-                self._status,
-                f"{what}{fmt} {r.get('value') or ''}"
-                f"   [{', '.join(r.get('choices', []))}]", True)
-            return
-        step = f"{prev} \u2192 {fmt}" if prev and prev != fmt else fmt
-        desc = f"{what}{step}: {text[:96]}"
-        if r.get("warn"):
-            desc += f"   \u26a0 {r['warn']}"
-        # Which literal this was, so the cursor can be put back on it after the
-        # reload: the line reflows and the old column stops meaning the same
-        # thing (48 -> 0x30 shifts everything to its right).
-        keep: tuple | None = None
-        if where == "listing":
-            if r.get("n") is not None:
-                keep = ("listing", int(r["n"]))
-        elif r.get("ea"):
-            keep = ("decomp", int(str(r["ea"]), 0), int(r.get("opnum", 0)))
-        self.app.call_from_thread(self._after_op_format, desc, keep)
-
-    def _after_op_format(self, desc: str, keep: tuple | None = None) -> None:
-        # Only the rendering changed, but it changed in the database: drop the
-        # cached rows (and bump the generation, so the decompiler re-runs and
-        # picks up its own new number format) and reopen where we are.
-        self.program.bump_names()
-        if keep is not None:
-            # Set before the reload: both views consume this one-shot when their
-            # new content lands, which is always after this handler returns.
-            if keep[0] == "listing":
-                self.query_one(ListingView)._pending_op = keep[1]
-            else:
-                self.query_one(DecompView)._keep_lit = (keep[1], keep[2])
-        self._reload_active_code()
-        self._dirty = True
-        self._status(f"{desc}   (Ctrl+S to save)", priority=True)
-
-    # -- item structure edits (IDA c/p/u) --------------------------------- #
-    def on_edit_item_requested(self, msg: EditItemRequested) -> None:
-        view = msg.view
-        ea = view._cursor_ea() if isinstance(view, ListingView) else None
-        if ea is None:
-            self._status("no address on this line to (re)define")
-            return
-        self._do_edit_item(msg.kind, ea, self._anchor())
+                      line: int = -1) -> None:
+        self.edits.do_op_format(mode, where, ea, col, line)
 
     @work(thread=True, exclusive=True, group="edititem")
     def _do_edit_item(self, kind: str, ea: int,
-                      anchor: ViewAnchor | None = None) -> None:  # worker context
-        assert self.program is not None
-        verb = {"code": "defined code", "func": "created function",
-                "undef": "undefined", "string": "made string",
-                "thumb": "switched decoding", "thumbscan": "scanned"}[kind]
-        try:
-            if kind == "code":
-                # Keep going until something stops it: one instruction is rarely
-                # what you want, and on a raw image it means pressing `c` once
-                # per opcode for the length of a function.
-                r = self.program.define_code_run(ea)
-                n, why = int(r.get("count", 0)), r.get("stopped", "")
-                if n == 0 and why == "defined":
-                    # Already code/data here — a no-op, not a failure. Saying
-                    # "failed to create instruction" for it would be a lie.
-                    self.app.call_from_thread(
-                        self._status, f"already defined @ {ea:#x}")
-                    return
-                if n == 0:
-                    raise IDAToolError("define_code",
-                                       f"@ {ea:#x}: Failed to create instruction")
-                end = int(str(r.get("end", hex(ea))), 0)
-                reason = {"undecodable": "hit bytes that don't decode",
-                          "flow": "control flow ends here",
-                          "defined": "ran into existing code/data",
-                          "segment": "end of segment",
-                          "limit": "instruction limit"}.get(why, why)
-                verb = (f"defined {n} instruction{'s' if n != 1 else ''} "
-                        f"({ea:#x}\u2013{end:#x}) \u2014 {reason}")
-            elif kind == "thumbscan":
-                # A vector table is a list of Thumb entry points that IDA won't
-                # follow on a headerless image, because nothing tells it those
-                # words are pointers. Scan from the cursor.
-                anchor.refresh_functions = True
-                r = self.program.thumb_scan(ea, ea + 0x400)
-                n, applied = int(r.get("n", 0)), int(r.get("applied", 0))
-                if not n:
-                    verb = (f"no Thumb entry pointers in {ea:#x}\u2013{ea+0x400:#x}"
-                            " (odd words pointing into the image)")
-                else:
-                    verb = (f"{n} Thumb entr{'y' if n == 1 else 'ies'} found, "
-                            f"{applied} disassembled")
-            elif kind == "thumb":
-                # Switch the mode, then disassemble in it: flipping T and
-                # leaving the bytes undefined shows nothing, and the reason you
-                # flipped it was to read the code.
-                r = self.program.set_thumb(ea)
-                run = self.program.define_code_run(ea)
-                n = int(run.get("count", 0))
-                mode = "Thumb" if r.get("thumb") else "ARM"
-                verb = f"{mode} @ {ea:#x}"
-                if r.get("forced_32bit"):
-                    verb += " (segment set to 32-bit; Thumb needs ARM32)"
-                if r.get("db_64bit"):
-                    # Disassembly will look right and F5 will never work.
-                    verb += ("  \u26a0 this database is 64-bit, so Hex-Rays "
-                             "won't decompile it \u2014 Ctrl+L and pick "
-                             "arm:ARMv7-A")
-                verb += (f" \u2014 {n} instruction{'s' if n != 1 else ''}"
-                         if n else " \u2014 still doesn't decode")
-                # falls through to the shared reload: same cache bump, same
-                # anchor restore, same flash. That is the whole point of having
-                # one path.
-            elif kind == "func":
-                anchor.refresh_functions = True
-                r = self.program.define_func(ea)
-                if r.get("start") and r.get("end"):
-                    verb = (f"created function {r['start']}\u2013{r['end']}"
-                            + (" (end worked out from the code)"
-                               if r.get("how") == "explicit-end" else ""))
-            elif kind == "string":
-                s = self.program.make_string(ea)
-                verb = f"made string ({s[:24]!r})" if s else verb
-            else:
-                # Undefining can destroy a function as easily as `p` creates one.
-                anchor.refresh_functions = True
-                self.program.undefine(ea)
-        except Exception as e:  # noqa: BLE001 -- surface soft/hard tool errors
-            self.app.call_from_thread(self._status, f"{kind}: {e}")
-            return
-        # Structure changed everywhere: drop all item/function/decomp caches.
-        self.program.bump_items()
-        # Re-resolve: a define_func upgrades the region to a real function view;
-        # anything else re-reads the (still function-less) listing in place.
-        anchor = anchor or ViewAnchor()
-        anchor.flash = f"{verb} @ {ea:#x}   (Ctrl+S to save)"
-        fn = self.program.function_of(ea)
-        if fn is not None:
-            model = self.program.disasm(fn.addr, fn.name)
-            idx = 0 if ea == fn.addr else model.index_of_ea(ea)
-            _cur, top = self._anchor_rows(anchor, model, ea)
-            self.app.call_from_thread(
-                self._open_at, fn.addr, fn.name, idx, False, -1, 0, False,
-                None, top)
-        else:
-            name = self.program.region_label(ea)
-            lm = self.program.listing(ea)
-            idx = max(lm.ensure_ea(ea), 0) if lm is not None else 0
-            _cur, top = self._anchor_rows(anchor, lm, ea)
-            self.app.call_from_thread(
-                self._open_at, ea, name, idx, False, -1, 0, True, None, top)
-        self.app.call_from_thread(self._edit_done, anchor)
+                      anchor: ViewAnchor | None = None) -> None:
+        self.edits.do_edit_item(kind, ea, anchor)
 
-    def _edit_done(self, anchor: ViewAnchor) -> None:
-        """One place where an edit's aftermath is settled.
-
-        The reload this edit triggered will write its own status when it lands —
-        after this — so the message is handed over as a flash rather than
-        written and lost.
-        """
-        self._dirty = True
-        if anchor.flash:
-            self._status(anchor.flash, priority=True)
-        if anchor.refresh_functions:
-            # Creating (or destroying) a function changes the index that the
-            # names pane, Ctrl+N and the "no functions" hint all read. Without
-            # this, `p` gave you a function the rest of the app couldn't see.
-            self._reindex_functions()
+    def _reload_active_code(self) -> None:
+        self.edits.reload_active_code()
 
     # -- trace ------------------------------------------------------------- #
     # Everything below delegates to TraceController (idatui/trace_ctl.py). The
@@ -7344,37 +6708,22 @@ class IdaTui(App):
         self._flash = None
         if event.key != "escape":
             return
-        if self.query_one("#search", Input).display:
+        # Esc closes whichever prompt is up. This used to be one copy of these
+        # four lines per prompt, which is how they drifted apart -- search
+        # cancelled its highlight, goto restored focus, the edit prompts did
+        # neither consistently.
+        prompt = self.prompts.active()
+        if prompt is not None:
             event.stop()
             event.prevent_default()
-            self._end_search(cancel=True)
-            return
-        if self.query_one("#rename", Input).display:
-            event.stop()
-            event.prevent_default()
-            self._end_rename()
-            return
-        if self.query_one("#comment", Input).display:
-            event.stop()
-            event.prevent_default()
-            self._end_comment()
-            return
-        if self.query_one("#retype", Input).display:
-            event.stop()
-            event.prevent_default()
-            self._end_retype()
-            return
-        if self.query_one("#makedata", Input).display:
-            event.stop()
-            event.prevent_default()
-            self._end_makedata()
-            return
-        if self.query_one("#goto", Input).display:
-            event.stop()
-            event.prevent_default()
-            self._end_goto()
-            (self.query_one(HexView) if self._active == "hex"
-             else (self._code_view() or self.query_one(ListingView))).focus()
+            if prompt.id == "search":
+                self._end_search(cancel=True)
+            elif prompt.id == "goto":
+                self._end_goto()
+                (self.query_one(HexView) if self._active == "hex"
+                 else (self._code_view() or self.query_one(ListingView))).focus()
+            else:
+                prompt.close()
             return
         fi = self.query_one("#func-filter", Input)
         if fi.display:
@@ -7399,34 +6748,17 @@ class IdaTui(App):
                     view.repeat_last(direction)
             self._end_search()
             return
-        if inp.id == "rename":
-            view, old = self._rename_ctx
-            addr = self._rename_addr  # capture before _end_rename clears it
-            self._end_rename()
-            if addr is not None:  # listing: name this address (create a label)
-                if value and value != old:
-                    self._do_name_addr(addr, value)
-                return
-            if view is not None and value and value != old:
-                self._do_rename(view, old, value)
-            return
-        if inp.id == "comment":
-            view, ea, existing = self._comment_ctx
-            self._end_comment()
-            if view is not None and value != existing:  # empty value clears it
-                self._do_comment(ea, value)
-            return
-        if inp.id == "retype":
-            view, kind, subject, word = self._retype_ctx
-            self._end_retype()
-            if view is not None and value:
-                self._do_retype(kind, subject, word, value)
-            return
-        if inp.id == "makedata":
-            view, ea = self._makedata_ctx
-            self._end_makedata()
-            if view is not None and value:
-                self._do_make_data(ea, value, self._anchor())
+        # The edit prompts all submit the same way: take the context the prompt
+        # was holding (close() hands it over, so it can't be read twice or go
+        # stale) and let the controller decide what to do with it.
+        submit = {"rename": self.edits.submit_rename,
+                  "comment": self.edits.submit_comment,
+                  "retype": self.edits.submit_retype,
+                  "makedata": self.edits.submit_make_data}.get(inp.id or "")
+        if submit is not None:
+            ctx = self.prompts[inp.id].close()
+            if ctx is not None:
+                submit(ctx, value)
             return
         if inp.id == "goto":
             self._end_goto()
@@ -7446,6 +6778,18 @@ class IdaTui(App):
         goto prompt while reading pseudocode threw focus into the listing.
         """
         return self._active_code_view()
+
+    def _line_ea_for(self, view) -> int | None:  # type: ignore[no-untyped-def]
+        """Address of the line under the cursor in either code view.
+
+        Shared, not an edit helper: the comment prompt, the goto prompt's
+        readback and rpc.py's `where` all ask the same question.
+        """
+        if isinstance(view, ListingView):
+            return view._cursor_ea()
+        if isinstance(view, DecompView):
+            return view._line_ea(view.cursor)
+        return None
 
     def _active_code_view(self):  # type: ignore[no-untyped-def]
         """The currently-shown code widget (for reading the cursor address).
@@ -7813,11 +7157,22 @@ class IdaTui(App):
             self._status(
                 f"{name}  @ {ea:#x}   [pseudocode {len(dec.code or '')} chars]{note}")
 
-    def _sync_split(self, source: str) -> None:
+    def _sync_split(self, source: str, resync: bool = True) -> None:
         """Split view: highlight (+ scroll into view) the companion pane's
         location for the focused pane's cursor. The companion only gets a band +
         scroll (its cursor never moves), so there is no echo/ping-pong. Uses the
-        rich per-line ea map (decomp_map) when loaded, else the single marker."""
+        rich per-line ea map (decomp_map) when loaded, else the single marker.
+
+        ``resync=False`` means "the decompiler has just been re-pointed for this
+        anchor, don't ask again". Without it this recursed forever: _split_range
+        is the min/max of the decomp_map's addresses, which does NOT cover every
+        address in the function (Hex-Rays doesn't attribute them all), so an
+        anchor inside the loaded function but outside that span asked for a
+        resync, got back the function already loaded, re-entered here, and asked
+        again -- one worker and one lookup_funcs round trip per iteration, for as
+        long as the cursor sat there. 21,156 calls for a single address in one
+        scenario, and in the live app an idle split view pegging the worker.
+        """
         if not self._split or self.program is None:
             return
         lst = self.query_one(ListingView)
@@ -7850,7 +7205,7 @@ class IdaTui(App):
                 dec.set_link(None)
                 return
             rng = self._split_range
-            if rng is not None and not (rng[0] <= ea <= rng[1]):
+            if resync and rng is not None and not (rng[0] <= ea <= rng[1]):
                 # left the decompiled function — follow to whatever function is
                 # under the anchor (the unified view spans many functions).
                 self._resync_decomp(ea)
@@ -7900,7 +7255,10 @@ class IdaTui(App):
             return
         self._cur.ea, self._cur.name = fn.addr, fn.name
         if dec.loaded_ea == fn.addr:  # already decompiled (scrolled back): just relink
-            self._sync_split("listing")
+            # resync=False: we ARE the resync. Re-entering the resync branch is
+            # how this looped forever for an address the decomp_map's span
+            # doesn't cover.
+            self._sync_split("listing", resync=False)
             return
         dec.loading = True
         self._load_decomp(fn.addr, fn.name)  # -> _apply_decomp -> map -> re-sync
