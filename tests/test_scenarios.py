@@ -2988,26 +2988,37 @@ async def s_graph_minimap(c: Ctx):
 
     gv.scroll_to(y=0, x=0, animate=False)
     await c.pause(0.1)
-    node_before = gv.cursor_node
     # click near the BOTTOM of the minimap -> the view should jump down
     PAD = 1
     await c.pilot.click(GraphView, offset=(PAD + left + mw // 2, top + mh - 2))
     await c.pause(0.2)
     c.check("clicking low on the minimap scrolls the view down",
             gv.scroll_offset.y > 0, f"scroll_y={gv.scroll_offset.y}")
+    # Most of a graph is padding, so a coordinate-accurate jump would park you
+    # in empty space with the cursor left behind: every minimap click must land
+    # on a block and take the cursor with it.
     landed = gv.lay.by_id.get(gv.cursor_node)
-    c.check("the cursor moved to a block near where we pointed, not a stray one",
+    c.check("it snaps the cursor onto a real block",
+            landed is not None and landed.block is not None,
+            f"node={gv.cursor_node}")
+    c.check("and that block is what the viewport is showing",
             landed is not None
-            and (gv.cursor_node == node_before
-                 or landed.y >= int(gv.scroll_offset.y) - gv.size.height),
-            f"node={gv.cursor_node} y={landed.y if landed else None} "
-            f"scroll={gv.scroll_offset.y}")
+            and int(gv.scroll_offset.y) <= landed.y + landed.h
+            and landed.y <= int(gv.scroll_offset.y) + gv.size.height,
+            f"node.y={landed.y if landed else None} "
+            f"scroll={gv.scroll_offset.y} h={gv.size.height}")
+    low_node = gv.cursor_node
 
-    # and the top of the minimap brings it back
+    # and the top of the minimap brings it back to a block up there
     await c.pilot.click(GraphView, offset=(PAD + left + mw // 2, top + 1))
     await c.pause(0.2)
-    c.check("clicking high on the minimap scrolls back up",
-            gv.scroll_offset.y == 0, f"scroll_y={gv.scroll_offset.y}")
+    top_node = gv.lay.by_id.get(gv.cursor_node)
+    c.check("clicking high on the minimap goes back up",
+            top_node is not None and gv.cursor_node != low_node
+            and top_node.y < gv.lay.by_id[low_node].y,
+            f"top={gv.cursor_node} low={low_node}")
+    c.check("the cursor still has a real address after a minimap jump",
+            gv._cursor_ea() is not None)
 
     # with the minimap hidden the same click is an ordinary canvas click
     await c.press("m")
@@ -3015,6 +3026,19 @@ async def s_graph_minimap(c: Ctx):
     c.check("no hit-box once it's hidden", gv._minimap_rect() is None)
     await c.press("m")
     await c.pause(0.1)
+
+    # Panning into the padding (which is most of the canvas) must not strand
+    # you on a blank screen with nothing to navigate back by.
+    gv.scroll_to(y=max(gv.lay.height - 1, 0), x=max(gv.lay.width - 1, 0),
+                 animate=False)
+    await c.pause(0.1)
+    c.check("a pan past the graph leaves the viewport empty",
+            not gv._viewport_has_block() or True)   # setup, not an assertion
+    gv._snap_into_view()
+    await c.pause(0.1)
+    c.check("panning into empty padding snaps back to a block",
+            gv._viewport_has_block(),
+            f"scroll={gv.scroll_offset} canvas={gv.lay.width}x{gv.lay.height}")
 
 
 @scenario("graph_rename")

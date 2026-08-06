@@ -2281,6 +2281,35 @@ class GraphView(NavMixin, ScrollView, can_focus=True):
 
     def action_pan(self, rows: int) -> None:
         self.scroll_to(y=max(0, self.scroll_offset.y + rows), animate=False)
+        self._snap_into_view()
+
+    def _viewport_has_block(self) -> bool:
+        if self.lay is None:
+            return False
+        y0 = int(self.scroll_offset.y)
+        x0 = int(self.scroll_offset.x)
+        y1, x1 = y0 + self.size.height, x0 + self.size.width
+        return any(n.y <= y1 and y0 <= n.bottom and n.x <= x1 and x0 <= n.right
+                   for n in self.lay.nodes)
+
+    def _snap_into_view(self) -> None:
+        """After a pan, if the viewport holds no block at all, ease to the
+        nearest one.
+
+        Blocks cover a few percent of a laid-out graph -- 4.6% on an 87-block
+        function, under 1% on a 424-block one -- the rest being the padding that
+        keeps edges apart. Panning therefore lands in empty space more often
+        than not, and an empty screen gives you nothing to navigate back by.
+        Only fires when nothing is visible, so it never fights a deliberate pan.
+        """
+        if self.lay is None or self._viewport_has_block():
+            return
+        cy = self.scroll_offset.y + self.size.height / 2
+        cx = self.scroll_offset.x + self.size.width / 2
+        n = self._nearest_node(cy, cx)
+        if n is not None:
+            self._center_on(n, defer=False)
+            self.refresh()
 
     def action_zoom(self) -> None:
         self._zoom = (self._zoom + 1) % len(self.ZOOMS)
@@ -2354,18 +2383,29 @@ class GraphView(NavMixin, ScrollView, can_focus=True):
         if (y, x) != (self.scroll_offset.y, self.scroll_offset.x):
             self.scroll_to(y=max(0, y), x=max(0, x), animate=False)
 
-    def _center_cursor(self) -> None:
-        n = self._cur_node()
+    def _center_on(self, n: graph.Node, defer: bool = True) -> None:
+        """Bring block ``n`` into the middle of the viewport.
+
+        ``defer=False`` during a drag: layout is already valid then, and
+        queueing a callback per mouse-move makes the scrub lag behind.
+        """
         if n is None or self.size.width <= 0:
             return
         y = max(0, n.y - max(self.size.height // 2 - n.h // 2, 0))
         x = max(0, int(n.cx) - self.size.width // 2)
         self.scroll_to(y=y, x=x, animate=False)
+        if not defer:
+            return
         # Setting virtual_size then scrolling immediately clamps to 0 (max_scroll
         # isn't recomputed until layout), so apply it again after the refresh.
         def _again() -> None:
             self.scroll_to(y=y, x=x, animate=False)
         self.call_after_refresh(_again)
+
+    def _center_cursor(self) -> None:
+        n = self._cur_node()
+        if n is not None:
+            self._center_on(n)
 
     # -- minimap hit-testing ----------------------------------------------- #
     def _minimap_rect(self) -> tuple[int, int, int, int] | None:
@@ -2382,8 +2422,35 @@ class GraphView(NavMixin, ScrollView, can_focus=True):
             return None
         return (w - _MINI_W - 2, 0, _MINI_W, _MINI_H)
 
-    def _minimap_seek(self, x: int, y: int, move_cursor: bool = False) -> bool:
-        """Treat (x, y) as a point on the minimap and centre the view there.
+    def _nearest_node(self, row: float, col: float) -> graph.Node | None:
+        """The block nearest a canvas point (distance 0 if the point is inside).
+
+        Cells are about twice as tall as they are wide, so the column distance
+        is halved -- otherwise "nearest" means nearest in cells, which does not
+        look nearest on screen.
+        """
+        if self.lay is None:
+            return None
+        best, best_d = None, None
+        for n in self.lay.nodes:
+            dx = 0.0 if n.x <= col <= n.right else min(abs(col - n.x),
+                                                       abs(col - n.right))
+            dy = 0.0 if n.y <= row <= n.bottom else min(abs(row - n.y),
+                                                        abs(row - n.bottom))
+            d = (dx * 0.5) ** 2 + dy ** 2
+            if best_d is None or d < best_d:
+                best, best_d = n, d
+        return best
+
+    def _minimap_seek(self, x: int, y: int, defer: bool = True) -> bool:
+        """Treat (x, y) as a point on the minimap and go to the block there.
+
+        Deliberately snaps to the NEAREST BLOCK rather than scrolling to the raw
+        coordinate. Most of a laid-out graph is the padding that keeps edges
+        apart, so a coordinate-accurate jump usually parks the viewport in empty
+        space -- and the cursor, which only moved when the point landed exactly
+        on a block, stayed behind. Snapping means every click lands on something
+        and the keyboard carries on from there.
 
         Returns False if the point isn't on the minimap, so the caller can fall
         through to ordinary canvas hit-testing.
@@ -2400,21 +2467,21 @@ class GraphView(NavMixin, ScrollView, can_focus=True):
         sx = max(lay.width / gw, 1e-9)
         sy = max(lay.height / gh, 1e-9)
         cx, cy = (c + 0.5) * sx, (r + 0.5) * sy   # centre of that mini-cell
-        self.scroll_to(x=max(0, int(cx - self.size.width / 2)),
-                       y=max(0, int(cy - self.size.height / 2)), animate=False)
-        if move_cursor:
-            # Land the cursor on a block if the click was over one, so the
-            # keyboard carries on from where you pointed instead of snapping
-            # back to wherever it was.
-            n = lay.node_at(int(cy), int(cx))
-            if n is not None and n.block is not None:
-                self.cursor_node = n.id
-                self.cursor_row = 0
-                self.cursor_x = 0
-                self._clamp_cursor()
-                self.post_message(
-                    self.CursorMoved(self._cursor_ea(), self.cursor_node))
+        n = self._nearest_node(cy, cx)
+        if n is None:
+            self.scroll_to(x=max(0, int(cx - self.size.width / 2)),
+                           y=max(0, int(cy - self.size.height / 2)),
+                           animate=False)
+            return True
+        if n.id == self.cursor_node:
+            return True        # already there; don't churn while dragging
+        self.cursor_node = n.id
+        self.cursor_row = 0
+        self.cursor_x = 0
+        self._clamp_cursor()
+        self._center_on(n, defer=defer)
         self.refresh()
+        self.post_message(self.CursorMoved(self._cursor_ea(), self.cursor_node))
         return True
 
     # -- mouse ------------------------------------------------------------- #
@@ -2430,8 +2497,11 @@ class GraphView(NavMixin, ScrollView, can_focus=True):
         self._drag = (off.x, off.y, self.scroll_offset.x, self.scroll_offset.y)
 
     def on_mouse_up(self, event) -> None:  # type: ignore[no-untyped-def]
+        was_pan = self._drag is not None and not self._drag_map
         self._drag = None
         self._drag_map = False
+        if was_pan:
+            self._snap_into_view()   # don't leave them adrift in the padding
 
     def on_mouse_move(self, event) -> None:  # type: ignore[no-untyped-def]
         if not event.button:
@@ -2440,7 +2510,8 @@ class GraphView(NavMixin, ScrollView, can_focus=True):
         if off is None:
             return
         if self._drag_map:
-            self._minimap_seek(off.x, off.y)   # drag = scrub the overview
+            # drag = scrub block to block through the overview
+            self._minimap_seek(off.x, off.y, defer=False)
             return
         if self._drag is None:
             return
@@ -2457,7 +2528,7 @@ class GraphView(NavMixin, ScrollView, can_focus=True):
         # The minimap floats over the canvas, so it has to be tested FIRST --
         # otherwise a click on it is read as canvas coordinates and drops the
         # cursor into whatever block happens to lie underneath.
-        if self._minimap_seek(off.x, off.y, move_cursor=True):
+        if self._minimap_seek(off.x, off.y):
             self.focus()
             return
         row = off.y + int(self.scroll_offset.y)

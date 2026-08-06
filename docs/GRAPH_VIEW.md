@@ -110,9 +110,14 @@ per block). On `main` (87 blocks) that is a 1378×518 canvas down to 545×289.
 The **minimap** (`m`) is a coarse occupancy grid of the whole graph with the
 viewport marked, drawn top-right and inset two columns — a `ScrollView` paints
 its scrollbar over the last column, which otherwise eats the minimap's border.
-Clicking it jumps the view to that part of the graph (and lands the cursor on a
-block if one is there, so the keyboard carries on from where you pointed);
-dragging scrubs. Because it floats over the canvas rather than living in it,
+Clicking it **snaps to the nearest block** and takes the cursor with it;
+dragging scrubs from block to block. It deliberately does not scroll to the
+coordinate you clicked: blocks cover only a few percent of a laid-out graph
+(4.6% on an 87-block function, under 1% on a 424-block one) and the rest is the
+padding that keeps edges apart, so a coordinate-accurate jump parks you in empty
+space with the cursor left behind. For the same reason, a drag-pan or a
+`ctrl+d`/`pageup` that ends with **no block on screen at all** eases to the
+nearest one — only when nothing is visible, so it never fights a deliberate pan. Because it floats over the canvas rather than living in it,
 `on_click` has to test the minimap's hit-box **before** translating the click
 into canvas coordinates — otherwise a click on the overview reads as a click on
 whatever block happens to lie underneath it. `_minimap_rect()` is the single
