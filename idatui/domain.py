@@ -104,14 +104,27 @@ class Head:
     #: None when the worker didn't provide them (older worker, or the spans
     #: disagreed with the plain text, in which case the text wins).
     spans: tuple[tuple[str, str], ...] | None = None
+    #: [(start, end, n)] — where each operand sits in ``text``, from IDA's own
+    #: COLOR_OPND markers. Lets the view show which operand the cursor is on,
+    #: and is the same information the worker maps a column through, so the
+    #: highlight and the edit can't disagree.
+    ops: tuple[tuple[int, int, int], ...] | None = None
 
     @property
     def label(self) -> str | None:  # Line-compatible alias
         return self.name
 
+    def op_at(self, col: int) -> tuple[int, int, int] | None:
+        """The operand whose text contains ``col``, or None."""
+        for lo, hi, n in self.ops or ():
+            if lo <= col < hi:
+                return (lo, hi, n)
+        return None
+
     @classmethod
     def from_raw(cls, d: dict) -> "Head":
         sp = d.get("spans")
+        ops = d.get("ops")
         return cls(
             ea=_as_int(d["ea"]),
             kind=d.get("kind", "unknown"),
@@ -120,6 +133,8 @@ class Head:
             name=d.get("name"),
             spans=(tuple((str(k), str(t)) for k, t in sp)
                    if isinstance(sp, list) and sp else None),
+            ops=(tuple((int(a), int(b), int(n)) for a, b, n in ops)
+                 if isinstance(ops, list) and ops else None),
         )
 
 
@@ -965,6 +980,9 @@ class Program:
         self._disasm: dict[int, DisasmModel] = {}
         self._listings: dict[int, ListingModel] = {}  # keyed by segment start
         self._decomp: dict[int, tuple[Decompilation, int]] = {}
+        #: {func ea: ({line: [(x0, x1, value)]}, name generation)} — literal
+        #: positions in the pseudocode, cached alongside the decompilation.
+        self._pc_nums: dict[int, tuple[dict, int]] = {}
         self._decomp_maps: dict[int, tuple[list[list[int]], int]] = {}  # line->ea sets
         self._strings: list["StrLit"] | None = None  # whole-binary string literals
         self._linkage: tuple[list["Linkage"], list["Linkage"]] | None = None
@@ -1331,6 +1349,7 @@ class Program:
             self._name_gen += 1
             models = list(self._disasm.values())
             self._listings.clear()  # listing head rows cache names -> refetch
+            self._pc_nums.clear()   # a reformat moves every literal on its line
         for m in models:
             m.invalidate()
 
@@ -1345,6 +1364,7 @@ class Program:
             self._indices.clear()
             self._decomp.clear()
             self._listings.clear()
+            self._pc_nums.clear()
             models = list(self._disasm.values())
             self._disasm.clear()
         for m in models:
@@ -1474,6 +1494,72 @@ class Program:
             raise IDAToolError(
                 "make_string", f"@ {ea:#x}: {res.get('error') or 'rejected'}")
         return res.get("text", "")
+
+    # -- literal display formats (IDA's 'o': hex / dec / char / offset) ---- #
+    def op_format(self, ea: int, mode: str = "cycle", col: int = -1,
+                  n: int = -1) -> dict:
+        """Change how the literal at ``ea`` is DISPLAYED in the listing.
+
+        ``col`` is a column inside the rendered line, which is how the cursor
+        says *which* operand it means; ``n`` names one outright. ``mode`` is
+        ``cycle``/``back`` (step the stops that make sense for this value) or a
+        format by name. ``show`` reports without changing anything.
+        """
+        r = self.client.call("op_format", addr=hex(ea), mode=str(mode),
+                             col=int(col), n=int(n))
+        res = r if isinstance(r, dict) else {}
+        if res.get("error"):
+            raise IDAToolError("op_format", f"@ {ea:#x}: {res['error']}")
+        if not res:
+            raise IDAToolError("op_format", f"@ {ea:#x}: no answer")
+        return res
+
+    def pc_nums(self, fn_ea: int) -> dict[int, list[tuple[int, int, str, int, int]]]:
+        """{pseudocode line: [(x0, x1, value, ea, opnum), ...]} — every number
+        literal in a function's decompilation, so the view can show which one
+        the cursor is on. One worker call per decompilation (cached with it);
+        the alternative is a round trip per cursor move.
+
+        ``ea``/``opnum`` identify a literal across a reformat: the text reflows
+        (``48`` becomes ``0x30``) and a column no longer means the same thing.
+        """
+        with self._lock:
+            hit = self._pc_nums.get(fn_ea)
+            gen = self._name_gen
+        if hit is not None and hit[1] == gen:
+            return hit[0]
+        try:
+            r = self.client.call("pc_nums", addr=hex(fn_ea))
+        except Exception:  # noqa: BLE001 -- an older worker hasn't got the tool
+            r = {}
+        out: dict[int, list[tuple[int, int, str, int, int]]] = {}
+        for rec in (r or {}).get("nums", []):
+            try:
+                out.setdefault(int(rec["line"]), []).append(
+                    (int(rec["x0"]), int(rec["x1"]), str(rec.get("value", "")),
+                     _as_int(rec["ea"]), int(rec.get("opnum", 0))))
+            except Exception:  # noqa: BLE001 -- skip a malformed row
+                continue
+        with self._lock:
+            self._pc_nums[fn_ea] = (out, gen)
+        return out
+
+    def pc_num_format(self, fn_ea: int, mode: str = "cycle", line: int = -1,
+                      col: int = -1) -> dict:
+        """The same, for a number in the DECOMPILATION of ``fn_ea``.
+
+        Hex-Rays keeps number formats of its own, per (address, operand) — the
+        listing's format doesn't reach the pseudocode and vice versa, so this is
+        a separate call rather than a flag on ``op_format``.
+        """
+        r = self.client.call("pc_num_format", addr=hex(fn_ea), mode=str(mode),
+                             line=int(line), col=int(col))
+        res = r if isinstance(r, dict) else {}
+        if res.get("error"):
+            raise IDAToolError("pc_num_format", f"@ {fn_ea:#x}: {res['error']}")
+        if not res:
+            raise IDAToolError("pc_num_format", f"@ {fn_ea:#x}: no answer")
+        return res
 
     def region_label(self, ea: int) -> str:
         """Display name for a non-function address (segment-qualified)."""
