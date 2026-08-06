@@ -108,6 +108,10 @@ _S_MATCH = Style(bgcolor="#7a5c00")  # all search matches
 _S_MATCH_CUR = Style(bgcolor="#d0a215", color="#12161c")  # the current match
 _S_NAME_MATCH = Style(bgcolor="#d0a215", color="#12161c")  # filter match in a name
 _S_WORD = Style(bgcolor="#2a3f5f")  # identifier under the cursor
+#: The operand/literal under the cursor — what `o` would reformat. Distinct from
+#: _S_WORD (which marks every occurrence of an identifier): this marks ONE span,
+#: the thing a keypress acts on, so it reads as a selection rather than a match.
+_S_OPERAND = Style(bgcolor="#3a3560", underline=True)
 _S_CELL = Style(reverse=True)      # the block cursor cell
 _S_LINENO = Style(color="#626c7a")             # pseudocode line-number gutter
 _S_LINENO_CUR = Style(color="#c3cad3", bold=True)  # gutter on the cursor line
@@ -247,6 +251,17 @@ class MakeDataRequested(Message):
     def __init__(self, view) -> None:  # type: ignore[no-untyped-def]
         super().__init__()
         self.view = view
+
+
+class OpFormatRequested(Message):
+    """A code view asks to change how the literal under the cursor is DISPLAYED
+    (IDA's 'o'): hex, decimal, binary, character, offset. ``mode`` is 'cycle',
+    'back', or a format by name."""
+
+    def __init__(self, view, mode: str = "cycle") -> None:  # type: ignore[no-untyped-def]
+        super().__init__()
+        self.view = view
+        self.mode = mode
 
 
 class NavMixin:
@@ -746,7 +761,11 @@ class ListingView(SearchMixin, NavMixin, ColumnCursor, ScrollView, can_focus=Tru
         Binding("end", "col_end", "eol", show=False),
         Binding("G,ctrl+end", "goto_bottom", "Bottom", show=False),
         Binding("ctrl+home", "goto_top", "Top", show=False),
-        Binding("o", "toggle_opcodes", "Opcodes"),
+        # `o` is IDA's operand-format key, and that muscle memory is worth more
+        # than the opcode column's old claim on it (moved to B, for bytes).
+        Binding("o", "op_format('cycle')", "Format"),
+        Binding("O", "op_format('back')", "Format \u2190", show=False),
+        Binding("B", "toggle_opcodes", "Bytes", show=False),
         Binding("c", "define_code", "Code", show=False),
         Binding("d", "make_data", "Data", show=False),
         Binding("a", "make_string", "Str", show=False),
@@ -781,6 +800,9 @@ class ListingView(SearchMixin, NavMixin, ColumnCursor, ScrollView, can_focus=Tru
         self._name = ""
         self._pending_scroll_y: int | None = None
         self._pending_focus: str | None = None
+        #: Operand index to put the cursor column back on once rows land — a
+        #: reformat can change an operand's width, moving the ones after it.
+        self._pending_op: int | None = None
         self._term = ""
         self._matches: list[int] = []
         self._ranges: dict[int, list[tuple[int, int]]] = {}
@@ -881,6 +903,7 @@ class ListingView(SearchMixin, NavMixin, ColumnCursor, ScrollView, can_focus=Tru
         self.cursor_x = cursor_x
         self._pending_scroll_y = scroll_y
         self._pending_focus = focus  # token to land the cursor column on
+        self._pending_op = None
         self._matches = []
         self._ranges = {}
         self._prime()
@@ -915,6 +938,16 @@ class ListingView(SearchMixin, NavMixin, ColumnCursor, ScrollView, can_focus=Tru
                 if occ:
                     self.cursor_x = occ[0][0]
             self._pending_focus = None
+        if self._pending_op is not None:
+            # Stay on the operand that was just reformatted: its text can change
+            # width, which moves every operand after it out from under the
+            # cursor (and the next press would then hit a different one).
+            h = self._head(self.cursor)
+            for lo, _hi, n in (h.ops if h is not None else None) or ():
+                if n == self._pending_op:
+                    self.cursor_x = self._insn_col(self.cursor) + lo
+                    break
+            self._pending_op = None
         self._clamp_x()
         if self._pending_scroll_y is not None and self._pending_scroll_y >= 0:
             self._apply_scroll(min(self._pending_scroll_y, max(total - 1, 0)))
@@ -1074,7 +1107,29 @@ class ListingView(SearchMixin, NavMixin, ColumnCursor, ScrollView, can_focus=Tru
                 strip = _overlay_ranges(strip, occ, _S_WORD)
         if idx == self.cursor:
             strip = _cursor_decorate(strip, plain or "", self.cursor_x)
+            # The operand 'o' would reformat, marked before you press it. A line
+            # can hold several literals and the cursor picks one; showing which
+            # is the difference between an edit you chose and one you got.
+            # Drawn LAST on purpose: _cursor_decorate paints the word under the
+            # cursor, and that word is usually the literal itself — so painting
+            # this first just loses to it.
+            span = self._cursor_operand(idx)
+            if span is not None:
+                strip = _overlay_over(strip, [span], _S_OPERAND)
         return strip.adjust_cell_length(width, _S_LINK if linked else _S_INSN)
+
+    def _cursor_operand(self, idx: int) -> tuple[int, int] | None:
+        """Screen columns of the operand under the cursor on row ``idx``, or None.
+
+        The extents come from the worker (IDA's own operand markers) and are
+        offsets into the head's text, so they shift by the same gutter the
+        cursor column is measured against."""
+        h = self._head(idx)
+        if h is None or not h.ops:
+            return None
+        base = self._insn_col(idx)
+        got = h.op_at(self.cursor_x - base)
+        return (base + got[0], base + got[1]) if got else None
 
     # -- split-view link highlight ---------------------------------------- #
     def set_link(self, rows) -> None:
@@ -1162,6 +1217,18 @@ class ListingView(SearchMixin, NavMixin, ColumnCursor, ScrollView, can_focus=Tru
     def action_make_string(self) -> None:
         self.post_message(EditItemRequested(self, "string"))
 
+    # -- literal display format (IDA 'o') --------------------------------- #
+    def action_op_format(self, mode: str = "cycle") -> None:
+        self.post_message(OpFormatRequested(self, mode))
+
+    def op_col(self) -> int:
+        """Cursor column inside the head's OWN text — the same string the worker
+        renders, so it can say which operand the cursor is standing on. -1 when
+        the cursor is left of it (in the address/opcode gutter), which means "you
+        didn't pick one, take the first literal"."""
+        base = self._insn_col(self.cursor)
+        return self.cursor_x - base if self.cursor_x >= base else -1
+
     def cur_head(self) -> Head | None:
         return self._head(self.cursor)
 
@@ -1245,6 +1312,10 @@ class DecompView(SearchMixin, NavMixin, ColumnCursor, ScrollView, can_focus=True
         Binding("end", "col_end", "eol", show=False),
         Binding("ctrl+home", "goto_top", "Top", show=False),
         Binding("G,ctrl+end", "goto_bottom", "Bottom", show=False),
+        # Hex-Rays keeps number formats of its own, so `o` works here too — on
+        # the C literal under the cursor, not on the instruction's operand.
+        Binding("o", "op_format('cycle')", "Format"),
+        Binding("O", "op_format('back')", "Format \u2190", show=False),
         *SearchMixin.SEARCH_BINDINGS,
         *NavMixin.NAV_BINDINGS,
         *ColumnCursor.COL_BINDINGS,
@@ -1279,9 +1350,37 @@ class DecompView(SearchMixin, NavMixin, ColumnCursor, ScrollView, can_focus=True
         self._term = ""
         self._matches: list[int] = []
         self._ranges: dict[int, list[tuple[int, int]]] = {}
+        #: {line: [(x0, x1, value, ea, opnum)]} — where the number literals are,
+        #: so the one under the cursor can be marked (Hex-Rays keeps formats per
+        #: literal, and a C line often has several).
+        self._nums: dict[int, list[tuple[int, int, str, int, int]]] = {}
+        #: (ea, opnum) to put the cursor back on once the nums land — a reformat
+        #: reflows the line, so the old column points at the wrong literal.
+        self._keep_lit: tuple[int, int] | None = None
 
     def _line_plain(self, idx: int) -> str | None:
         return self._texts[idx] if 0 <= idx < len(self._texts) else None
+
+    def set_nums(self, nums: dict) -> None:
+        self._nums = nums or {}
+        keep, self._keep_lit = self._keep_lit, None
+        if keep is not None:
+            # Land the cursor back on the literal that was just reformatted:
+            # `48` becoming `0x30` moves everything after it, so holding the
+            # column would put the next press on a different literal.
+            for x0, _x1, _v, ea, opnum in self._nums.get(self.cursor, ()):
+                if (ea, opnum) == keep:
+                    self.cursor_x = x0
+                    self._hscroll()
+                    break
+        self.refresh()
+
+    def _cursor_literal(self, idx: int) -> tuple[int, int] | None:
+        """Columns of the number literal under the cursor on ``idx``, or None."""
+        for x0, x1, _v, _ea, _op in self._nums.get(idx, ()):
+            if x0 <= self.cursor_x < x1:
+                return (x0, x1)
+        return None
 
     def _col_offset(self) -> int:
         return self._gutter
@@ -1422,6 +1521,9 @@ class DecompView(SearchMixin, NavMixin, ColumnCursor, ScrollView, can_focus=True
                 base = _overlay_ranges(base, occ, _S_WORD)
         if idx == self.cursor:
             base = _cursor_decorate(base, self._texts[idx], self.cursor_x)
+            span = self._cursor_literal(idx)   # the literal `o` would reformat
+            if span is not None:               # (last: see ListingView)
+                base = _overlay_over(base, [span], _S_OPERAND)
         code_w = max(width - gw, 0)
         code = base.crop(x, x + code_w).adjust_cell_length(
             code_w, _S_LINK if linked else None)
@@ -1457,6 +1559,9 @@ class DecompView(SearchMixin, NavMixin, ColumnCursor, ScrollView, can_focus=True
         super().watch_scroll_y(old_value, new_value)
         if round(old_value) != round(new_value):
             self.post_message(DecompView.Scrolled())
+
+    def action_op_format(self, mode: str = "cycle") -> None:
+        self.post_message(OpFormatRequested(self, mode))
 
     def action_col_code_home(self) -> None:
         """shift+home: first non-blank column — past the C indentation, the
@@ -2190,7 +2295,7 @@ _HELP = (
         ("s", "split view: listing + pseudocode"),
         ("Tab", "in split: switch the driving pane"),
         ("\\", "hex view"),
-        ("o", "cycle the opcode-bytes column"),
+        ("B", "cycle the opcode-bytes column"),
         ("Ctrl+B", "show/hide the names pane"),
         ("Ctrl+T", "structs / types editor"),
         ("Ctrl+P", "command palette"),
@@ -2214,6 +2319,7 @@ _HELP = (
         ("d", "make data"),
         ("a", "make string"),
         ("u", "undefine"),
+        ("o / O", "literal format: hex/dec/bin/char/offset"),
         ("Ctrl+S", "save the database"),
     )),
     ("Search", (
@@ -3199,7 +3305,19 @@ class IdaCommands(Provider):
              lambda: va("make_string")),
             ("Undefine", "undefine the item at the cursor (u)",
              lambda: va("undefine")),
-            ("Toggle opcode bytes", "cycle the opcode-bytes column (o)",
+            ("Literal format: next", "cycle the literal under the cursor (o)",
+             lambda: va("op_format", "cycle")),
+            ("Literal format: previous", "the other way round (O)",
+             lambda: va("op_format", "back")),
+            *((f"Literal format: {label}", f"show the literal as {label} ({fmt})",
+               (lambda f=fmt: va("op_format", f)))
+              for fmt, label in (("hex", "hexadecimal"), ("dec", "decimal"),
+                                 ("oct", "octal"), ("bin", "binary"),
+                                 ("char", "a character"),
+                                 ("offset", "an offset (reference)"),
+                                 ("stack", "a stack variable"),
+                                 ("default", "IDA's own choice"))),
+            ("Toggle opcode bytes", "cycle the opcode-bytes column (B)",
              lambda: va("toggle_opcodes")),
             ("Structs / types editor", "view + edit local types (Ctrl+T)",
              app.action_structs),
@@ -3386,6 +3504,9 @@ class IdaTui(App):
         self._flash_until = 0.0               # ...until this monotonic time
         self._pending_switch = None           # switch waiting on that answer
         self._nav_seq = 0                     # bumped per navigation; drops stale ones
+        #: Literal positions for the decompilation being loaded (worker thread
+        #: -> the view, handed over when the pseudocode is applied).
+        self._pending_nums: dict = {}
         # None = teardown wasn't an explicit quit (crash/kill): save defensively.
         # False = the user chose discard, or we already saved on the way out.
         self._save_on_exit: bool | None = None
@@ -5516,6 +5637,95 @@ class IdaTui(App):
         self._dirty = True
         self._status(f"named {addr:#x} → {name}   (Ctrl+S to save)")
 
+    # -- literal display formats (IDA 'o') -------------------------------- #
+    def on_op_format_requested(self, msg: OpFormatRequested) -> None:
+        if self.program is None or self._cur is None:
+            return
+        view = msg.view
+        if isinstance(view, ListingView):
+            ea = view._cursor_ea()
+            if ea is None:
+                self._status("no address on this line to reformat")
+                return
+            head = view.cur_head()
+            if head is not None and head.kind in ("sep", "funchdr", "label"):
+                # A banner/label row carries the NEXT item's address so that
+                # navigation lands somewhere real — but it has no operands of
+                # its own, and a column measured against it would point into
+                # that item at random.
+                self._status("no literal on this line to reformat", priority=True)
+                return
+            self._do_op_format(msg.mode, "listing", ea, view.op_col())
+            return
+        if isinstance(view, DecompView):
+            # The pseudocode's formats are keyed on the FUNCTION Hex-Rays
+            # decompiled, not on the line's own address.
+            fn = view.loaded_ea if view.loaded_ea is not None else self._cur.ea
+            self._do_op_format(msg.mode, "decomp", fn, view.cursor_x, view.cursor)
+
+    @work(thread=True, exclusive=True, group="opformat")
+    def _do_op_format(self, mode: str, where: str, ea: int, col: int,
+                      line: int = -1) -> None:  # worker context
+        assert self.program is not None
+        try:
+            if where == "listing":
+                r = self.program.op_format(ea, mode=mode, col=col)
+                what = f"op{r.get('n', 0)} "
+            else:
+                r = self.program.pc_num_format(ea, mode=mode, line=line, col=col)
+                what = ""
+        # These are the RESULT of a keypress, so they go on the bar with
+        # priority. Without it a refusal is swallowed by the previous edit's
+        # flash and both the screen and the RPC snapshot still show the last
+        # success -- a call that did nothing reads as one that worked.
+        except IDAToolError as e:
+            self.app.call_from_thread(self._status, f"format: {e.message}",
+                                      True)
+            return
+        except Exception as e:  # noqa: BLE001 -- surface transport failures too
+            self.app.call_from_thread(self._status, f"format: {e}", True)
+            return
+        text = " ".join((r.get("text") or "").split())
+        prev, fmt = r.get("prev", ""), r.get("format", "?")
+        if mode == "show":
+            # A question, not an edit: say what this literal is and what it
+            # could be, and leave the database (and the view) alone.
+            self.app.call_from_thread(
+                self._status,
+                f"{what}{fmt} {r.get('value') or ''}"
+                f"   [{', '.join(r.get('choices', []))}]", True)
+            return
+        step = f"{prev} \u2192 {fmt}" if prev and prev != fmt else fmt
+        desc = f"{what}{step}: {text[:96]}"
+        if r.get("warn"):
+            desc += f"   \u26a0 {r['warn']}"
+        # Which literal this was, so the cursor can be put back on it after the
+        # reload: the line reflows and the old column stops meaning the same
+        # thing (48 -> 0x30 shifts everything to its right).
+        keep: tuple | None = None
+        if where == "listing":
+            if r.get("n") is not None:
+                keep = ("listing", int(r["n"]))
+        elif r.get("ea"):
+            keep = ("decomp", int(str(r["ea"]), 0), int(r.get("opnum", 0)))
+        self.app.call_from_thread(self._after_op_format, desc, keep)
+
+    def _after_op_format(self, desc: str, keep: tuple | None = None) -> None:
+        # Only the rendering changed, but it changed in the database: drop the
+        # cached rows (and bump the generation, so the decompiler re-runs and
+        # picks up its own new number format) and reopen where we are.
+        self.program.bump_names()
+        if keep is not None:
+            # Set before the reload: both views consume this one-shot when their
+            # new content lands, which is always after this handler returns.
+            if keep[0] == "listing":
+                self.query_one(ListingView)._pending_op = keep[1]
+            else:
+                self.query_one(DecompView)._keep_lit = (keep[1], keep[2])
+        self._reload_active_code()
+        self._dirty = True
+        self._status(f"{desc}   (Ctrl+S to save)", priority=True)
+
     # -- item structure edits (IDA c/p/u) --------------------------------- #
     def on_edit_item_requested(self, msg: EditItemRequested) -> None:
         view = msg.view
@@ -6422,7 +6632,7 @@ class IdaTui(App):
             return self.query_one(DecompView)
         return None
 
-    def _palette_action(self, name: str) -> None:
+    def _palette_action(self, name: str, *args) -> None:
         """Run a cursor-scoped code-view action (rename/xrefs/follow/…) picked from
         the command palette against the active code view."""
         view = self._active_code_view()
@@ -6434,7 +6644,7 @@ class IdaTui(App):
         if fn is None:
             self._status(f"'{name}' isn't available in this view")
             return
-        fn()
+        fn(*args)
 
     def action_continuous_here(self) -> None:
         """'L': open the continuous segment listing at the cursor — one long
@@ -6686,6 +6896,12 @@ class IdaTui(App):
         assert self.program is not None
         dec = self.program.decompile(ea)
         why = ""
+        if not dec.failed:
+            # Where the number literals are, fetched in the same worker as the
+            # decompile (it is one call and the answer is cached with it) so the
+            # view can mark the one under the cursor without a round trip per
+            # keypress.
+            self._pending_nums = self.program.pc_nums(ea)
         if dec.failed:
             # Ask Hex-Rays why, in the same worker: the plain tool reports
             # "Decompilation failed at 0x0" and drops the only useful part.
@@ -6734,6 +6950,7 @@ class IdaTui(App):
         sx = cur.dec_scroll_x if same else 0
         note = "  (truncated)" if dec.truncated else ""
         view.show(ea, dec.code or "", cursor=c, cursor_x=cx, scroll_y=sy, scroll_x=sx)
+        view.set_nums(self._pending_nums)
         if self._split:
             self._sync_split(self._active)  # crude link now
             self._load_split_map(ea)        # then upgrade to the region map
