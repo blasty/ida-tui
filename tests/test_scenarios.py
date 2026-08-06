@@ -635,6 +635,33 @@ async def s_strings(c: Ctx):
 @scenario("split_view")
 async def s_split_view(c: Ctx):
     app, lst, dec = c.app, c.lst, c.dec
+    # Count worker lookups across this whole scenario. _sync_split used to bounce
+    # off _apply_resync and back for as long as the decomp map lagged the
+    # decompiler -- one thread worker and one lookup_funcs round trip per
+    # iteration, 23,665 of them in this scenario alone (four distinct
+    # addresses; 21,156 for one of them), and an idle split view pegging the
+    # worker in the live app. The race window is real work to reproduce
+    # deliberately, but it is wide open in the flow below, so the cheap guard is
+    # to count. The bound is loose because the bug was three orders of magnitude
+    # out, not a near miss.
+    _lookups = {"n": 0}
+    _orig_call = c.prog.client.call
+
+    def _counting(name, *a, **kw):
+        if name == "lookup_funcs":
+            _lookups["n"] += 1
+        return _orig_call(name, *a, **kw)
+
+    c.prog.client.call = _counting
+    try:
+        await _split_view_body(c, app, lst, dec)
+    finally:
+        c.prog.client.call = _orig_call
+    c.check("split view doesn't storm the worker with function lookups",
+            _lookups["n"] < 500, f"{_lookups['n']} lookup_funcs calls")
+
+
+async def _split_view_body(c: Ctx, app, lst, dec):
     await c.open_biggest("listing")
     await c.press("s")
     shown = await c.wait(lambda: app._split and lst.display and dec.display, 20)

@@ -198,11 +198,15 @@ See `docs/RPC.md` for the full protocol.
 `tests/run.py` is the front door — it runs every suite and prints one table:
 
 ```sh
-python3 tests/run.py            # everything (needs IDA; ~3 min)
-python3 tests/run.py --fast     # only the no-IDA suites — ~0.5s, runs anywhere
-python3 tests/run.py --list     # what would run, and whether it needs IDA
+python3 tests/run.py --fast     # 257 checks, ~0.5s, any python3 — between edits
 python3 tests/run.py trace -x   # only files matching "trace", stop at first failure
+python3 tests/run.py            # all 733 checks, ~2m20s — before a commit
+python3 tests/run.py --list     # what would run, and whether it needs IDA
 ```
+
+It runs the suites **serially on purpose**: idalib contends hard enough that
+running them 4-up took the suite from 153s to 296s and got three of them killed
+mid-analysis. See the note in `tests/run.py`.
 
 Test files come in two kinds and **each one declares which** with a module-level
 `NEEDS_IDA` marker (`run.py` reads it without importing the file, and refuses to
