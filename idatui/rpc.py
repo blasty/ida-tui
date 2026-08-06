@@ -28,7 +28,7 @@ from typing import Any
 from rich.console import Console
 
 from ._sync import drain, settle
-from .app import DecompView, HexView, ListingView
+from .app import DecompView, GraphView, HexView, ListingView
 
 PROTO_VERSION = 1
 TYPE_DELAY_MS = 35  # default per-char delay for high-level typed ops (aesthetic)
@@ -67,6 +67,10 @@ METHODS = {
     "back": "pop the nav stack",
     "toggle_view": "disasm <-> pseudocode",
     "hex": "hex view",
+    "graph": "{action?=show|open|close|toggle|zoom|block|entry|succ|pred,"
+             "target?,blocks?} the control-flow graph: 'show' reports its "
+             "structure (blocks, edges, cursor) without touching it; the others "
+             "drive it. 'block' takes target=<id|0xADDR>",
     "xrefs": "open the xref picker",
     "symbols": "{query?} open the symbol palette",
     "structs": "open the struct editor",
@@ -83,6 +87,10 @@ METHODS = {
               "(re)define bytes at target — the raw-image workflow",
     "rename_many": "{items:[{addr,name}] | file:JSON} bulk-apply a symbol file "
                    "in ONE call (no typing, no navigation)",
+    "opfmt": "{mode?=cycle|back|show|hex|dec|oct|bin|char|offset|stack|"
+             "default,target?,word?,line?,col?} how the literal under the cursor is "
+             "DISPLAYED (IDA's 'o'); works on the listing and on pseudocode "
+             "numbers. 'show' reports the format and the stops without editing",
 }
 
 #: `opfmt` modes that have a real key on the code views. Driving the key keeps
@@ -122,9 +130,48 @@ def _active_widget(app):
     """The currently *shown* code widget (mirrors app._active)."""
     if app._active == "hex":
         return app.query_one(HexView)
+    if app._active == "graph":
+        return app.query_one(GraphView)
     if app._active in ("listing", "disasm"):
         return app.query_one(ListingView)
     return app.query_one(DecompView)
+
+
+def graph_info(app, blocks: bool = True) -> dict[str, Any]:
+    """Structured view of the control-flow graph: what a driver actually wants,
+    rather than the box-drawing characters it is rendered as."""
+    gv = app.query_one(GraphView)
+    if gv.fc is None or gv.lay is None:
+        return {"open": app._active == "graph", "loaded": False,
+                "note": "press space (or graph {action:'open'}) on a function"}
+    lay, fc = gv.lay, gv.fc
+    out: dict[str, Any] = {
+        "open": app._active == "graph",
+        "loaded": True,
+        "func": {"name": fc.name, "ea": fc.func_ea, "entry": fc.entry},
+        "zoom": gv.ZOOMS[gv._zoom],
+        "canvas": {"w": lay.width, "h": lay.height},
+        "stats": dict(lay.stats),
+        "cursor": {"block": gv.cursor_node, "row": gv.cursor_row,
+                   "ea": gv._cursor_ea(), "word": gv.word_under_cursor()},
+    }
+    if blocks:
+        rows = []
+        for n in lay.nodes:
+            b = gv._blocks.get(n.id)
+            rows.append({
+                "id": n.id,
+                "start": b.start if b else None,
+                "end": b.end if b else None,
+                "insns": len(b.rows) if b else 0,
+                "rank": n.rank,
+                "box": {"x": n.x, "y": n.y, "w": n.w, "h": n.h},
+                "succs": [{"id": i, "kind": k} for i, k in lay.succ.get(n.id, [])],
+                "preds": [{"id": i, "kind": k} for i, k in lay.pred.get(n.id, [])],
+                "selfloop": bool(b and any(d == n.id for d, _ in b.succs)),
+            })
+        out["blocks"] = rows
+    return out
 
 
 _MODALS = ("XrefsScreen", "SymbolPalette", "StructEditor", "ConfirmScreen")
@@ -184,6 +231,12 @@ def _cursor_info(app, w) -> dict[str, Any]:
     if isinstance(w, HexView):
         return {"kind": "hex", "va": (w.cursor_va() if w.model else None),
                 "byte": w.cursor}
+    if isinstance(w, GraphView):
+        # The graph cursor is (block, row), not a line index -- reporting it as
+        # one would make a driver's `cursor line=` land somewhere arbitrary.
+        return {"kind": "graph", "ea": w._cursor_ea(), "block": w.cursor_node,
+                "row": w.cursor_row, "col": w.cursor_x,
+                "word": w.word_under_cursor(), "text": w._line_plain()}
     # disasm / decomp share the ColumnCursor surface
     word = None
     try:
@@ -252,6 +305,11 @@ def view_lines(app, lines: int | None = None) -> dict[str, Any]:
     if isinstance(w, HexView):
         return {"active": "hex", "note": "use screen() for the hex grid",
                 "cursor": _cursor_info(app, w)}
+    if isinstance(w, GraphView):
+        return {"active": "graph", "note": "use graph() for structure, "
+                                           "screen() for the drawing",
+                "cursor": _cursor_info(app, w),
+                "graph": graph_info(app, blocks=False)}
     top = round(w.scroll_offset.y)
     height = w.size.height or 40
     n = min(lines or height, max(w.total - top, 0))
@@ -323,6 +381,9 @@ def cursor_on(app, word: str, line: int | None = None, occurrence: int = 1) -> b
     w = _active_widget(app)
     if isinstance(w, HexView):
         raise ValueError("cursor_on: not supported in the hex view")
+    if isinstance(w, GraphView):
+        raise ValueError("cursor_on: not supported in the graph view — use "
+                         "graph {action:'block'} or goto")
     if isinstance(w, DecompView):
         texts = list(w._texts)
     else:
@@ -555,6 +616,74 @@ class RpcServer:
                 f"(still at {_where(self.app)}); retry with a larger timeout=")
         return snapshot(self.app)
 
+    async def _graph(self, params, timeout):
+        """Drive / read the control-flow graph.
+
+        Everything goes through the real keys and the real view state, so a
+        driver sees exactly what a person would -- and 'show' is a pure read,
+        which is what you want between edits.
+        """
+        app = self.app
+        action = str(params.get("action") or "show").lower()
+        gv = app.query_one(GraphView)
+        want_blocks = params.get("blocks", True) not in (False, "false", "0", 0)
+
+        if action == "show":
+            return {**snapshot(app), "graph": graph_info(app, blocks=want_blocks)}
+        if action in ("open", "toggle", "close"):
+            if action == "open" and app._active == "graph":
+                return {**snapshot(app), "graph": graph_info(app, blocks=want_blocks)}
+            if action == "close" and app._active != "graph":
+                return {**snapshot(app), "graph": graph_info(app, blocks=want_blocks)}
+            want = "graph" if action in ("open", "toggle") and \
+                app._active != "graph" else None
+            res = await self._press(
+                ["space"],
+                (lambda: app._active == "graph") if want else
+                (lambda: app._active != "graph"),
+                timeout, f"graph {action}")
+            return {**res, "graph": graph_info(app, blocks=want_blocks)}
+
+        if app._active != "graph":
+            raise ValueError(f"graph {action}: the graph is not open "
+                             f"(graph {{action:'open'}} first)")
+        if action == "zoom":
+            before = gv._zoom
+            await self._press(["z"], lambda: gv._zoom != before, timeout, "graph zoom")
+        elif action == "entry":
+            await self._press(["0"], None, timeout, "graph entry")
+        elif action in ("succ", "pred"):
+            before = gv.cursor_node
+            await self._press(["J" if action == "succ" else "K"],
+                              lambda: gv.cursor_node != before, timeout,
+                              f"graph {action}")
+        elif action == "block":
+            target = params.get("target")
+            if target is None:
+                raise ValueError("graph block: need target=<block id|0xADDR>")
+            nid = None
+            s = str(target)
+            if s.startswith("0x") or s.startswith("0X"):
+                ea = int(s, 16)
+                b = gv.fc.block_at(ea) if gv.fc else None
+                if b is None:
+                    raise ValueError(f"graph block: {s} is not in this graph")
+                nid = b.id
+            else:
+                nid = int(s)
+                if gv.lay is None or nid not in gv.lay.by_id:
+                    raise ValueError(f"graph block: no block {nid}")
+            gv.cursor_node = nid
+            gv.cursor_row = 0
+            gv.cursor_x = 0
+            gv._clamp_cursor()
+            gv._center_cursor()
+            gv.refresh()
+            await settle(app, None, timeout=2)
+        else:
+            raise ValueError(f"graph: unknown action {action!r}")
+        return {**snapshot(app), "graph": graph_info(app, blocks=want_blocks)}
+
     async def _fill_prompt(self, open_key, input_id, value, delay_ms, clear):
         """Open a prompt (a keystroke), optionally clear its prefill, type the
         value with the typed-out delay, submit. Returns after the prompt closes."""
@@ -677,7 +806,7 @@ class RpcServer:
     _NEEDS_NO_MODAL = {
         "goto", "open", "rename", "comment", "retype", "follow", "back",
         "toggle_view", "hex", "save", "search", "move", "cursor", "cursor_on",
-        "define",
+        "define", "opfmt",
     }
     #: Modals the driver is expected to interact with (they have their own verbs).
     _DRIVABLE_MODALS = {"XrefsScreen", "SymbolPalette", "StructEditor",
@@ -912,6 +1041,47 @@ class RpcServer:
             snap = await self._press([_DEFINE_KEYS[kind]], timeout=timeout,
                                      what=f"define {kind}")
             snap["define"] = {"kind": kind, "status": snap.get("status", "")}
+            return snap
+
+        if method == "opfmt":
+            mode = str(params.get("mode", "cycle")).lower()
+            if mode not in _OPFMT_MODES:
+                raise ValueError(f"unknown opfmt mode {mode!r}; one of "
+                                 f"{', '.join(_OPFMT_MODES)}")
+            target = params.get("target")
+            if target not in (None, ""):
+                await self._fill_prompt("g", "goto", str(target), delay,
+                                        clear=False)
+                await settle(app, timeout=timeout)
+            if app._active == "hex":
+                await self._press(["backslash"], lambda: app._active != "hex",
+                                  timeout, "leave the hex view")
+            view = _active_widget(app)
+            if isinstance(view, HexView):
+                raise RuntimeError("opfmt needs a code view, not the hex view")
+            if params.get("word"):
+                # Land the column on the literal first: WHICH operand gets
+                # reformatted is decided by where the cursor is.
+                if not cursor_on(app, str(params["word"]), params.get("line"),
+                                 int(params.get("occurrence", 1) or 1)):
+                    raise RuntimeError(
+                        f"{params['word']!r} is not on screen in this view, so "
+                        f"there is no literal to reformat")
+                await drain(app)
+            elif params.get("line") is not None or params.get("col") is not None:
+                place_cursor(view, params.get("line"), params.get("col"))
+                await drain(app)
+            before = _where(app)
+            if mode in _OPFMT_KEYS:
+                snap = await self._press([_OPFMT_KEYS[mode]], timeout=timeout,
+                                         what=f"opfmt {mode}")
+            else:
+                view.focus()
+                view.action_op_format(mode)
+                await settle(app, timeout=timeout)
+                snap = snapshot(app)
+            snap["opfmt"] = {"mode": mode, "at": before,
+                             "status": snap.get("status", "")}
             return snap
 
         if method == "rename_many":

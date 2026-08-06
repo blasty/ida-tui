@@ -97,6 +97,20 @@ predicate so the returned state is final.
 | `close` | — | Escape (dismiss a modal). |
 | `define` | `kind`, `target?`, `delay_ms?` | goto `target` (if given) then press the listing key for `kind` ∈ `code`(c) / `func`(p) / `undef`(u) / `thumb`(t) / `thumbscan`(T) / `data`(d) / `string`(a). Leaves hex/decomp for the listing first (those bindings are listing-only). The IDA-side outcome is in `status` (e.g. *defined 228 instructions (0x4370–0x45e8) — control flow ends here*) and in `define.status`. |
 | `rename_many` | `items:[{addr,name}]` **or** `file:<json>`, `allow_overwrite?=true` | bulk-apply a symbol map in ONE worker call, then refresh the caches + function table. Accepts `addr`/`start`/`ea`/`address` and `name`/`label`, or a plain `{addr: name}` object. Returns `rename_many:{requested,skipped,ok,failed,errors[]}`. |
+| `opfmt` | `mode?=cycle`, `target?`, `word?`, `line?`, `col?`, `delay_ms?` | how the literal under the cursor is **displayed** (IDA's `o`). `mode` ∈ `cycle`(o) / `back`(O) / `show` / `hex` / `dec` / `oct` / `bin` / `char` / `offset` / `stack` / `default`. `target` gotos first; `word` puts the cursor on that token first (which operand gets reformatted is decided by where the cursor is). Works on the listing and, with the pseudocode focused, on Hex-Rays' own number formats. Result in `status` and `opfmt.status` (e.g. *op1 hex → dec: sub rsp, 24*). |
+
+**`opfmt show` asks without editing** — it reports the current format, the
+value, and the stops the cycle would visit (`op1 hex 0x18 [hex, dec, bin,
+default]`), which is how a driver finds a literal worth changing without
+guessing from rendered text. A line with no literal answers *no literal on this
+line to reformat* rather than reformatting something else.
+
+**Which literal** is decided by the cursor column, and the TUI marks that one on
+screen. Land inside an operand that has no format of its own (a register) and
+the call is refused, naming the operand that does — it will not silently move to
+a different one, because the mark would then be lying about what changed. With
+the cursor outside every operand (on the mnemonic, say) it falls back to the
+first literal on the line.
 
 **Raw images: `define` + `rename_many` are the workflow.** A firmware blob loads
 with no functions and no names. Point `define thumb` / `define func` at the entry
