@@ -554,6 +554,16 @@ async def s_help(c: Ctx):
     await c.press("escape")
     await c.wait(lambda: not isinstance(app.screen, HelpScreen), 10)
     c.check("Esc closes it", not isinstance(app.screen, HelpScreen))
+    # F-keys get eaten by terminals/multiplexers upstream of us, so the
+    # cheatsheet must not be reachable ONLY through F1.
+    await c.press("H")
+    opened_h = await c.wait(lambda: isinstance(app.screen, HelpScreen), 10)
+    c.check("H opens the cheatsheet too", opened_h,
+            f"screen={type(app.screen).__name__}")
+    if opened_h:
+        await c.press("H")
+        await c.wait(lambda: not isinstance(app.screen, HelpScreen), 10)
+        c.check("H closes it again", not isinstance(app.screen, HelpScreen))
 
 
 @scenario("strings")

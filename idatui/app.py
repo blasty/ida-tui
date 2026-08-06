@@ -3147,7 +3147,7 @@ _HELP = (
         ("?", "search backward"),
         ("N", "previous match"),
         ("Ctrl+Y", "copy the current line"),
-        ("F1", "this cheatsheet"),
+        ("F1 / H", "this cheatsheet"),
         ("q", "quit"),
     )),
     ("Graph (Space)", (
@@ -3205,7 +3205,7 @@ class QuitScreen(ModalScreen):
 class HelpScreen(ModalScreen):
     """F1: the keyboard cheatsheet, replacing the permanent footer."""
 
-    BINDINGS = [Binding("escape,f1,q,question_mark", "close", "Close")]
+    BINDINGS = [Binding("escape,f1,H,q,question_mark", "close", "Close")]
 
     #: widest cell content, +2 for the card's border, +2 for its padding
     _CARD_PAD = 4
@@ -3233,7 +3233,7 @@ class HelpScreen(ModalScreen):
                                               classes="help-card", markup=False)
                                 card.border_title = title
                                 yield card
-            yield Static("Esc / F1 to close", id="help-foot")
+            yield Static("Esc · F1 · H to close", id="help-foot")
 
     @staticmethod
     def _section_widths() -> list[int]:
@@ -4185,7 +4185,8 @@ class IdaCommands(Provider):
              app.action_strings),
             ("Switch binary…", "another binary in the project (Ctrl+O)",
              app.action_switch_binary),
-            ("Keyboard shortcuts", "the key cheatsheet (F1)", app.action_help),
+            ("Keyboard shortcuts", "the key cheatsheet (F1 or H)",
+             app.action_help),
             ("Follow symbol under cursor", "jump to the referenced symbol (Enter)",
              lambda: va("follow")),
             ("Show xrefs to symbol", "cross-references to the cursor symbol (x)",
@@ -4396,7 +4397,10 @@ class IdaTui(App):
         Binding("left_square_bracket", "step_back", "Step back", show=False),
         Binding("right_curly_bracket", "step_over_fwd", "Step over", show=False),
         Binding("left_curly_bracket", "step_over_back", "Step over back", show=False),
-        Binding("f1", "help", "Keys", show=False),
+        # H as well as F1: terminals and multiplexers swallow function keys all
+        # the time (and the one that does it is upstream of us, so there is
+        # nothing to fix on this side), which left the cheatsheet unreachable.
+        Binding("f1,H", "help", "Keys", show=False),
         Binding("g", "goto", "Goto"),
         Binding("slash", "filter", "Filter", show=False),
         Binding("ctrl+b", "toggle_functions", "Names", show=False),
