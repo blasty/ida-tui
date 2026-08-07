@@ -76,6 +76,21 @@ class FakeDatabaseHandle:
         return FakeHandle(path)
 
 
+def _open_kwargs_are_real(sent: dict):
+    """(ok, detail) for the kwargs the adapter passes to DatabaseHandle.open.
+
+    Skips (passes) when ida_codemode is not installed, so the file stays pure.
+    """
+    try:
+        import inspect
+        from ida_codemode.client import DatabaseHandle as Real
+    except ImportError:
+        return True, "ida_codemode not installed - signature not checked"
+    accepted = set(inspect.signature(Real.open).parameters)
+    unknown = sorted(set(sent) - accepted)
+    return not unknown, f"open() rejects {unknown}"
+
+
 def main() -> int:
     proc, base, file_type = _parse_load_args("-parm:ARMv7-M -b800000 -TRaw")
     check("legacy switches map to typed Code Mode options",
@@ -103,8 +118,15 @@ def main() -> int:
                   FakeDatabaseHandle.opened == path and handle is not None)
             check("typed loader options cross the dependency boundary",
                   FakeDatabaseHandle.kwargs["processor"] == "arm:ARMv7-A"
-                  and FakeDatabaseHandle.kwargs["loading_address"] == 0x1000,
+                  and FakeDatabaseHandle.kwargs["image_base"] == 0x1000,
                   FakeDatabaseHandle.kwargs)
+            # A fake that swallows **kwargs cannot catch a keyword the real
+            # library does not have -- which is exactly how this port shipped
+            # `loading_address` (the real name is `image_base`) and would have
+            # raised TypeError on the very first connect. Check the names we
+            # send against the real signature whenever it is importable.
+            check("every open() keyword exists in the real library",
+                  *_open_kwargs_are_real(FakeDatabaseHandle.kwargs))
             check("connect waits for Code Mode autoanalysis",
                   handle.waited == 42, getattr(handle, "waited", None))
             check("progress distinguishes discovery and backend attachment",

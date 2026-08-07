@@ -975,7 +975,10 @@ class CodeModeClient:
                             timeout=max(0.1, timeout),
                             output_database=self._output_database,
                             processor=self._processor,
-                            loading_address=self._loading_address,
+                            # DatabaseHandle calls this image_base and wants the
+                            # natural (16-byte aligned) address; it does the
+                            # conversion to IDA's paragraph-based -b itself.
+                            image_base=self._loading_address,
                             file_type=self._file_type,
                             new_database=self._new_database,
                         )
