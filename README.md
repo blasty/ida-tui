@@ -1,12 +1,8 @@
-<div align="center">
-
-<img src="logo-trans.png" alt="ida-tui" width="420">
+![ida-tui](logo-trans.png)
 
 **IDA Pro in a terminal.** Listing, decompiler, graph — keyboard-first, mouse-capable.
 
 `disasm` · `pseudocode` · `cfg` · `hex` · `strings` · `structs` · `traces` · `rpc`
-
-</div>
 
 ---
 
@@ -175,6 +171,6 @@ flake, and the four ways a test here wastes minutes.
 - A GUI user editing the same database won't invalidate our caches — Code Mode
   has no change feed yet (see `docs/CODEMODE_UPSTREAM.md`).
 
-<div align="center">
-<sub><a href="https://sl0p.foo">sl0p.foo</a></sub>
-</div>
+—
+
+[sl0p.foo](https://sl0p.foo)
