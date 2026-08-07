@@ -642,6 +642,11 @@ class ListingModel:
     """
 
     PAGE = 500  # heads per server call (well under the tool's 2000 cap)
+    #: Heads refreshed together when a rename makes their text stale. One server
+    #: call per block, so a viewport costs one round trip rather than forty --
+    #: and the same size as a load page, so refreshing everything costs about
+    #: what rebuilding everything would have.
+    TEXT_BLOCK = 500
 
     def __init__(self, program: "Program", seg_start: int, seg_end: int,
                  name: str | None = None):
@@ -659,6 +664,19 @@ class ListingModel:
         # demand. _row_at[i] is the logical row where physical head i starts.
         self._row_at: list[int] = []
         self._head_eas: list[int] = []      # parallel to _heads, for bisect
+        #: Which name generation each head's TEXT was rendered at, parallel to
+        #: _heads. A rename bumps :attr:`_text_gen`; the rows themselves stay
+        #: (their addresses and row numbers are unchanged) and are re-rendered a
+        #: block at a time when something asks for them. See invalidate_text.
+        self._head_gen: list[int] = []
+        self._text_gen = 0
+        #: Whether a rename has ever staled this model. Until one has, every
+        #: read takes exactly the path it always did.
+        self._renamed = False
+        #: Set if a text refresh came back with a different head sequence, which
+        #: means something DID move the walk. Program.listing() throws the model
+        #: away when it sees this, so the next read rebuilds from scratch.
+        self.stale_structure = False
         self._rows = 0                      # total logical rows loaded
         self._ubytes: dict[int, bytes] = {}  # lazily-read bytes for those rows
         self._next: int | None = seg_start  # next address to fetch from
@@ -739,6 +757,7 @@ class ListingModel:
         cur = payload.get("cursor", {}) if isinstance(payload, dict) else {}
         page = self._build_page(rows)
         with self._lock:
+            gen = self._text_gen
             for h in page:
                 # Banner/label rows (function headers, separators, code labels)
                 # are display-only; don't index them so navigation lands on the
@@ -747,6 +766,7 @@ class ListingModel:
                     self._by_ea.setdefault(h.ea, self._rows)
                 self._row_at.append(self._rows)
                 self._head_eas.append(h.ea)
+                self._head_gen.append(gen)
                 self._heads.append(h)
                 self._rows += self._span(h)
             nxt = cur.get("next")
@@ -878,6 +898,78 @@ class ListingModel:
     def __len__(self) -> int:
         return self.loaded()
 
+    def invalidate_text(self) -> None:
+        """A rename changed how rows READ, not which rows exist.
+
+        Item boundaries are untouched by a rename, so every row keeps its
+        address and its row number — which the edit path already relies on, since
+        it restores the cursor by INDEX afterwards. Dropping the whole model
+        instead means the next jump re-walks the segment from its start: 6.4
+        seconds on bash's .text, after every single rename.
+
+        So keep the walk and mark the rendered text stale; :meth:`_ensure_text`
+        re-renders a block at a time, and refuses to splice anything back if the
+        head sequence has moved under it (which a rename cannot do, but a
+        mis-routed structural edit could).
+        """
+        with self._lock:
+            self._text_gen += 1
+            self._renamed = True
+
+    def _ensure_text(self, j0: int, j1: int) -> None:
+        """Re-render physical heads [j0, j1) if a rename staled them.
+
+        The block is snapped out to whole ADDRESS groups. A function start emits
+        three banner rows and its code row at the same ea, and a labelled
+        instruction emits two -- so a block boundary that fell inside one of
+        those groups would refetch the whole group and never line up again.
+        """
+        with self._lock:
+            gen = self._text_gen
+            n = len(self._heads)
+            j0 = max(j0, 0)
+            j1 = min(j1, n)
+            if j1 <= j0:
+                return
+            head_gen = self._head_gen
+            if all(head_gen[j] == gen for j in range(j0, j1)):
+                return
+            blk = self.TEXT_BLOCK
+            a = (j0 // blk) * blk
+            b = min(((j1 - 1) // blk + 1) * blk, n)
+            eas = self._head_eas
+            while a > 0 and eas[a - 1] == eas[a]:
+                a -= 1
+            while b < n and eas[b - 1] == eas[b]:
+                b += 1
+            last = self._heads[b - 1]
+            lo = eas[a]
+            hi = last.ea + max(last.size, 1)
+            want = [(h.ea, h.kind) for h in self._heads[a:b]]
+        try:
+            payload = self._prog.client.call(
+                "heads", addr=hex(lo), end=hex(hi),
+                count=min(len(want) + 64, 2000), annotate=True)
+        except Exception:  # noqa: BLE001 -- keep the old text rather than blank
+            return
+        rows = payload.get("heads", []) if isinstance(payload, dict) else []
+        page = self._build_page(rows)[:len(want)]
+        with self._lock:
+            if self._text_gen != gen or len(self._heads) < b:
+                return
+            if [(h.ea, h.kind) for h in page] != want:
+                # Something moved the walk, which a rename cannot do -- so this
+                # was not one. Say so and let Program.listing() rebuild, rather
+                # than sit here re-fetching a block that will never line up (and
+                # showing the old names while doing it).
+                self.stale_structure = True
+                for j in range(a, b):
+                    self._head_gen[j] = gen
+                return
+            self._heads[a:b] = page
+            for j in range(a, b):
+                self._head_gen[j] = gen
+
     def get(self, i: int) -> Head | None:
         with self._lock:
             if not (0 <= i < self._rows):
@@ -885,8 +977,23 @@ class ListingModel:
             j, off = self._phys(i)
             if j < 0:
                 return None
-            span = self._span(self._heads[j])
-            h = self._heads[j]
+            stale = self._renamed and self._head_gen[j] != self._text_gen
+            if not stale:
+                span = self._span(self._heads[j])
+                h = self._heads[j]
+        if stale:
+            # A rename staled this row's text; re-render its block (one call for
+            # the block around it, so a viewport costs one round trip). Only
+            # this path re-takes the lock -- the ordinary read stays atomic.
+            self._ensure_text(j, j + 1)
+            with self._lock:
+                if not (0 <= i < self._rows):
+                    return None
+                j, off = self._phys(i)
+                if j < 0:
+                    return None
+                span = self._span(self._heads[j])
+                h = self._heads[j]
         # Synthesis reads bytes, so do it OUTSIDE the lock: an RPC under the
         # model lock deadlocks the page loader that is filling it.
         return self._row_head(j, off) if span > 1 else h
@@ -894,6 +1001,16 @@ class ListingModel:
     def window(self, start: int, count: int) -> list[Head]:
         """``count`` logical rows from ``start`` (synthesising undefined ones)."""
         self.ensure(start + count)
+        with self._lock:
+            # _renamed stays set once a rename has happened; _ensure_text then
+            # does the precise, range-limited staleness check. Before the first
+            # rename this is one boolean and the read is exactly as it was.
+            dirty = self._renamed
+            if dirty:
+                j0 = max(self._phys(max(start, 0))[0], 0)
+                j1 = self._phys(max(min(self._rows, start + count) - 1, 0))[0] + 1
+        if dirty:
+            self._ensure_text(j0, j1)
         with self._lock:
             rows = min(self._rows, start + count)
             spans = [self._phys(i) for i in range(max(start, 0), max(rows, 0))]
@@ -1223,6 +1340,8 @@ class Program:
         start, end, name = seg
         with self._lock:
             m = self._listings.get(start)
+            if m is not None and m.stale_structure:
+                m = None        # a refresh found the walk had moved; start over
             if m is None:
                 m = ListingModel(self, start, end, name)
                 self._listings[start] = m
@@ -1406,15 +1525,24 @@ class Program:
 
     def bump_names(self) -> None:
         """Signal that symbol names changed (a rename). Disasm/listing names are
-        live in the IDB, so clearing the cached rows is enough for those;
-        decompilation is generation-checked and force-recompiled lazily."""
+        live in the IDB, so the cached rows have to be re-rendered; decompilation
+        is generation-checked and force-recompiled lazily.
+
+        The listing keeps its WALK. A rename cannot move an item boundary, so
+        every row keeps its address and its row number -- the edit path already
+        assumes exactly that, since it restores the cursor by index afterwards.
+        Dropping the segment model instead made the reload re-walk it from the
+        start, which is 6.4 seconds on bash after every rename.
+        """
         with self._lock:
             self._name_gen += 1
             models = list(self._disasm.values())
-            self._listings.clear()  # listing head rows cache names -> refetch
+            listings = list(self._listings.values())
             self._pc_nums.clear()   # a reformat moves every literal on its line
         for m in models:
             m.invalidate()
+        for lm in listings:
+            lm.invalidate_text()
 
     def bump_items(self) -> None:
         """Signal that item/function STRUCTURE changed (define code/data/func,
