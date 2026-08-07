@@ -644,10 +644,57 @@ class SearchMixin:
     #: those changing under us discards it.
     _matched_key: tuple | None = None
 
+    #: The searchable body as ONE string (see :meth:`_search_haystack`), its
+    #: case-folded twin, the character offset each line starts at, and the key
+    #: they were built for. Dropped when the search ends.
+    _hay_key: tuple | None = None
+    _hay: tuple | None = None
+
     def _search_source_id(self) -> int:
         """Identity of whatever supplies the line text. Changes when the view is
         pointed at a different model/body, which invalidates a narrowing."""
         return id(getattr(self, "model", None) or getattr(self, "_texts", None))
+
+    def _reset_search_cache(self) -> None:
+        """Forget both the narrowing key and the joined body. Called from every
+        place that resets ``_matches``/``_ranges``: a stale prefix would make the
+        next search narrow from an empty list, and a stale body would search
+        text the view no longer shows."""
+        self._matched_key = None
+        self._hay_key = None
+        self._hay = None
+
+    def _search_haystack(self, count: int, src: int):
+        """``(starts, blob, blob_folded)`` for the whole body, or None.
+
+        Every line joined with newlines, so finding a term is one C-level
+        ``str.find`` walk over the segment instead of a python loop that rebuilds
+        and case-folds 200 000 lines per keystroke. ``starts[i]`` is where line
+        ``i`` begins; a term can never straddle a line because it cannot contain
+        a newline.
+
+        Returns None (and the caller falls back to the per-line loop) if folding
+        changes the length — a couple of unicode codepoints grow when lowered,
+        and then every offset after them would be wrong.
+        """
+        key = (count, src)
+        if self._hay_key == key:
+            return self._hay
+        text_of = self._search_line_text
+        starts: list[int] = []
+        parts: list[str] = []
+        pos = 0
+        for i in range(count):
+            s = text_of(i) or ""
+            starts.append(pos)
+            parts.append(s)
+            pos += len(s) + 1
+        blob = "\n".join(parts)
+        folded = blob.lower()
+        hay = None if len(folded) != len(blob) else (starts, blob, folded)
+        self._hay_key = key
+        self._hay = hay
+        return hay
 
     # --- hooks a subclass implements ---
     def _search_line_count(self) -> int:
@@ -680,7 +727,7 @@ class SearchMixin:
             self._term = ""
             self._matches = []
             self._ranges = {}
-            self._matched_key = None
+            self._reset_search_cache()
             self.cursor = getattr(self, "_search_origin", self.cursor)
             self.cursor_x = getattr(self, "_search_origin_x", self.cursor_x)
             self.refresh()
@@ -719,7 +766,7 @@ class SearchMixin:
         self._term = ""
         self._matches = []
         self._ranges = {}
-        self._matched_key = None
+        self._reset_search_cache()
         self.cursor = getattr(self, "_search_origin", self.cursor)
         self.cursor_x = getattr(self, "_search_origin_x", self.cursor_x)
         self.scroll_to(y=max(self.cursor - self._visible_height() // 2, 0), animate=False)
@@ -751,29 +798,57 @@ class SearchMixin:
         # The row count is part of the key because the listing streams in behind
         # the search: rows that arrived after the last pass have never been
         # looked at, and narrowing would silently never find them.
-        rows: object = range(count)
-        prev = self._matched_key
-        if (prev is not None and prev[2] == count and prev[3] == src
-                and prev[1] == ci and term.startswith(prev[0]) and prev[0]):
-            rows = self._matches
+        n = len(term)
         matches: list[int] = []
         ranges: dict[int, list[tuple[int, int]]] = {}
-        text_of = self._search_line_text
-        n = len(term)
-        for i in rows:
-            s = text_of(i)
-            if not s:
-                continue
-            hay = s.lower() if ci else s
-            j = hay.find(needle)
-            if j < 0:
-                continue
-            rs = []
+        hay = self._search_haystack(count, src)
+        if hay is not None:
+            starts, blob, folded = hay
+            body = folded if ci else blob
+            nlines = len(starts)
+            line = 0
+            j = body.find(needle)
             while j >= 0:
-                rs.append((j, j + n))
-                j = hay.find(needle, j + n)
-            matches.append(i)
-            ranges[i] = rs
+                # find() walks forward, so the line only ever advances.
+                while line + 1 < nlines and starts[line + 1] <= j:
+                    line += 1
+                off = j - starts[line]
+                rs = ranges.get(line)
+                if rs is None:
+                    ranges[line] = [(off, off + n)]
+                    matches.append(line)
+                else:
+                    rs.append((off, off + n))
+                j = body.find(needle, j + n)
+        else:
+            # Typing forward can only ever REMOVE lines: a line holding "mov"
+            # holds "mo". So when the term just grew (and nothing else moved --
+            # same case-folding, same body, same number of rows) rescan only the
+            # previous hits.
+            #
+            # The row count is part of the key because the listing streams in
+            # behind the search: rows that arrived after the last pass have never
+            # been looked at, and narrowing would silently never find them.
+            rows: object = range(count)
+            prev = self._matched_key
+            if (prev is not None and prev[2] == count and prev[3] == src
+                    and prev[1] == ci and term.startswith(prev[0]) and prev[0]):
+                rows = self._matches
+            text_of = self._search_line_text
+            for i in rows:
+                s = text_of(i)
+                if not s:
+                    continue
+                h = s.lower() if ci else s
+                j = h.find(needle)
+                if j < 0:
+                    continue
+                rs = []
+                while j >= 0:
+                    rs.append((j, j + n))
+                    j = h.find(needle, j + n)
+                matches.append(i)
+                ranges[i] = rs
         self._matches = matches
         self._ranges = ranges
         self._matched_key = (term, ci, count, src)
@@ -810,7 +885,7 @@ class SearchMixin:
         self._term = ""
         self._matches = []
         self._ranges = {}
-        self._matched_key = None
+        self._reset_search_cache()
         self.refresh()
 
     def _match_style(self, idx: int) -> Style:
@@ -997,7 +1072,7 @@ class ListingView(SearchMixin, NavMixin, ColumnCursor, ScrollView, can_focus=Tru
         self._pending_op = None
         self._matches = []
         self._ranges = {}
-        self._matched_key = None
+        self._reset_search_cache()
         self._prime()
 
     @work(thread=True, exclusive=True, group="listing-prime")
@@ -1072,7 +1147,7 @@ class ListingView(SearchMixin, NavMixin, ColumnCursor, ScrollView, can_focus=Tru
         self._op_mode = (self._op_mode + 1) % 3
         self._update_op_w()
         self._ranges = {}  # column layout changed -> stale match offsets
-        self._matched_key = None  # ...and which rows match at all
+        self._reset_search_cache()  # ...and which rows match at all
         self._clamp_x()
         self.refresh()
         self._app_status("opcodes: " + {0: "off", 1: f"limited ({_OP_LIMIT} bytes)",
@@ -1508,7 +1583,7 @@ class DecompView(SearchMixin, NavMixin, ColumnCursor, ScrollView, can_focus=True
         self.cursor_x = cursor_x
         self._matches = []
         self._ranges = {}
-        self._matched_key = None
+        self._reset_search_cache()
         # Gutter wide enough for the largest line number + a trailing space.
         self._gutter = (len(str(total)) + 1) if total else 0
         maxw = max((s.cell_length for s in self._strips), default=0)
