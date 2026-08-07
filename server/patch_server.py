@@ -983,13 +983,19 @@ def decomp_map(
     #    read, so don't ask for them at all.
     #  * sweep the TAGGED length. ``x`` is a screen column but ``sl.line`` still
     #    carries IDA's colour tags, so a 23-column line was swept 124 times.
-    #  * call dstr() per column. It formats a whole 'EA: description' string, and
-    #    consecutive columns are nearly always the same ctree item -- so ask the
-    #    item for its id first and only format when it changes. (The result is
-    #    deduped by ``seen`` anyway, so skipping a repeat cannot change it.)
+    #  * call dstr() per column. It formats a whole 'EA: description' string --
+    #    24us a call, which is 79% of this tool. Comparing against the PREVIOUS
+    #    column's item id is not enough: items interleave, so `foo(a, b)` flips
+    #    call -> arg -> call -> arg and every flip re-formats an item already
+    #    seen (106 594 calls for 15 417 lines of bash). Memoise id -> ea for the
+    #    whole function instead: obj_id is unique within a cfunc, so the same id
+    #    always yields the same string, and the result is deduped by ``seen``
+    #    anyway. Items with no ctree node (it is None) have no id to key on and
+    #    still pay per occurrence.
     item = ida_hexrays.ctree_item_t()
     tag_remove = ida_lines.tag_remove
     get_line_item = cfunc.get_line_item
+    ea_of_id = {}
     lines = []
     for sl in cfunc.get_pseudocode():
         line = sl.line
@@ -1004,21 +1010,29 @@ def decomp_map(
                 if oid == prev_id:
                     continue
                 prev_id = oid
+                if oid in ea_of_id:
+                    e = ea_of_id[oid]
+                    if e is not None and e not in seen:
+                        seen.add(e)
+                        eas.append(hex(e))
+                    continue
             else:
+                oid = None
                 prev_id = None
             # Match the /*ea*/ marker's source (decompile_function_safe): the
             # item's dstr() is 'EA: description'; get_ea() reports a different ea.
+            e = None
             dstr = item.dstr()
-            if not dstr:
-                continue
-            parts = dstr.split(": ", 1)
-            if len(parts) != 2:
-                continue
-            try:
-                e = int(parts[0], 16)
-            except ValueError:
-                continue
-            if e not in seen:
+            if dstr:
+                parts = dstr.split(": ", 1)
+                if len(parts) == 2:
+                    try:
+                        e = int(parts[0], 16)
+                    except ValueError:
+                        e = None
+            if oid is not None:
+                ea_of_id[oid] = e
+            if e is not None and e not in seen:
                 seen.add(e)
                 eas.append(hex(e))
         lines.append({"ea": eas[0] if eas else None, "eas": eas})
