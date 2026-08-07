@@ -629,6 +629,17 @@ class SearchMixin:
     _matches: list[int]
     _ranges: dict[int, list[tuple[int, int]]]
 
+    #: What ``_matches`` was last computed from: (term, case-fold, row count,
+    #: id(line source)). Lets an as-you-type search narrow the previous hits
+    #: instead of rescanning the segment; see :meth:`_compute_matches`. Any of
+    #: those changing under us discards it.
+    _matched_key: tuple | None = None
+
+    def _search_source_id(self) -> int:
+        """Identity of whatever supplies the line text. Changes when the view is
+        pointed at a different model/body, which invalidates a narrowing."""
+        return id(getattr(self, "model", None) or getattr(self, "_texts", None))
+
     # --- hooks a subclass implements ---
     def _search_line_count(self) -> int:
         raise NotImplementedError
@@ -660,6 +671,7 @@ class SearchMixin:
             self._term = ""
             self._matches = []
             self._ranges = {}
+            self._matched_key = None
             self.cursor = getattr(self, "_search_origin", self.cursor)
             self.cursor_x = getattr(self, "_search_origin_x", self.cursor_x)
             self.refresh()
@@ -698,6 +710,7 @@ class SearchMixin:
         self._term = ""
         self._matches = []
         self._ranges = {}
+        self._matched_key = None
         self.cursor = getattr(self, "_search_origin", self.cursor)
         self.cursor_x = getattr(self, "_search_origin_x", self.cursor_x)
         self.scroll_to(y=max(self.cursor - self._visible_height() // 2, 0), animate=False)
@@ -715,26 +728,46 @@ class SearchMixin:
 
     def _compute_matches(self) -> None:
         term = self._term
-        needle = term.lower() if getattr(self, "_ci", True) else term
+        ci = getattr(self, "_ci", True)
+        needle = term.lower() if ci else term
+        count = self._search_line_count()
+        src = self._search_source_id()
+        # Typing forward can only ever REMOVE lines: a line holding "mov" holds
+        # "mo". So when the term just grew (and nothing else moved -- same
+        # case-folding, same body, same number of rows) rescan only the previous
+        # hits. Search is driven a keystroke at a time, and a segment of bash is
+        # 224k rows; this is the difference between rescanning all of them per
+        # keypress and looking at a few thousand.
+        #
+        # The row count is part of the key because the listing streams in behind
+        # the search: rows that arrived after the last pass have never been
+        # looked at, and narrowing would silently never find them.
+        rows: object = range(count)
+        prev = self._matched_key
+        if (prev is not None and prev[2] == count and prev[3] == src
+                and prev[1] == ci and term.startswith(prev[0]) and prev[0]):
+            rows = self._matches
         matches: list[int] = []
         ranges: dict[int, list[tuple[int, int]]] = {}
-        for i in range(self._search_line_count()):
-            s = self._search_line_text(i)
+        text_of = self._search_line_text
+        n = len(term)
+        for i in rows:
+            s = text_of(i)
             if not s:
                 continue
-            hay = s.lower() if getattr(self, "_ci", True) else s
-            pos, rs = 0, []
-            while True:
-                j = hay.find(needle, pos)
-                if j < 0:
-                    break
-                rs.append((j, j + len(term)))
-                pos = j + len(term)
-            if rs:
-                matches.append(i)
-                ranges[i] = rs
+            hay = s.lower() if ci else s
+            j = hay.find(needle)
+            if j < 0:
+                continue
+            rs = []
+            while j >= 0:
+                rs.append((j, j + n))
+                j = hay.find(needle, j + n)
+            matches.append(i)
+            ranges[i] = rs
         self._matches = matches
         self._ranges = ranges
+        self._matched_key = (term, ci, count, src)
 
     def search_repeat(self, direction: int, include_current: bool = False) -> None:
         if not getattr(self, "_term", ""):
@@ -768,6 +801,7 @@ class SearchMixin:
         self._term = ""
         self._matches = []
         self._ranges = {}
+        self._matched_key = None
         self.refresh()
 
     def _match_style(self, idx: int) -> Style:
@@ -949,6 +983,7 @@ class ListingView(SearchMixin, NavMixin, ColumnCursor, ScrollView, can_focus=Tru
         self._pending_op = None
         self._matches = []
         self._ranges = {}
+        self._matched_key = None
         self._prime()
 
     @work(thread=True, exclusive=True, group="listing-prime")
@@ -1023,6 +1058,7 @@ class ListingView(SearchMixin, NavMixin, ColumnCursor, ScrollView, can_focus=Tru
         self._op_mode = (self._op_mode + 1) % 3
         self._update_op_w()
         self._ranges = {}  # column layout changed -> stale match offsets
+        self._matched_key = None  # ...and which rows match at all
         self._clamp_x()
         self.refresh()
         self._app_status("opcodes: " + {0: "off", 1: f"limited ({_OP_LIMIT} bytes)",
@@ -1458,6 +1494,7 @@ class DecompView(SearchMixin, NavMixin, ColumnCursor, ScrollView, can_focus=True
         self.cursor_x = cursor_x
         self._matches = []
         self._ranges = {}
+        self._matched_key = None
         # Gutter wide enough for the largest line number + a trailing space.
         self._gutter = (len(str(total)) + 1) if total else 0
         maxw = max((s.cell_length for s in self._strips), default=0)
