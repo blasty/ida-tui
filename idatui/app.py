@@ -592,13 +592,22 @@ class ColumnCursor:
         self._page_scroll(direction * (self._visible_height() // 2))
 
     def _apply_scroll(self, y: int, x: int = 0) -> None:
-        """Set the scroll offset reliably after a (re)load. Applied now and again
-        after the next refresh — when the view was just shown its size isn't
-        computed yet, so an immediate scroll_to clamps to 0; the deferred pass
-        re-applies it and forces a repaint so the pane never shows a stale frame.
+        """Set the scroll offset reliably after a (re)load. Applied now and, if
+        that didn't take, again after the next refresh — when the view was just
+        shown its size isn't computed yet, so an immediate scroll_to clamps to 0;
+        the deferred pass re-applies it and forces a repaint so the pane never
+        shows a stale frame.
+
+        The deferred pass is only scheduled when the scroll actually clamped.
+        ``refresh(layout=True)`` re-arranges the whole screen, and paying that on
+        every scroll that already landed cost ~25% of the time it takes to move
+        through a view.
         """
         y = max(0, y)
         self.scroll_to(x=x, y=y, animate=False)
+        off = self.scroll_offset
+        if round(off.y) == y and round(off.x) == x:
+            return  # max_scroll was current, the offset is already where we want
 
         def _fix(yy: int = y, xx: int = x) -> None:
             self.scroll_to(x=xx, y=yy, animate=False)
@@ -1812,7 +1821,11 @@ class HexView(ScrollView, can_focus=True):
             self.refresh(layout=True)
 
         self.scroll_to(y=y, animate=False)
-        self.call_after_refresh(_fix)
+        # Only re-apply when the scroll clamped (the view's size wasn't computed
+        # yet). See ColumnCursor._apply_scroll: the deferred pass drags a full
+        # layout with it, which is far too expensive to do on every scroll.
+        if round(self.scroll_offset.y) != y:
+            self.call_after_refresh(_fix)
 
     def _scroll_to_cursor(self, center: bool = False) -> None:
         height = self._visible_height()
