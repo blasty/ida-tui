@@ -53,6 +53,15 @@ Hard-won Textual behaviour and the patterns this app relies on. Pairs with
   `build_byte_to_codepoint_dict`, so character offsets smear on non-ASCII), and
   a `TextAreaTheme` that sets `base_style` overrides the widget's CSS colours —
   ours sets only `syntax_styles` so the editor keeps the app's background.
+- **Fixed-size splash art disappears instead of shrinking.** The kitty image is
+  scaled by the terminal into whatever cell box you place it in (`c=`/`r=`), so
+  sizing it to the artwork's natural height and then asking "is there room?" is
+  all-or-nothing — a 31-row zellij pane was ONE row short of the 41 the splash
+  wanted, and the logo silently vanished. Size the art to the room instead
+  (`logo_cells(max_rows)`), and keep the chrome constant honest:
+  `LOGO_CHROME_ROWS = 10` is border 2 + padding 2 + the art's margin 1 + title 1
+  + note 1+1 + help 1+1, which the old `rows + 9` under-counted by one, so at
+  exactly the threshold the help line was clipped off the bottom.
 - **Centre modals with a rule, not a list.** `ModalScreen { align: center middle; }`
   matches subclasses, so every dialog inherits it and the next one is centred
   for free. Naming the screens instead (`SymbolPalette, StringsPalette, …`) is

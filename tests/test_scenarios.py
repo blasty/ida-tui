@@ -1094,6 +1094,65 @@ async def s_structs(c: Ctx):
     c.check("Esc closes the struct editor", not isinstance(app.screen, StructEditor))
 
 
+@scenario("splash_scaling")
+async def s_splash_scaling(c: Ctx):
+    """The splash scales the logo to the pane instead of dropping it.
+
+    The bug this pins: the artwork's natural size is ~31 rows plus 10 of box
+    chrome, and the check was "do you have 41 rows?". A 31-row pane -- what a
+    split zellij window actually gives you -- was one row short, so the logo
+    silently disappeared. The terminal scales an image into whatever cell box
+    it is placed in, so there was never a reason for all-or-nothing.
+    """
+    from idatui import kittygfx
+    from idatui.app import (LOGO_CHROME_ROWS, LOGO_MIN_ROWS, LoadingScreen,
+                            logo_cells)
+
+    app = c.app
+    placed: list[tuple] = []
+    real_supported, real_upload, real_place = (
+        kittygfx.supported, kittygfx.upload, kittygfx.place)
+    kittygfx.supported = lambda: True
+    kittygfx.upload = lambda *a, **k: True
+    kittygfx.place = lambda *a, **k: (placed.append(a), True)[1]
+    try:
+        for width, height in ((159, 31), (100, 30), (140, 44)):
+            await c.pilot.resize_terminal(width, height)
+            await c.pause(0.05)
+            app.push_screen(LoadingScreen("echo"))
+            await c.wait(lambda: isinstance(app.screen, LoadingScreen), 5)
+            scr = app.screen
+            # push_screen returns before compose has mounted the children.
+            await c.wait(lambda: scr._cells is not None, 5)
+            room = height - LOGO_CHROME_ROWS
+            has_image = bool(scr.query("#loading-image"))
+            c.check(f"{width}x{height}: the logo is drawn, not dropped",
+                    has_image and room >= LOGO_MIN_ROWS,
+                    f"image={has_image} room={room}")
+            if has_image:
+                cols, rows = scr._cells
+                c.check(f"{width}x{height}: scaled to the room available",
+                        rows <= room and rows == min(room, logo_cells()[1]),
+                        f"cells={scr._cells} room={room} natural={logo_cells()}")
+                await c.wait(lambda: scr.query_one("#loading-box").region.height > 0, 5)
+                box = scr.query_one("#loading-box").region
+                c.check(f"{width}x{height}: the box is not clipped",
+                        box.y >= 0 and box.y + box.height <= height,
+                        f"box={box} screen={height}")
+            app.pop_screen()
+            await c.pause(0.05)
+        c.check("a full-size pane still gets the artwork's natural size",
+                logo_cells(999) == logo_cells(), f"{logo_cells(999)}")
+        c.check("and the image was actually placed each time", len(placed) >= 3,
+                f"{placed}")
+    finally:
+        kittygfx.supported, kittygfx.upload, kittygfx.place = (
+            real_supported, real_upload, real_place)
+        # Every later scenario assumes the suite's own geometry.
+        await c.pilot.resize_terminal(140, 44)
+        await c.pause(0.05)
+
+
 @scenario("modal_centering")
 async def s_modal_centering(c: Ctx):
     """Every dialog we define is centred, without anyone maintaining a list.

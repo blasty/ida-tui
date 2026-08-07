@@ -4270,22 +4270,37 @@ _LOGO_PATH = os.path.join(_REPO_ROOT, "logo.ans")
 #: is half-blocks (two pixels per cell); this is a transparent PNG at 768px.
 LOGO_PNG = os.path.join(_REPO_ROOT, "logo.png")
 _LOGO_BOX = (60, 33)     # the most room the splash will give the art
+#: Rows the loading box spends on everything that is not the artwork: border 2,
+#: padding 2, the art's margin 1, title 1, note 1 + margin 1, help 1 + margin 1.
+LOGO_CHROME_ROWS = 10
+#: Below this the image is a postage stamp; show the text splash instead.
+LOGO_MIN_ROWS = 8
 _logo_cells: tuple[int, int] | None = None
 
 
-def logo_cells() -> tuple[int, int]:
+def logo_cells(max_rows: int | None = None) -> tuple[int, int]:
     """Cell footprint for the image, derived from the artwork and the terminal's
     real cell size rather than hardcoded.
 
     Cells are nowhere near square (9x22 px here, 1:2.44), so a fixed box picked
     for one aspect ratio stretches any other. Recomputing means the art can be
     replaced without anyone remembering to edit a constant.
+
+    ``max_rows`` shrinks it to the room actually available. The terminal scales
+    the image into whatever cell box we place it in, so there is no reason for
+    the splash to be all-or-nothing -- and it WAS all-or-nothing: a 31-row pane
+    is one row short of the natural size, so the logo silently disappeared
+    rather than being drawn a little smaller.
     """
     global _logo_cells
     if _logo_cells is None:
         px = kittygfx.png_size(LOGO_PNG)
         _logo_cells = kittygfx.fit(px, *_LOGO_BOX) if px else _LOGO_BOX
-    return _logo_cells
+    if max_rows is None or max_rows >= _logo_cells[1]:
+        return _logo_cells
+    px = kittygfx.png_size(LOGO_PNG)
+    return (kittygfx.fit(px, _LOGO_BOX[0], max(max_rows, 1)) if px
+            else (_LOGO_BOX[0], max(max_rows, 1)))
 _logo_cache: object = False  # False == not yet loaded (None == absent/unreadable)
 
 
@@ -4317,12 +4332,16 @@ class LoadingScreen(ModalScreen):
         self._title = title
         self._note = note
         self._image = False       # drawing the real image, not the block art
+        self._cells: tuple[int, int] | None = None   # image size, in cells
         self._last_place = 0.0    # throttles re-anchoring after a repaint
 
+    def _room(self) -> int:
+        """Rows left for artwork once the box's own furniture is paid for."""
+        return self.app.size.height - LOGO_CHROME_ROWS
+
     def _fits(self, rows: int) -> bool:
-        """Room for the art plus the title/note/help lines and box chrome."""
-        sz = self.app.size
-        return sz.height >= rows + 9 and sz.width >= 64
+        """Room for art of exactly ``rows`` (the block art cannot be resized)."""
+        return self._room() >= rows and self.app.size.width >= 64
 
     def compose(self) -> ComposeResult:
         with Vertical(id="loading-box"):
@@ -4331,11 +4350,16 @@ class LoadingScreen(ModalScreen):
             # The image is anchored to screen cells rather than composited by
             # Textual (no unicode-placeholder support here), so the widget is
             # only reserved blank space -- see _place_logo.
-            cols, rows = logo_cells()
+            # Scale the image to the room there is, rather than demanding its
+            # natural size and vanishing when one row is missing.
+            room = self._room()
+            cols, rows = logo_cells(room)
+            self._cells = (cols, rows)
             kittygfx.log(f"compose: supported={kittygfx.supported()} "
-                         f"app.size={self.app.size} cells={cols}x{rows} "
-                         f"fits={self._fits(rows)}")
-            if kittygfx.supported() and self._fits(rows):
+                         f"app.size={self.app.size} room={room} "
+                         f"cells={cols}x{rows} natural={logo_cells()}")
+            if (kittygfx.supported() and self.app.size.width >= 64
+                    and room >= LOGO_MIN_ROWS):
                 self._image = True
                 blank = Static("\n" * (rows - 1), id="loading-image")
                 blank.styles.height = rows
@@ -4386,7 +4410,10 @@ class LoadingScreen(ModalScreen):
         kittygfx.log(f"place_logo: region={region}")
         if not region.width or not region.height:
             return
-        cols, rows = logo_cells()
+        # The reserved region is the truth about how much room there is; the
+        # image is scaled into exactly it, so a resize needs no relayout.
+        cols, rows = self._cells or logo_cells()
+        rows = min(rows, region.height)
         col = region.x + max((region.width - cols) // 2, 0)   # centre it
         kittygfx.place(region.y, col, min(cols, region.width), rows)
 
