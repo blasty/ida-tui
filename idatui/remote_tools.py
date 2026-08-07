@@ -1050,15 +1050,26 @@ _IDATUI_PC_FMT_CYCLE = ("hex", "dec", "oct", "char", "default")
 
 def _idatui_compact(line):
     """The ida-pro-mcp whitespace collapse the pseudocode is served through, so
-    a column in what the client SHOWS can be mapped back to Hex-Rays' line."""
-    try:
-        from ida_pro_mcp.ida_mcp.utils import compact_whitespace
-        return compact_whitespace(line)
-    except Exception:
-        import re as _re
-        stripped = line.lstrip(" \t")
-        lead = line[: len(line) - len(stripped)]
-        return lead + _re.sub(r"[ \t]{2,}", " ", stripped)
+    a column in what the client SHOWS can be mapped back to Hex-Rays' line.
+
+    DEVIATION FROM THE EXTRACTED ORIGINAL, deliberately: this used to be
+    ``from ida_pro_mcp.ida_mcp.utils import compact_whitespace`` inside a
+    try/except, with a plain ``[ \\t]{2,}`` regex as the fallback. Under Code
+    Mode ida_pro_mcp is not installed in the database process, so BOTH halves
+    of that were wrong:
+
+    * the import failed on every call, and a failed import is never cached, so
+      each one re-searched the whole of sys.path -- 422 failures per pc_nums
+      call, which was the majority of its runtime;
+    * the fallback collapses runs of spaces INSIDE STRING LITERALS, which the
+      real function preserves. Pseudocode columns are served in these
+      coordinates, so a line containing a string with two spaces would have put
+      every literal's mark, and every reformat, on the wrong column.
+
+    The module-level shim above is byte-identical to the original regex, so
+    call it directly.
+    """
+    return compact_whitespace(line)
 
 
 def _idatui_compact_col(plain, compact, col):
@@ -1365,3 +1376,173 @@ def pc_num_format(
         out["text"] = out["before"]
         out["warn"] = f"re-render failed: {e}"
     return out
+
+
+def decompile(addr, include_addresses=True):
+    """Pseudocode for the function at ``addr``, plus the objects it references.
+
+    Faithful to the tool ida-tui was written against, and in particular to its
+    COST: the per-line address anchor comes from ONE ``get_line_item`` at column
+    0 per line. The Code Mode port asked for the full per-column line map (what
+    ``decomp_map`` is for) purely to fill in that anchor, which is thousands of
+    ``get_line_item``+``dstr()`` calls per function instead of one per line, and
+    made every pseudocode open cost the same as opening the split view.
+
+    Text is whitespace-collapsed exactly as the client displays it, because
+    ``pc_nums`` reports literal columns in those coordinates.
+    """
+    import ida_bytes
+    import ida_hexrays
+    import ida_lines
+    import ida_name
+    import idaapi
+
+    try:
+        ea = parse_address(addr)
+    except Exception as e:
+        return {"addr": str(addr), "code": None, "error": str(e)}
+    fn = idaapi.get_func(ea)
+    if fn is None:
+        return {"addr": str(addr), "code": None, "error": f"no function at {ea:#x}"}
+    if not ida_hexrays.init_hexrays_plugin():
+        return {"addr": hex(int(fn.start_ea)), "code": None, "error": "no decompiler"}
+    failure = ida_hexrays.hexrays_failure_t()
+    try:
+        cfunc = ida_hexrays.decompile_func(fn, failure)
+    except Exception as e:
+        return {"addr": hex(int(fn.start_ea)), "code": None,
+                "error": f"Decompilation failed at {ea:#x}: {e}"}
+    if cfunc is None:
+        return {"addr": hex(int(fn.start_ea)), "code": None,
+                "error": failure.desc() or f"Decompilation failed at {ea:#x}"}
+
+    lines = []
+    for sl in cfunc.get_pseudocode():
+        head = ida_hexrays.ctree_item_t()
+        item = ida_hexrays.ctree_item_t()
+        tail = ida_hexrays.ctree_item_t()
+        line_ea = None
+        if include_addresses and cfunc.get_line_item(sl.line, 0, False, head, item, tail):
+            parts = (item.dstr() or "").split(": ")
+            if len(parts) == 2:
+                try:
+                    line_ea = int(parts[0], 16)
+                except ValueError:
+                    line_ea = None
+        text = compact_whitespace(ida_lines.tag_remove(sl.line))
+        lines.append(f"{text} /*{line_ea:#x}*/" if line_ea is not None else text)
+
+    refs, seen = [], set()
+
+    class _RefVisitor(ida_hexrays.ctree_visitor_t):
+        def __init__(self):
+            ida_hexrays.ctree_visitor_t.__init__(self, ida_hexrays.CV_FAST)
+
+        def visit_expr(self, e):
+            if e.op == ida_hexrays.cot_obj:
+                target = int(e.obj_ea)
+                if target != idaapi.BADADDR and target not in seen:
+                    seen.add(target)
+                    try:
+                        raw = ida_bytes.get_strlit_contents(target, -1, 0)
+                        text = raw.decode("utf-8", "replace") if raw else None
+                    except Exception:
+                        text = None
+                    refs.append({"addr": hex(target),
+                                 "name": ida_name.get_name(target) or "",
+                                 "string": text})
+            return 0
+
+    try:
+        _RefVisitor().apply_to(cfunc.body, None)
+    except Exception:
+        pass
+    return {"addr": hex(int(fn.start_ea)), "code": "\n".join(lines), "refs": refs}
+
+
+def decomp_map(
+    addr: Annotated[str, "Function address or name"],
+) -> dict:
+    """Per-pseudocode-line instruction coverage for the split view's region
+    highlight: for each line, the set of EAs the decompiler attributes to it,
+    swept across the line's columns via get_line_item. Shape:
+    {addr, lines:[{ea: primary|None, eas:[hex,...]}, ...]}."""
+    import ida_hexrays
+    import idaapi
+    try:
+        ea = int(str(addr), 16)
+    except ValueError:
+        ea = idaapi.get_name_ea(idaapi.BADADDR, str(addr).strip())
+    func = idaapi.get_func(ea)
+    if not func:
+        return {"error": f"no function at {addr}"}
+    try:
+        cfunc = ida_hexrays.decompile(func.start_ea)
+    except Exception as e:  # noqa: BLE001
+        return {"error": f"decompile failed: {e}"}
+    if cfunc is None:
+        return {"error": "decompile failed"}
+    import ida_lines
+    # Three things this loop must not do, each measured on real functions (the 25
+    # largest of bash went 68.3s -> 6.5s; echo's 60 largest 5.4s -> 0.6s, with
+    # byte-identical output):
+    #
+    #  * allocate ctree_item_t's per COLUMN. They are SWIG objects and this is
+    #    the innermost loop; one per call is enough, and head/tail are never
+    #    read, so don't ask for them at all.
+    #  * sweep the TAGGED length. ``x`` is a screen column but ``sl.line`` still
+    #    carries IDA's colour tags, so a 23-column line was swept 124 times.
+    #  * call dstr() per column. It formats a whole 'EA: description' string --
+    #    24us a call, which is 79% of this tool. Comparing against the PREVIOUS
+    #    column's item id is not enough: items interleave, so `foo(a, b)` flips
+    #    call -> arg -> call -> arg and every flip re-formats an item already
+    #    seen (106 594 calls for 15 417 lines of bash). Memoise id -> ea for the
+    #    whole function instead: obj_id is unique within a cfunc, so the same id
+    #    always yields the same string, and the result is deduped by ``seen``
+    #    anyway. Items with no ctree node (it is None) have no id to key on and
+    #    still pay per occurrence.
+    item = ida_hexrays.ctree_item_t()
+    tag_remove = ida_lines.tag_remove
+    get_line_item = cfunc.get_line_item
+    ea_of_id = {}
+    lines = []
+    for sl in cfunc.get_pseudocode():
+        line = sl.line
+        eas, seen = [], set()
+        prev_id = None
+        for x in range(len(tag_remove(line)) + 1):
+            if not get_line_item(line, x, False, None, item, None):
+                continue
+            it = item.it
+            if it is not None:
+                oid = it.obj_id
+                if oid == prev_id:
+                    continue
+                prev_id = oid
+                if oid in ea_of_id:
+                    e = ea_of_id[oid]
+                    if e is not None and e not in seen:
+                        seen.add(e)
+                        eas.append(hex(e))
+                    continue
+            else:
+                oid = None
+                prev_id = None
+            # Match the /*ea*/ marker's source (decompile_function_safe): the
+            # item's dstr() is 'EA: description'; get_ea() reports a different ea.
+            e = None
+            dstr = item.dstr()
+            if dstr:
+                parts = dstr.split(": ", 1)
+                if len(parts) == 2:
+                    try:
+                        e = int(parts[0], 16)
+                    except ValueError:
+                        e = None
+            if oid is not None:
+                ea_of_id[oid] = e
+            if e is not None and e not in seen:
+                seen.add(e)
+                eas.append(hex(e))
+        lines.append({"ea": eas[0] if eas else None, "eas": eas})
+    return {"addr": hex(func.start_ea), "lines": lines}

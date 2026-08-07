@@ -171,24 +171,6 @@ def _script(args: dict[str, Any], body: str) -> str:
     return f"import json\na = json.loads({encoded!r})\n{dedent(body).strip()}\n"
 
 
-_DECOMP_MAP_HELPER = r'''
-def line_map(cfunc):
-    import ida_hexrays
-    answer = []
-    for sl in cfunc.get_pseudocode():
-        tagged, eas, seen = sl.line, [], set()
-        for x in range(len(tagged) + 1):
-            head = ida_hexrays.ctree_item_t(); item = ida_hexrays.ctree_item_t(); tail = ida_hexrays.ctree_item_t()
-            if not cfunc.get_line_item(tagged, x, False, head, item, tail): continue
-            text = item.dstr() or ""
-            try: ea = int(text.split(": ", 1)[0], 16)
-            except (ValueError, IndexError): continue
-            if ea not in seen: seen.add(ea); eas.append(ea)
-        answer.append(eas)
-    return answer
-'''
-
-
 _OPERATIONS: dict[str, str] = {
     "list_funcs": r'''
 import fnmatch
@@ -812,45 +794,6 @@ result
 }
 
 
-_OPERATIONS["decompile"] = _DECOMP_MAP_HELPER + r'''
-ea = int(str(a["addr"]), 16)
-fn = db.functions.get_at(ea)
-if fn is None:
-    result = {"error": f"no function at {ea:#x}"}
-else:
-    pseudo = db.pseudocode.decompile(fn)
-    mapping = line_map(pseudo.raw_cfunc)
-    plain = pseudo.to_text()
-    marked = [line + (f" /*0x{eas[0]:X}*/" if eas else "")
-              for line, eas in zip(plain, mapping)]
-    import ida_name
-    refs, seen = [], set()
-    for expr in pseudo.find_objects():
-        target = int(expr.obj_ea)
-        if target in seen or not (db.is_valid_ea(target) or db.is_private_ea(target)): continue
-        seen.add(target)
-        name = expr.obj_name or ida_name.get_name(target) or ""
-        try: string = db.bytes.get_string_at(target) if db.is_valid_ea(target) else None
-        except Exception: string = None
-        refs.append({"addr": hex(target), "name": name, "string": string})
-    result = {"addr": hex(int(fn.start_ea)), "code": "\n".join(marked), "refs": refs}
-result
-'''
-
-_OPERATIONS["decomp_map"] = _DECOMP_MAP_HELPER + r'''
-ea = int(str(a["addr"]), 16)
-fn = db.functions.get_at(ea)
-if fn is None:
-    result = {"error": f"no function at {ea:#x}"}
-else:
-    pseudo = db.pseudocode.decompile(fn)
-    mapping = line_map(pseudo.raw_cfunc)
-    result = {"addr": hex(int(fn.start_ea)),
-              "lines": [{"ea": hex(eas[0]) if eas else None,
-                         "eas": [hex(item) for item in eas]} for eas in mapping]}
-result
-'''
-
 _OPERATIONS["define_code_run"] = r'''
 import ida_bytes, ida_idp, ida_segment, ida_ua, idaapi
 ea, limit = int(str(a["addr"]), 16), max(1, min(int(a.get("limit", 20000)), 200000))
@@ -877,6 +820,7 @@ else:
 result
 '''
 
+
 _OPERATIONS["define_func_run"] = r'''
 import ida_bytes, ida_funcs, ida_segment
 ea = int(str(a["addr"]), 16)
@@ -900,6 +844,7 @@ else:
               {"addr": hex(ea), "ok": False, "error": f"IDA refused a function at {ea:#x}"})
 result
 '''
+
 
 _OPERATIONS["set_thumb"] = r'''
 import ida_bytes, ida_ida, ida_idp, ida_segment, ida_segregs
@@ -926,6 +871,7 @@ else:
 result
 '''
 
+
 _OPERATIONS["thumb_scan"] = r'''
 import ida_bytes, ida_funcs, ida_idp, ida_segment, ida_segregs, ida_ua
 lo, hi = int(str(a["start"]), 16), int(str(a["end"]), 16)
@@ -949,6 +895,7 @@ while cursor + 4 <= hi and len(found) < limit:
 result = {"start": hex(lo), "end": hex(hi), "found": found, "applied": applied, "n": len(found)}
 result
 '''
+
 
 _OPERATIONS["decomp_error"] = r'''
 import ida_hexrays, ida_ida
@@ -1016,6 +963,10 @@ _OPERATIONS["op_format"] = _remote_op(
     'op_format(addr=a["addr"], mode=a.get("mode", "cycle"),'
     ' col=int(a.get("col", -1)), n=int(a.get("n", -1)))')
 _OPERATIONS["pc_nums"] = _remote_op('pc_nums(addr=a["addr"])')
+_OPERATIONS["decompile"] = _remote_op(
+    'decompile(addr=a["addr"],'
+    ' include_addresses=bool(a.get("include_addresses", True)))')
+_OPERATIONS["decomp_map"] = _remote_op('decomp_map(addr=a["addr"])')
 _OPERATIONS["pc_num_format"] = _remote_op(
     'pc_num_format(addr=a["addr"], mode=a.get("mode", "cycle"),'
     ' line=int(a.get("line", -1)), col=int(a.get("col", -1)),'
