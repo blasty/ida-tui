@@ -642,11 +642,6 @@ class ListingModel:
     """
 
     PAGE = 500  # heads per server call (well under the tool's 2000 cap)
-    #: Heads refreshed together when a rename makes their text stale. One server
-    #: call per block, so a viewport costs one round trip rather than forty --
-    #: and the same size as a load page, so refreshing everything costs about
-    #: what rebuilding everything would have.
-    TEXT_BLOCK = 500
 
     def __init__(self, program: "Program", seg_start: int, seg_end: int,
                  name: str | None = None):
@@ -673,6 +668,14 @@ class ListingModel:
         #: Whether a rename has ever staled this model. Until one has, every
         #: read takes exactly the path it always did.
         self._renamed = False
+        #: One entry per loaded PAGE: where its heads start, the address it was
+        #: fetched from, the digest it came back with, and how many rows it
+        #: held. A stale-text refresh re-asks for exactly that page, so it can
+        #: be told "still identical" for the price of the render alone.
+        self._page_head: list[int] = []
+        self._page_addr: list[int] = []
+        self._page_digest: list[object] = []
+        self._page_rows: list[int] = []
         #: Set if a text refresh came back with a different head sequence, which
         #: means something DID move the walk. Program.listing() throws the model
         #: away when it sees this, so the next read rebuilds from scratch.
@@ -758,6 +761,11 @@ class ListingModel:
         page = self._build_page(rows)
         with self._lock:
             gen = self._text_gen
+            self._page_head.append(len(self._heads))
+            self._page_addr.append(frm)
+            self._page_digest.append(payload.get("digest")
+                                     if isinstance(payload, dict) else None)
+            self._page_rows.append(len(rows))
             for h in page:
                 # Banner/label rows (function headers, separators, code labels)
                 # are display-only; don't index them so navigation lands on the
@@ -919,69 +927,93 @@ class ListingModel:
     def _ensure_text(self, j0: int, j1: int) -> None:
         """Re-render physical heads [j0, j1) if a rename staled them.
 
-        Done a block at a time. One call for the whole range would be simpler but
-        the ``heads`` tool caps a response at 2000 rows, so a wide request (the
-        search body asks for thousands at once) would come back short, fail the
-        sequence check, and condemn the model to a rebuild it did not need.
+        Works a PAGE at a time -- the same unit the loader fetched. A page is
+        exactly what ``heads(addr, count=PAGE)`` produced, so asking again with
+        the same arguments reproduces the same row sequence; nothing has to be
+        snapped out to whole address groups (a function start emits three banner
+        rows sharing one address, and an arbitrary boundary through those never
+        lines up again). It also means every head in a page can share one
+        generation marker, so "is this fresh?" is a single probe.
         """
-        blk = self.TEXT_BLOCK
         with self._lock:
             n = len(self._heads)
-        start = (max(j0, 0) // blk) * blk
-        while start < min(j1, n):
-            self._ensure_text_block(start, min(start + blk, n))
-            start += blk
+            j1 = min(j1, n)
+            j0 = max(j0, 0)
+            if j1 <= j0:
+                return
+            p = max(bisect.bisect_right(self._page_head, j0) - 1, 0)
+            last = bisect.bisect_left(self._page_head, j1)
+        while p < last:
+            p = self._ensure_page(p)
 
-    def _ensure_text_block(self, j0: int, j1: int) -> None:
-        """Re-render one block, snapped out to whole ADDRESS groups.
+    def _page_bounds(self, p: int) -> tuple[int, int]:
+        """[first, last) head index of page ``p`` (caller holds the lock)."""
+        lo = self._page_head[p]
+        hi = (self._page_head[p + 1] if p + 1 < len(self._page_head)
+              else len(self._heads))
+        return lo, hi
 
-        A function start emits three banner rows and its code row at the same ea,
-        and a labelled instruction emits two -- so a boundary falling inside one
-        of those groups would refetch the whole group, never line up, and leave
-        the old names on screen for good.
-        """
+    def _ensure_page(self, p: int) -> int:
+        """Freshen page ``p``; returns the next page to consider."""
         with self._lock:
+            if not (0 <= p < len(self._page_head)):
+                return p + 1
             gen = self._text_gen
-            n = len(self._heads)
-            a = max(j0, 0)
-            b = min(j1, n)
-            if b <= a:
-                return
-            head_gen = self._head_gen
-            if all(head_gen[j] == gen for j in range(a, b)):
-                return
-            eas = self._head_eas
-            while a > 0 and eas[a - 1] == eas[a]:
-                a -= 1
-            while b < n and eas[b - 1] == eas[b]:
-                b += 1
-            last = self._heads[b - 1]
-            lo = eas[a]
-            hi = last.ea + max(last.size, 1)
-            want = [(h.ea, h.kind) for h in self._heads[a:b]]
+            lo, hi = self._page_bounds(p)
+            if hi <= lo or self._head_gen[lo] == gen:
+                return p + 1
+            addr = self._page_addr[p]
+            want_digest = self._page_digest[p]
+            want_rows = self._page_rows[p]
+            want = [(h.ea, h.kind) for h in self._heads[lo:hi]]
+        # Ask whether the page still renders as the client holds it. The worker
+        # builds the rows either way (there is no knowing a line is unchanged
+        # without rendering it), but skipping the pickling, the transfer, the
+        # unpickling and the Head rebuild is about 40% of what a page costs --
+        # and after a rename almost every page is unchanged.
+        if want_digest is not None:
+            try:
+                probe = self._prog.client.call(
+                    "heads", addr=hex(addr), count=self.PAGE, annotate=True,
+                    digest=True)
+            except Exception:  # noqa: BLE001 -- an older worker has no digest
+                probe = None
+            if (isinstance(probe, dict) and probe.get("digest") == want_digest
+                    and probe.get("count") == want_rows):
+                with self._lock:
+                    if self._text_gen == gen and len(self._heads) >= hi:
+                        for k in range(lo, hi):
+                            self._head_gen[k] = gen
+                return p + 1
         try:
             payload = self._prog.client.call(
-                "heads", addr=hex(lo), end=hex(hi),
-                count=min(len(want) + 64, 2000), annotate=True)
+                "heads", addr=hex(addr), count=self.PAGE, annotate=True)
         except Exception:  # noqa: BLE001 -- keep the old text rather than blank
-            return
+            return p + 1
         rows = payload.get("heads", []) if isinstance(payload, dict) else []
-        page = self._build_page(rows)[:len(want)]
+        page = self._build_page(rows)
         with self._lock:
-            if self._text_gen != gen or len(self._heads) < b:
-                return
+            if self._text_gen != gen or len(self._heads) < hi:
+                return p + 1
             if [(h.ea, h.kind) for h in page] != want:
                 # Something moved the walk, which a rename cannot do -- so this
                 # was not one. Say so and let Program.listing() rebuild, rather
-                # than sit here re-fetching a block that will never line up (and
+                # than sit here re-fetching a page that will never line up (and
                 # showing the old names while doing it).
                 self.stale_structure = True
-                for j in range(a, b):
-                    self._head_gen[j] = gen
-                return
-            self._heads[a:b] = page
-            for j in range(a, b):
-                self._head_gen[j] = gen
+                for k in range(lo, hi):
+                    self._head_gen[k] = gen
+                return p + 1
+            self._heads[lo:hi] = page
+            # The stored digest has to describe what the client now HOLDS, not
+            # what it once loaded. Leaving it stale is how a literal cycling
+            # hex -> dec -> hex ends up declared "unchanged" while the row still
+            # shows the decimal it was refetched with in between.
+            self._page_digest[p] = (payload.get("digest")
+                                    if isinstance(payload, dict) else None)
+            for k in range(lo, hi):
+                self._head_gen[k] = gen
+        return p + 1
 
     def get(self, i: int) -> Head | None:
         with self._lock:

@@ -576,6 +576,28 @@ def _idatui_spans(line):
     return [[k, t] for k, t, _o in out], trimmed
 
 
+def _idatui_rows_digest(rows):
+    """A value that changes whenever any of ``rows`` would render differently.
+
+    Covers everything a client keeps off a row: address, kind, size, the plain
+    text, the symbol name and the colour spans (which is what makes it exact
+    rather than a heuristic -- two lines can collapse to the same text and still
+    be coloured differently).
+
+    Uses the interpreter's own ``hash``, deliberately. It never has to mean
+    anything outside this process: the client stores what a page hashed to when
+    it loaded it and hands the same number back to ask whether the page still
+    hashes to that. One worker, one process, one hash seed.
+    """
+    acc = 0
+    for r in rows:
+        sp = r.get("spans")
+        acc = hash((acc, r.get("ea"), r.get("kind"), r.get("size"),
+                    r.get("text"), r.get("name"),
+                    tuple(map(tuple, sp)) if sp else None))
+    return acc
+
+
 def _idatui_unknown_row(ea, size):
     """One collapsed row for a run of ``size`` undefined bytes starting at
     ``ea``. A single byte is rendered normally (shows its value); a longer run
@@ -661,6 +683,7 @@ def heads(
     end: Annotated[str, "Optional exclusive end address; default = segment end"] = "",
     back: Annotated[bool, "Walk backwards: return the count heads ENDING just before addr, in forward order"] = False,
     annotate: Annotated[bool, "Emit IDA-style function boundary banner rows (kind sep/funchdr)"] = False,
+    digest: Annotated[bool, "Return only a digest+count of the rows, not the rows themselves"] = False,
 ) -> dict:
     """Walk item heads from ``addr`` as a flat listing: every head is rendered
     (code OR data OR undefined) via generate_disasm_line and stepped with
@@ -767,7 +790,17 @@ def heads(
         rows.extend(_rows_for(ea))  # a struct head expands into member rows
         ea = _advance(ea)
     cursor = {"next": hex(ea)} if more else {"done": True}
-    return {"addr": str(addr), "heads": rows, "cursor": cursor}
+    out = {"addr": str(addr), "cursor": cursor,
+           "digest": _idatui_rows_digest(rows), "count": len(rows)}
+    # ``digest`` mode answers "is this page still exactly what you have?" without
+    # shipping it. The rows are built either way -- generate_disasm_line is the
+    # floor and there is no way to know a line is unchanged without rendering it
+    # -- but pickling several hundred rows with their colour spans, unpickling
+    # them and rebuilding Heads is about 40% of what a page costs, and after a
+    # rename almost every page comes back identical.
+    if not digest:
+        out["heads"] = rows
+    return out
 
 
 @tool
