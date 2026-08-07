@@ -6,7 +6,7 @@ requires-python = ">=3.11"
 # ida-codemode supplies GUI discovery, shared idalib workers, leases, and the
 # execute_python/ida-domain database surface.
 dependencies = [
-    "ida-codemode-mcp",
+    "ida-codemode",
     "textual>=8",
     "pygments>=2",  # Used directly for pseudocode highlighting.
 ]
@@ -26,4 +26,4 @@ build-backend = "hatchling.build"
 packages = ["idatui"]
 
 [tool.uv.sources]
-ida-codemode-mcp = { path = "../ida-codemode-mcp", editable = true }
+ida-codemode = { path = "../ida-codemode", editable = true }
