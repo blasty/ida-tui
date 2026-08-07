@@ -41,9 +41,9 @@ from idatui.rpcclient import RpcClient  # noqa: E402
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DEFAULT_TARGET = os.path.join(REPO, "targets", "bash")
 
-#: Typing speed for the prompts, ms per character. The app's own default is 35;
-#: a little slower reads better on video without dragging.
-TYPE_MS = 45
+#: Typing speed for the prompts, ms per character. Fast enough to read as
+#: typing, not so slow that a viewer is waiting on it.
+TYPE_MS = 18
 
 
 class Demo:
@@ -85,28 +85,28 @@ class Demo:
         if ((st.get("function") or {}).get("name")) != "main":
             self.say("goto main")
             self.do("goto", target="main", delay_ms=TYPE_MS)
-            self.beat(1.5)
+            self.beat(0.68)
         else:
             self.say("already landed on main")
-            self.beat(0.4)
+            self.beat(0.25)
         self.say("scroll the listing")
         self.do("move", dir="down", n=12)
-        self.beat(0.8)
+        self.beat(0.36)
         self.do("move", dir="pagedown")
-        self.beat(1.0)
+        self.beat(0.45)
         self.do("move", dir="top")
-        self.beat(0.8)
+        self.beat(0.36)
 
     def scene_pseudocode(self):
         """Hex-Rays, and back."""
         self.say("F5 -> pseudocode")
         self.do("toggle_view")
-        self.beat(2.0)
+        self.beat(0.9)
         self.do("move", dir="down", n=8)
-        self.beat(1.2)
+        self.beat(0.54)
         self.say("back to the listing")
         self.do("toggle_view")
-        self.beat(1.0)
+        self.beat(0.45)
 
     def scene_opfmt(self):
         """The literal-format ring, IDA's `o`."""
@@ -116,54 +116,54 @@ class Demo:
             return
         for fmt in ("dec", "hex", "bin", "default"):
             self.do("opfmt", mode=fmt)
-            self.beat(0.9)
+            self.beat(0.41)
 
     def scene_follow(self):
         """Follow a call and come back."""
         self.say("follow a call, then Escape back")
         self.do("follow")
-        self.beat(1.8)
+        self.beat(0.81)
         self.do("back")
-        self.beat(1.0)
+        self.beat(0.45)
 
     def scene_graph(self):
         """The CFG: zoom, minimap, walking edges."""
         self.say("space -> control-flow graph")
         self.do("graph", action="open")
-        self.beat(2.2)
+        self.beat(0.99)
         self.say("zoom levels")
         for _ in range(2):
             self.do("keys", keys=["z"])
-            self.beat(1.1)
+            self.beat(0.5)
         self.say("minimap")
         self.do("keys", keys=["m"])
-        self.beat(1.2)
+        self.beat(0.54)
         self.say("walk the edges")
         for _ in range(3):
             self.do("keys", keys=["J"])
-            self.beat(0.7)
+            self.beat(0.32)
         self.do("keys", keys=["m"])
         self.do("graph", action="close")
-        self.beat(1.0)
+        self.beat(0.45)
 
     def scene_split(self):
         """Listing and pseudocode, cursor-synced."""
         self.say("s -> split view, cursor-synced")
         self.do("keys", keys=["s"])
-        self.beat(2.2)
+        self.beat(0.99)
         for _ in range(6):
             self.do("move", dir="down", n=2)
-            self.beat(0.5)
+            self.beat(0.25)
         self.do("keys", keys=["s"])
-        self.beat(1.0)
+        self.beat(0.45)
 
     def scene_xrefs(self):
         """Who calls this."""
         self.say("x -> xrefs")
         self.do("xrefs")
-        self.beat(2.0)
+        self.beat(0.9)
         self.do("close")
-        self.beat(0.8)
+        self.beat(0.36)
 
     def scene_edit(self):
         """Rename and comment -- typed into the real prompts, then reverted."""
@@ -175,48 +175,48 @@ class Demo:
         name, ea = target.get("name"), target.get("ea")
         self.say(f"rename {name} -> demo_dispatch")
         self.do("goto", target=name, delay_ms=TYPE_MS)
-        self.beat(0.8)
+        self.beat(0.36)
         self.do("rename", name="demo_dispatch", delay_ms=TYPE_MS)
         self.undo.append(("rename", {"addr": ea, "name": name}))
-        self.beat(1.8)
+        self.beat(0.81)
         self.say("comment the line")
         self.do("comment", text="reached from the command dispatcher")
         self.undo.append(("comment", {}))
-        self.beat(2.0)
+        self.beat(0.9)
 
     def scene_browsers(self):
         """Strings, symbols, structs, hex."""
         self.say('" -> strings')
         self.do("keys", keys=["quotation_mark"])
-        self.beat(2.0)
+        self.beat(0.9)
         self.do("close")
-        self.beat(0.6)
+        self.beat(0.27)
 
         self.say("ctrl+n -> symbol palette")
         self.do("symbols", query="exec")
-        self.beat(2.0)
+        self.beat(0.9)
         self.do("close")
-        self.beat(0.6)
+        self.beat(0.27)
 
         self.say("ctrl+t -> structs")
         self.do("structs")
-        self.beat(2.0)
+        self.beat(0.9)
         self.do("close")
-        self.beat(0.6)
+        self.beat(0.27)
 
         self.say("\\ -> hex view")
         self.do("hex")
-        self.beat(2.0)
+        self.beat(0.9)
         self.do("hex")
-        self.beat(0.8)
+        self.beat(0.36)
 
     def scene_search(self):
         """Incremental search in the code view."""
         self.say("/ -> search")
         self.do("search", term="call")
-        self.beat(1.8)
+        self.beat(0.81)
         self.do("close")
-        self.beat(0.8)
+        self.beat(0.36)
 
     # -- cleanup ----------------------------------------------------------- #
     def revert(self):
@@ -308,7 +308,7 @@ def main(argv=None) -> int:
     ap.add_argument("--target", default=DEFAULT_TARGET,
                     help="binary for --here/--spawn")
     ap.add_argument("--speed", type=float, default=1.0,
-                    help="pause multiplier; 0.5 = twice as fast (default 1.0)")
+                    help="pause multiplier: <1 snappier, >1 slower (default 1.0)")
     ap.add_argument("--only", help="comma-separated scene names")
     ap.add_argument("--list", action="store_true", help="list scenes and exit")
     ap.add_argument("--no-revert", action="store_true",
