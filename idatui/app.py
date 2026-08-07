@@ -4267,14 +4267,24 @@ class StructEditor(ModalScreen):
     selected struct; Ctrl+S declares (creates or updates) it; Ctrl+N starts a
     new one; Delete removes the highlighted struct; Esc returns to the list then
     closes.
+
+    ``/`` from the list opens a fuzzy filter over the struct names -- the same
+    key and the same matcher as the code views' search and the symbol palette,
+    rather than a third way to find something by typing.
     """
 
     BINDINGS = [
         Binding("ctrl+s", "save", "Save", priority=True),
         Binding("ctrl+n", "new", "New", priority=True),
         Binding("ctrl+y", "copy", "Copy", priority=True),
+        Binding("slash", "filter", "Filter", show=False),
         Binding("delete,d", "delete", "Delete", show=False),
         Binding("escape", "close", "Close"),
+        # Only ever reached while the FILTER has focus: a focused OptionList
+        # consumes up/down itself, so these move its highlight from the prompt
+        # (type to narrow, arrow to pick, exactly like the symbol palette).
+        Binding("up", "cursor_up", "Up", show=False),
+        Binding("down", "cursor_down", "Down", show=False),
     ]
 
     NEW_TEMPLATE = "struct NewStruct\n{\n    int field;\n};\n"
@@ -4284,7 +4294,9 @@ class StructEditor(ModalScreen):
     def __init__(self, program: Program) -> None:
         super().__init__()
         self._program = program
-        self._structs: list[Struct] = []
+        self._all: list[Struct] = []      # every struct the database has
+        self._structs: list[Struct] = []  # the VISIBLE rows (== _all when unfiltered)
+        self._filter = ""
         self._loaded: str | None = None  # name currently in the editor
         self._loaded_src: str | None = None  # its source, to detect unsaved edits
 
@@ -4313,12 +4325,17 @@ class StructEditor(ModalScreen):
             with Horizontal(id="se-panes"):
                 with Vertical(id="se-left"):
                     yield Static("structs", id="se-title")
+                    yield Input(placeholder="fuzzy filter\u2026  \u2191\u2193 pick \u00b7 "
+                                            "Enter edit \u00b7 Esc clear",
+                                id="se-filter")
                     yield OptionList(id="se-list")
                 with Vertical(id="se-right"):
                     yield Static("C definition", id="se-hint")
                     yield CTextArea("", id="se-edit")
+            # Esc is on the border subtitle; repeating it here cost the row.
             yield Static(
-                "Enter edit · Ctrl+S save · Ctrl+Y copy · Ctrl+N new · d/Del delete · Esc close",
+                "Enter edit · / filter · Ctrl+S save · Ctrl+Y copy · Ctrl+N new · "
+                "d/Del delete",
                 id="se-status")
 
     def on_mount(self) -> None:
@@ -4336,30 +4353,133 @@ class StructEditor(ModalScreen):
         self.app.call_from_thread(self._populate, structs, select)
 
     def _populate(self, structs: list[Struct], select: str | None) -> None:
-        self._structs = structs
+        self._all = structs
+        self._show(select)
+
+    def _show(self, select: str | None = None) -> None:
+        """Rebuild the list from ``_all`` through the current filter.
+
+        ``_structs`` stays the VISIBLE rows, because every action here indexes
+        it by the list's highlighted row -- load, delete and the confirm dialogs
+        would all address the wrong struct if the two ever drifted apart.
+        """
+        q = self._filter.strip()
+        # A struct we were told to select but the filter would hide (a rename, or
+        # one just created under a stale filter) beats the filter -- otherwise a
+        # successful save looks like the struct vanished.
+        if q and select is not None and _fuzzy(select, q) is None:
+            inp = self.query_one("#se-filter", Input)
+            inp.value = ""
+            inp.display = False
+            self._filter = q = ""
+        rows: list[tuple[Struct, tuple[int, ...]]] = []
+        if q:
+            scored = []
+            for s in self._all:
+                m = _fuzzy(s.name, q)
+                if m is not None:
+                    scored.append((m[0], m[1], s))
+            scored.sort(key=lambda t: (-t[0], t[2].name))
+            rows = [(s, pos) for _, pos, s in scored]
+        else:
+            rows = [(s, ()) for s in self._all]
+        self._structs = [s for s, _ in rows]
+
         ol = self.query_one("#se-list", OptionList)
         ol.clear_options()
         # Ragged rows read as noise, so the name column is padded to the widest
         # name actually present (capped, so one monstrous C++ mangling can't
         # push the size/count columns off the pane).
-        width = min(max((len(s.name) for s in structs), default=0), 22)
-        for s in structs:
+        width = min(max((len(s.name) for s, _ in rows), default=0), 22)
+        opts = []
+        for s, pos in rows:
             kw = "union" if s.is_union else "struct"
             name = s.name if len(s.name) <= width else s.name[:width - 1] + "\u2026"
             label = Text()
-            label.append(f"{name:<{width}}", _S_LABEL)
+            nm = Text(f"{name:<{width}}", style=_S_LABEL)
+            for p in pos:
+                if p < len(name):
+                    nm.stylize(_S_NAME_MATCH, p, p + 1)
+            label.append_text(nm)
             label.append(f"{s.size:>#7x}{s.members:>4}f  {kw}", _S_DIM)
-            ol.add_option(Option(label))
-        if structs:
+            opts.append(Option(label))
+        ol.add_options(opts)
+        if rows:
             idx = 0
             if select is not None:
-                idx = next((i for i, s in enumerate(structs) if s.name == select), 0)
+                idx = next((i for i, s in enumerate(self._structs)
+                            if s.name == select), 0)
             ol.highlighted = idx
+        cap = "structs"
+        if q:
+            cap = f"structs  {len(rows)}/{len(self._all)}"
+        self.query_one("#se-title", Static).update(cap)
 
     def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
         i = event.option_index
         if 0 <= i < len(self._structs):
             self._confirm_discard(lambda n=self._structs[i].name: self._load(n))
+
+    # -- filter ("/" from the list) ----------------------------------------- #
+    def action_filter(self) -> None:
+        """'/': fuzzy-filter the struct list, as you type."""
+        # A '/' typed into the definition is a division operator, and one typed
+        # into the filter is the Input's business; only the list opens this.
+        if self.focused is not self.query_one("#se-list", OptionList):
+            return
+        inp = self.query_one("#se-filter", Input)
+        inp.display = True
+        inp.value = self._filter
+        inp.focus()
+
+    def _clear_filter(self, focus_list: bool = True) -> None:
+        inp = self.query_one("#se-filter", Input)
+        inp.value = ""
+        inp.display = False
+        self._filter = ""
+        self._show(select=self._loaded)
+        if focus_list:
+            self.query_one("#se-list", OptionList).focus()
+
+    def on_input_changed(self, event: Input.Changed) -> None:
+        # Modal Input messages bubble to the App (which owns #func-filter and
+        # the search prompt) -- stop them here or they drive the main screen.
+        if event.input.id != "se-filter":
+            return
+        event.stop()
+        self._filter = event.value
+        self._show()
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        if event.input.id != "se-filter":
+            return
+        event.stop()
+        # Enter on a filtered list loads the highlighted struct, like Enter on
+        # the list itself -- typing a name and pressing Enter should open it.
+        ol = self.query_one("#se-list", OptionList)
+        i = ol.highlighted
+        if i is not None and 0 <= i < len(self._structs):
+            self._confirm_discard(lambda n=self._structs[i].name: self._load(n))
+        else:
+            ol.focus()
+
+    def _filter_focused(self) -> bool:
+        return self.focused is self.query_one("#se-filter", Input)
+
+    def action_cursor_up(self) -> None:
+        self._move_highlight(-1)
+
+    def action_cursor_down(self) -> None:
+        self._move_highlight(1)
+
+    def _move_highlight(self, delta: int) -> None:
+        if not self._filter_focused():
+            return  # the list has focus and moves itself
+        ol = self.query_one("#se-list", OptionList)
+        if not ol.option_count:
+            return
+        cur = ol.highlighted or 0
+        ol.highlighted = max(0, min(cur + delta, ol.option_count - 1))
 
     @work(thread=True, exclusive=True, group="se-load")
     def _load(self, name: str) -> None:
@@ -4485,9 +4605,14 @@ class StructEditor(ModalScreen):
         self._set_status(f"copied {what} ({n} chars) to clipboard")
 
     def action_close(self) -> None:
-        # A stray Esc while editing returns to the list instead of discarding.
+        # Esc backs out one level at a time: out of the definition, then out of
+        # the filter, and only then out of the dialog. Closing the editor from
+        # under a half-typed filter is the kind of thing you only do once.
         if self.focused is self.query_one("#se-edit", TextArea):
             self.query_one("#se-list", OptionList).focus()
+            return
+        if self._filter_focused() or self._filter:
+            self._clear_filter()
             return
         self._confirm_discard(lambda: self.dismiss(None),
                               "Discard unsaved changes and close?")
@@ -4727,6 +4852,9 @@ class IdaTui(App):
     /* Column captions, not title bars: the dialog already has one title. */
     #se-title, #se-hint { height: 1; color: $text-muted; text-style: bold;
                           padding: 0 1; }
+    /* Hidden until '/'; same one-row prompt shape as the app's own prompts. */
+    #se-filter { display: none; height: 1; border: none; padding: 0 1;
+                 background: $primary-darken-2; color: $text; }
     #se-list { height: 1fr; }
     #se-edit { height: 1fr; border: none; padding: 0 1; }
     /* A footer, but a quiet one: a shade of the dialog's own background

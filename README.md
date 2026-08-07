@@ -100,6 +100,11 @@ a 400 MB binary scrolls like a text file.
 **Decompiler** — Hex-Rays pseudocode with syntax highlighting, per-line address
 anchors, and rename/retype/comment that write back.
 
+**Structs / types** (`ctrl+t`) — local types as plain C: the list on the left,
+an editable, syntax-highlighted definition on the right. `Ctrl+S` declares it
+back into the database and reformats to IDA's own layout, `Ctrl+N` starts a new
+one, `d` deletes, and `/` fuzzy-filters the list.
+
 **Graph** (`space`) — the current function's basic blocks, laid out with a real
 layered (Sugiyama) algorithm and routed edges: green taken, red fall-through,
 blue unconditional, purple loop. The boxes hold the *same rows* as the listing,

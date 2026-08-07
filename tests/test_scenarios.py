@@ -998,6 +998,84 @@ async def s_structs(c: Ctx):
     c.check("Esc closes the struct editor", not isinstance(app.screen, StructEditor))
 
 
+@scenario("struct_filter")
+async def s_struct_filter(c: Ctx):
+    app = c.app
+    await c.press("ctrl+t")
+    if not await c.wait(lambda: isinstance(app.screen, StructEditor), 10):
+        c.check("Ctrl+T opens the struct editor", False,
+                f"screen={type(app.screen).__name__}")
+        return
+    se = app.screen
+    await c.wait(lambda: bool(se._structs), 15)
+    total = len(se._structs)
+    ol = se.query_one("#se-list", OptionList)
+    inp = se.query_one("#se-filter", Input)
+    # Something past the first row, so a filter that "works" by doing nothing
+    # can't pass: its own name must survive and the others must not.
+    target = se._structs[min(2, total - 1)].name
+    q = "".join(ch for ch in target.lower() if ch.isalnum())[:3]
+
+    ol.focus()
+    await c.press("slash")
+    opened = await c.wait(lambda: inp.display and app.focused is inp, 5)
+    c.check("'/' from the list opens the struct filter", opened,
+            f"display={inp.display} focus={getattr(app.focused, 'id', None)}")
+    for ch in q:
+        await c.press(ch)
+    await c.wait(lambda: len(se._structs) < total, 5)
+    c.check("typing fuzzy-filters the struct list",
+            0 < len(se._structs) < total and
+            any(s.name == target for s in se._structs),
+            f"q={q!r} {len(se._structs)}/{total}")
+    cap = str(se.query_one("#se-title", Static).render())
+    c.check("the caption counts what the filter kept",
+            f"{len(se._structs)}/{total}" in cap, f"caption={cap!r}")
+
+    # 'd' is the delete binding on this screen: in the prompt it must be a
+    # character, not a destructive verb aimed at the highlighted struct.
+    await c.press("d")
+    await c.pause(0.05)
+    c.check("'d' in the filter types instead of deleting",
+            isinstance(app.screen, StructEditor) and inp.value == q + "d",
+            f"screen={type(app.screen).__name__} value={inp.value!r}")
+    await c.press("backspace")
+    await c.wait(lambda: inp.value == q, 5)
+
+    # Arrows drive the list while the prompt keeps focus (symbol-palette feel).
+    before = ol.highlighted
+    await c.press("down")
+    await c.pause(0.05)
+    c.check("arrows move the list while the filter has focus",
+            app.focused is inp and (ol.highlighted != before
+                                    or ol.option_count == 1),
+            f"{before} -> {ol.highlighted} of {ol.option_count}")
+
+    sel = se._structs[ol.highlighted or 0].name
+    ta = se.query_one(TextArea)
+    ta.text = ""
+    await c.press("enter")
+    loaded = await c.wait(lambda: sel in ta.text, 15)
+    c.check("Enter in the filter loads the highlighted struct", loaded,
+            f"want {sel!r} in {ta.text[:40]!r}")
+
+    # Esc backs out one level at a time: definition -> filter -> dialog.
+    await c.press("escape")
+    await c.wait(lambda: app.focused is ol, 5)
+    c.check("Esc leaves the definition for the list", app.focused is ol,
+            f"focus={getattr(app.focused, 'id', None)}")
+    await c.press("escape")
+    cleared = await c.wait(lambda: len(se._structs) == total, 5)
+    c.check("Esc clears the filter instead of closing",
+            cleared and not inp.display and isinstance(app.screen, StructEditor),
+            f"n={len(se._structs)}/{total} display={inp.display}")
+    await c.press("escape")
+    await c.wait(lambda: not isinstance(app.screen, StructEditor), 10)
+    c.check("a third Esc closes the editor",
+            not isinstance(app.screen, StructEditor),
+            f"screen={type(app.screen).__name__}")
+
+
 @scenario("open_default_view")
 async def s_open(c: Ctx):
     app = c.app
