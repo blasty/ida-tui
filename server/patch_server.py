@@ -884,16 +884,39 @@ def decomp_map(
         return {"error": f"decompile failed: {e}"}
     if cfunc is None:
         return {"error": "decompile failed"}
+    import ida_lines
+    # Three things this loop must not do, each measured on real functions (the 25
+    # largest of bash went 68.3s -> 6.5s; echo's 60 largest 5.4s -> 0.6s, with
+    # byte-identical output):
+    #
+    #  * allocate ctree_item_t's per COLUMN. They are SWIG objects and this is
+    #    the innermost loop; one per call is enough, and head/tail are never
+    #    read, so don't ask for them at all.
+    #  * sweep the TAGGED length. ``x`` is a screen column but ``sl.line`` still
+    #    carries IDA's colour tags, so a 23-column line was swept 124 times.
+    #  * call dstr() per column. It formats a whole 'EA: description' string, and
+    #    consecutive columns are nearly always the same ctree item -- so ask the
+    #    item for its id first and only format when it changes. (The result is
+    #    deduped by ``seen`` anyway, so skipping a repeat cannot change it.)
+    item = ida_hexrays.ctree_item_t()
+    tag_remove = ida_lines.tag_remove
+    get_line_item = cfunc.get_line_item
     lines = []
     for sl in cfunc.get_pseudocode():
         line = sl.line
         eas, seen = [], set()
-        for x in range(len(line) + 1):
-            head = ida_hexrays.ctree_item_t()
-            item = ida_hexrays.ctree_item_t()
-            tail = ida_hexrays.ctree_item_t()
-            if not cfunc.get_line_item(line, x, False, head, item, tail):
+        prev_id = None
+        for x in range(len(tag_remove(line)) + 1):
+            if not get_line_item(line, x, False, None, item, None):
                 continue
+            it = item.it
+            if it is not None:
+                oid = it.obj_id
+                if oid == prev_id:
+                    continue
+                prev_id = oid
+            else:
+                prev_id = None
             # Match the /*ea*/ marker's source (decompile_function_safe): the
             # item's dstr() is 'EA: description'; get_ea() reports a different ea.
             dstr = item.dstr()
