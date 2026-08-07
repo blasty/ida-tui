@@ -318,9 +318,27 @@ def _idatui_head_row(ea):
 
 
 import functools as _idatui_functools
+import os as _idatui_os
+
+#: Entries in the per-line render cache. Sized to hold a whole segment's
+#: DISTINCT lines rather than a working set, because the listing gets rendered
+#: TWICE: once when it is first walked, and again after a rename, which restates
+#: every row's text. bash's .text is 228 659 rows but only 53 363 distinct
+#: lines, and the difference between thrashing and not is the whole win:
+#:
+#:     maxsize   first sweep   second sweep   worker RSS
+#:      16 384     17.2 us/row   16.9 us/row      +29 MB
+#:      32 768     17.0           17.2            +52 MB
+#:      65 536     17.0           11.1            +75 MB
+#:     131 072     16.9           11.2            +75 MB   (working set fits)
+#:
+#: It is a bound, not a proportion: a bigger binary fills it and stops, so the
+#: cost is capped at ~56 MB whatever is open. Lower it with IDATUI_LINE_CACHE if
+#: a pool of workers is competing for memory.
+_IDATUI_LINE_CACHE = int(_idatui_os.environ.get("IDATUI_LINE_CACHE") or 65536)
 
 
-@_idatui_functools.lru_cache(maxsize=16384)
+@_idatui_functools.lru_cache(maxsize=_IDATUI_LINE_CACHE)
 def _idatui_line_parts(line):
     """``(text, spans, ops)`` for one tagged disassembly line -- memoised.
 
