@@ -919,24 +919,37 @@ class ListingModel:
     def _ensure_text(self, j0: int, j1: int) -> None:
         """Re-render physical heads [j0, j1) if a rename staled them.
 
-        The block is snapped out to whole ADDRESS groups. A function start emits
-        three banner rows and its code row at the same ea, and a labelled
-        instruction emits two -- so a block boundary that fell inside one of
-        those groups would refetch the whole group and never line up again.
+        Done a block at a time. One call for the whole range would be simpler but
+        the ``heads`` tool caps a response at 2000 rows, so a wide request (the
+        search body asks for thousands at once) would come back short, fail the
+        sequence check, and condemn the model to a rebuild it did not need.
+        """
+        blk = self.TEXT_BLOCK
+        with self._lock:
+            n = len(self._heads)
+        start = (max(j0, 0) // blk) * blk
+        while start < min(j1, n):
+            self._ensure_text_block(start, min(start + blk, n))
+            start += blk
+
+    def _ensure_text_block(self, j0: int, j1: int) -> None:
+        """Re-render one block, snapped out to whole ADDRESS groups.
+
+        A function start emits three banner rows and its code row at the same ea,
+        and a labelled instruction emits two -- so a boundary falling inside one
+        of those groups would refetch the whole group, never line up, and leave
+        the old names on screen for good.
         """
         with self._lock:
             gen = self._text_gen
             n = len(self._heads)
-            j0 = max(j0, 0)
-            j1 = min(j1, n)
-            if j1 <= j0:
+            a = max(j0, 0)
+            b = min(j1, n)
+            if b <= a:
                 return
             head_gen = self._head_gen
-            if all(head_gen[j] == gen for j in range(j0, j1)):
+            if all(head_gen[j] == gen for j in range(a, b)):
                 return
-            blk = self.TEXT_BLOCK
-            a = (j0 // blk) * blk
-            b = min(((j1 - 1) // blk + 1) * blk, n)
             eas = self._head_eas
             while a > 0 and eas[a - 1] == eas[a]:
                 a -= 1
