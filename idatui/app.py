@@ -655,14 +655,24 @@ class SearchMixin:
         pointed at a different model/body, which invalidates a narrowing."""
         return id(getattr(self, "model", None) or getattr(self, "_texts", None))
 
-    def _reset_search_cache(self) -> None:
-        """Forget both the narrowing key and the joined body. Called from every
-        place that resets ``_matches``/``_ranges``: a stale prefix would make the
-        next search narrow from an empty list, and a stale body would search
-        text the view no longer shows."""
+    def _reset_search_cache(self, body: bool = False) -> None:
+        """Forget the narrowing key, and with ``body=True`` the joined body too.
+
+        Every place that resets ``_matches``/``_ranges`` must call this: a stale
+        prefix would make the next search narrow from an empty list.
+
+        The body is a different question. It is keyed by (row count, line source)
+        so it invalidates itself when the view is pointed somewhere else or more
+        rows stream in — which means ending a search does NOT have to throw it
+        away, and the next `/` over the same segment is then instant instead of
+        re-joining a quarter of a million lines. It DOES have to go when the
+        plain text of a row changes without either of those moving, which is
+        exactly what toggling the opcode-bytes column does.
+        """
         self._matched_key = None
-        self._hay_key = None
-        self._hay = None
+        if body:
+            self._hay_key = None
+            self._hay = None
 
     def _search_haystack(self, count: int, src: int):
         """``(starts, blob, blob_folded)`` for the whole body, or None.
@@ -1062,7 +1072,7 @@ class ListingView(SearchMixin, NavMixin, ColumnCursor, ScrollView, can_focus=Tru
     def load(self, model: ListingModel, name: str, cursor: int = 0,
              cursor_x: int = 0, scroll_y: int | None = None,
              focus: str | None = None) -> None:
-        self.model = model
+        previous, self.model = self.model, model
         self._name = name
         self.total = 0
         self.cursor = cursor
@@ -1072,7 +1082,9 @@ class ListingView(SearchMixin, NavMixin, ColumnCursor, ScrollView, can_focus=Tru
         self._pending_op = None
         self._matches = []
         self._ranges = {}
-        self._reset_search_cache()
+        # Navigating inside the same segment reuses the same model, and the
+        # searchable body with it; only a different model invalidates it.
+        self._reset_search_cache(body=model is not previous)
         self._prime()
 
     @work(thread=True, exclusive=True, group="listing-prime")
@@ -1147,7 +1159,8 @@ class ListingView(SearchMixin, NavMixin, ColumnCursor, ScrollView, can_focus=Tru
         self._op_mode = (self._op_mode + 1) % 3
         self._update_op_w()
         self._ranges = {}  # column layout changed -> stale match offsets
-        self._reset_search_cache()  # ...and which rows match at all
+        # ...and which rows match at all: the opcode hex is searchable text.
+        self._reset_search_cache(body=True)
         self._clamp_x()
         self.refresh()
         self._app_status("opcodes: " + {0: "off", 1: f"limited ({_OP_LIMIT} bytes)",
@@ -1583,7 +1596,10 @@ class DecompView(SearchMixin, NavMixin, ColumnCursor, ScrollView, can_focus=True
         self.cursor_x = cursor_x
         self._matches = []
         self._ranges = {}
-        self._reset_search_cache()
+        # A whole new body: drop the joined haystack outright rather than trust
+        # id(self._texts) to differ, since the list it replaces is freed here and
+        # its address can be handed straight back.
+        self._reset_search_cache(body=True)
         # Gutter wide enough for the largest line number + a trailing space.
         self._gutter = (len(str(total)) + 1) if total else 0
         maxw = max((s.cell_length for s in self._strips), default=0)
