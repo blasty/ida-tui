@@ -21,3 +21,6 @@ core
 core.*
 .fastfeedback/
 tests/.synthetic/
+
+# the upstream port patch, kept locally for reference only
+ida-codemode-mcp.patch
