@@ -3092,8 +3092,8 @@ class XrefsScreen(ModalScreen):
         self._preselect = preselect
 
     def compose(self) -> ComposeResult:
-        with Vertical(id="xref-box"):
-            yield Static(self._label, id="xref-title")
+        with Vertical(id="xref-box") as box:
+            box.border_title = Text(self._label.strip())
             yield OptionList(*[Option(text) for _, text in self._items], id="xref-list")
 
     def on_mount(self) -> None:
@@ -3173,8 +3173,8 @@ class SymbolPalette(ModalScreen):
         self._results: list[tuple] = []
 
     def compose(self) -> ComposeResult:
-        with Vertical(id="pal-box"):
-            yield Static(" symbols", id="pal-title", markup=False)
+        with Vertical(id="pal-box") as box:
+            box.border_title = Text("symbols")
             yield Input(placeholder="fuzzy find symbol…  ↑↓ select · Enter open · Esc close",
                         id="pal-input")
             yield OptionList(id="pal-list")
@@ -3253,8 +3253,8 @@ class SymbolPalette(ModalScreen):
         more = "+" if len(self._results) == cap else ""
         hint = "  (F2: this binary)" if self._project_scope else (
             "  (F2: whole project)" if self._index is not None else "")
-        self.query_one("#pal-title", Static).update(
-            f" symbols [{scope}]: {len(self._results)}{more}{hint}")
+        self.query_one("#pal-box").border_title = Text(
+            f"symbols [{scope}]: {len(self._results)}{more}{hint}")
 
     def action_cursor_down(self) -> None:
         ol = self.query_one(OptionList)
@@ -3319,8 +3319,8 @@ class StringsPalette(ModalScreen):
         self._results: list[tuple] = []
 
     def compose(self) -> ComposeResult:
-        with Vertical(id="pal-box"):
-            yield Static(" strings", id="pal-title", markup=False)
+        with Vertical(id="pal-box") as box:
+            box.border_title = Text("strings")
             yield Input(placeholder="filter strings\u2026  \u2191\u2193 select \u00b7 "
                                     "Enter jump \u00b7 Esc close", id="pal-input")
             yield OptionList(id="pal-list")
@@ -3393,8 +3393,8 @@ class StringsPalette(ModalScreen):
         more = "+" if len(rows) == cap else ""
         hint = "  (F2: this binary)" if self._project_scope else (
             "  (F2: whole project)" if self._index is not None else "")
-        self.query_one("#pal-title", Static).update(
-            f" strings [{scope}]: {len(self._results)}{more} of {len(self._rows)}{hint}")
+        self.query_one("#pal-box").border_title = Text(
+            f"strings [{scope}]: {len(self._results)}{more} of {len(self._rows)}{hint}")
 
     def action_cursor_down(self) -> None:
         ol = self.query_one(OptionList)
@@ -3513,8 +3513,8 @@ class QuitScreen(ModalScreen):
     def compose(self) -> ComposeResult:
         what = (f"{len(self._labels)} databases have unsaved changes"
                 if len(self._labels) > 1 else "unsaved changes")
-        with Vertical(id="quit-box"):
-            yield Static(f"\u26a0  {what}", id="quit-title")
+        with Vertical(id="quit-box") as box:
+            box.border_title = Text(f"\u26a0 {what}")
             body = Text()
             for label in self._labels:
                 body.append(f"  \u2022 {label}\n", _S_LABEL)
@@ -3546,8 +3546,8 @@ class HelpScreen(ModalScreen):
         avail = max(self.app.size.width - 6, 20)
         cols = self._columns(avail)
         per = -(-len(_HELP) // cols)  # ceil, so the columns stay balanced
-        with Vertical(id="help-box"):
-            yield Static(" keys", id="help-title", markup=False)
+        with Vertical(id="help-box") as box:
+            box.border_title = Text("keys")
             # Still inside a scroll container, so a genuinely tiny terminal
             # degrades to scrolling rather than clipping — but spread across the
             # width it shouldn't come to that.
@@ -3633,9 +3633,9 @@ class RegWriteScreen(ModalScreen):
         self._idx = idx
 
     def compose(self) -> ComposeResult:
-        with Vertical(id="pal-box"):
-            yield Static(f" registers at t={self._idx:,} \u2014 Enter seeks to the "
-                         f"write, f seeks forward", id="pal-title", markup=False)
+        with Vertical(id="pal-box") as box:
+            box.border_title = Text(f"registers at t={self._idx:,}")
+            box.border_subtitle = Text("Enter seeks to the write \u00b7 f seeks forward")
             yield OptionList(id="pal-list")
 
     def on_mount(self) -> None:
@@ -3857,9 +3857,8 @@ class LoadOptionsScreen(ModalScreen):
     def compose(self) -> ComposeResult:
         from .formats import PROCESSORS
         self._all = list(PROCESSORS)
-        with Vertical(id="pal-box"):
-            yield Static(" unrecognised file \u2014 how should IDA load it?",
-                         id="pal-title", markup=False)
+        with Vertical(id="pal-box") as box:
+            box.border_title = Text("unrecognised file \u2014 how should IDA load it?")
             yield Static(f" {os.path.basename(self._path)}  ({self._nbytes:,} bytes) "
                          f"\u2014 no loader matched; without a processor IDA "
                          f"assumes x86 at 0", id="load-note", markup=False)
@@ -3922,8 +3921,8 @@ class LoadOptionsScreen(ModalScreen):
         ol.add_options(opts)
         if rows:
             ol.highlighted = 0
-        self.query_one("#pal-title", Static).update(
-            f" unrecognised file \u2014 processor? ({len(rows)})")
+        self.query_one("#pal-box").border_title = Text(
+            f"unrecognised file \u2014 processor? ({len(rows)})")
 
     def action_cursor_down(self) -> None:
         ol = self.query_one(OptionList)
@@ -3980,8 +3979,8 @@ class ProjectPalette(ModalScreen):
         self._results: list[dict] = []
 
     def compose(self) -> ComposeResult:
-        with Vertical(id="pal-box"):
-            yield Static(" binaries", id="pal-title", markup=False)
+        with Vertical(id="pal-box") as box:
+            box.border_title = Text("binaries")
             yield Input(placeholder="filter binaries\u2026  \u2191\u2193 select \u00b7 "
                                     "Enter switch \u00b7 Esc close", id="pal-input")
             yield OptionList(id="pal-list")
@@ -4028,8 +4027,8 @@ class ProjectPalette(ModalScreen):
             # you are rather than at whatever sorts first.
             active = next((i for i, e in enumerate(rows) if e["active"]), 0)
             ol.highlighted = active
-        self.query_one("#pal-title", Static).update(
-            f" binaries: {len(rows)} of {len(self._entries)}")
+        self.query_one("#pal-box").border_title = Text(
+            f"binaries: {len(rows)} of {len(self._entries)}")
 
     def action_cursor_down(self) -> None:
         ol = self.query_one(OptionList)
@@ -4071,7 +4070,8 @@ class ConfirmScreen(ModalScreen):
         self._note = note
 
     def compose(self) -> ComposeResult:
-        with Vertical(id="confirm-box"):
+        with Vertical(id="confirm-box") as box:
+            box.border_title = Text("\u26a0 confirm")
             yield Static(self._message, id="confirm-msg", markup=False)
             if self._note:
                 yield Static(self._note, id="confirm-note", markup=False)
@@ -4307,13 +4307,15 @@ class StructEditor(ModalScreen):
             then()
 
     def compose(self) -> ComposeResult:
-        with Vertical(id="se-box"):
+        with Vertical(id="se-box") as box:
+            box.border_title = Text("structs / types")
+            box.border_subtitle = Text("Esc close")
             with Horizontal(id="se-panes"):
                 with Vertical(id="se-left"):
-                    yield Static(" structs", id="se-title")
+                    yield Static("structs", id="se-title")
                     yield OptionList(id="se-list")
                 with Vertical(id="se-right"):
-                    yield Static(" C definition", id="se-hint")
+                    yield Static("C definition", id="se-hint")
                     yield CTextArea("", id="se-edit")
             yield Static(
                 "Enter edit · Ctrl+S save · Ctrl+Y copy · Ctrl+N new · d/Del delete · Esc close",
@@ -4337,11 +4339,16 @@ class StructEditor(ModalScreen):
         self._structs = structs
         ol = self.query_one("#se-list", OptionList)
         ol.clear_options()
+        # Ragged rows read as noise, so the name column is padded to the widest
+        # name actually present (capped, so one monstrous C++ mangling can't
+        # push the size/count columns off the pane).
+        width = min(max((len(s.name) for s in structs), default=0), 22)
         for s in structs:
             kw = "union" if s.is_union else "struct"
+            name = s.name if len(s.name) <= width else s.name[:width - 1] + "\u2026"
             label = Text()
-            label.append(s.name, _S_LABEL)
-            label.append(f"   {s.size:#x}  {s.members}f  {kw}", _S_DIM)
+            label.append(f"{name:<{width}}", _S_LABEL)
+            label.append(f"{s.size:>#7x}{s.members:>4}f  {kw}", _S_DIM)
             ol.add_option(Option(label))
         if structs:
             idx = 0
@@ -4647,15 +4654,39 @@ class IdaTui(App):
         width: 100%; height: 100%; content-align: center middle;
         background: $panel-darken-1;
     }
+    /* ---- modal chrome ---------------------------------------------------
+       One shape for every dialog: a THIN round border in a colour that
+       recedes, and the title set into the top border rather than painted as a
+       solid bar across the full width. The old `thick` frame plus an inverse
+       title bar was two heavy rectangles around content that is itself the
+       only thing worth looking at. Size stays per-box; everything else is
+       here, once. */
+    #quit-box, #help-box, #xref-box, #pal-box, #se-box, #confirm-box,
+    #loading-box, #busy-box {
+        background: $panel;
+        border: round $panel-lighten-3;
+        border-title-color: $accent;
+        border-title-style: bold;
+        border-title-align: left;
+        border-subtitle-color: $text-muted;
+        border-subtitle-align: right;
+    }
+    /* The two that ask a question you can answer wrongly keep the warning hue. */
+    #quit-box, #confirm-box { border: round $warning;
+                             border-title-color: $warning; }
+    /* Lists inside a dialog are content, not another framed panel: drop the
+       stock OptionList border/background so the dialog has ONE edge. Focus
+       still reads from the highlight bar (bright when focused, dim when not). */
+    #quit-box OptionList, #help-box OptionList, #xref-box OptionList,
+    #pal-box OptionList, #se-box OptionList {
+        border: none; background: transparent; padding: 0 1;
+    }
     QuitScreen { align: center middle; }
-    #quit-box { width: 64; height: auto; border: thick $warning; background: $panel; }
-    #quit-title { dock: top; height: 1; background: $warning; color: $background; text-style: bold; padding: 0 1; }
-    #quit-list { height: auto; padding: 1 2 0 2; }
-    #quit-help { height: 1; color: $text-muted; padding: 0 2; margin-top: 1; }
+    #quit-box { width: 64; height: auto; padding: 1 1 0 1; }
+    #quit-list { height: auto; padding: 0 1; }
+    #quit-help { height: 1; color: $text-muted; padding: 0 1; margin-top: 1; }
     HelpScreen { align: center middle; }
-    #help-box { width: auto; max-width: 98%; height: auto; max-height: 90%;
-                border: thick $accent; background: $panel; }
-    #help-title { dock: top; height: 1; background: $accent; color: $background; text-style: bold; padding: 0 1; }
+    #help-box { width: auto; max-width: 98%; height: auto; max-height: 90%; }
     #help-body { height: auto; max-height: 100%; width: auto; padding: 1 1; }
     #help-cols { height: auto; width: auto; }
     .help-col { height: auto; width: auto; margin-right: 1; }
@@ -4663,8 +4694,7 @@ class IdaTui(App):
                  border: round $panel-lighten-2; }
     #help-foot { dock: bottom; height: 1; color: $text-muted; padding: 0 2; }
     XrefsScreen { align: center middle; }
-    #xref-box { width: 84; max-height: 70%; height: auto; border: thick $accent; background: $panel; }
-    #xref-title { dock: top; height: 1; background: $accent; color: $background; text-style: bold; padding: 0 1; }
+    #xref-box { width: 84; max-height: 70%; height: auto; padding: 0 0; }
     #xref-list { height: auto; max-height: 100%; }
     /* every #pal-box palette centres, not just the symbol one */
     SymbolPalette, StringsPalette, ProjectPalette,
@@ -4673,9 +4703,7 @@ class IdaTui(App):
        the input + results inherit this width (results is an overlay, so pin it). */
     CommandPalette > Vertical { width: 80%; max-width: 120; }
     CommandPalette #--results { width: 100%; }
-    #pal-box { width: 96; max-width: 92%; height: auto; max-height: 80%;
-               border: thick $accent; background: $panel; }
-    #pal-title { dock: top; height: 1; background: $accent; color: $background; text-style: bold; padding: 0 1; }
+    #pal-box { width: 96; max-width: 92%; height: auto; max-height: 80%; }
     #pal-input { border: none; height: 1; margin: 0 1; background: $panel; color: $text; }
     #pal-list { height: auto; max-height: 24; }
     #trace-dock { dock: right; width: 34; background: $surface; border-left: solid $panel; }
@@ -4690,32 +4718,34 @@ class IdaTui(App):
     LoadOptionsScreen #pal-list { max-height: 12; }
     #load-base { border: none; height: 1; margin: 1 1 0 1; background: $panel; color: $text; }
     #load-help { height: 1; padding: 0 1; color: $text-muted; }
-    #confirm-note { height: auto; padding: 0 1; color: $text-muted; }
+    #confirm-note { height: auto; color: $text-muted; }
     StructEditor { align: center middle; }
-    #se-box { width: 90%; height: 84%; border: thick $accent; background: $panel; }
+    #se-box { width: 90%; height: 84%; }
     #se-panes { height: 1fr; }
-    #se-left { width: 38; border-right: solid $accent; }
+    #se-left { width: 38; border-right: solid $panel-lighten-3; }
     #se-right { width: 1fr; }
-    #se-title, #se-hint { height: 1; background: $accent; color: $background; text-style: bold; padding: 0 1; }
+    /* Column captions, not title bars: the dialog already has one title. */
+    #se-title, #se-hint { height: 1; color: $text-muted; text-style: bold;
+                          padding: 0 1; }
     #se-list { height: 1fr; }
-    #se-edit { height: 1fr; border: none; }
-    #se-status { height: 1; background: $panel-darken-2; color: $text-muted; padding: 0 1; }
+    #se-edit { height: 1fr; border: none; padding: 0 1; }
+    /* A footer, but a quiet one: a shade of the dialog's own background
+       instead of the old near-black bar. */
+    #se-status { height: 1; background: $panel-darken-1; color: $text-muted;
+                 padding: 0 1; }
     ConfirmScreen { align: center middle; }
-    #confirm-box { width: 60; height: auto; border: thick $warning;
-                   background: $panel; padding: 1 2; }
+    #confirm-box { width: 60; height: auto; padding: 1 2; }
     #confirm-msg { height: auto; }
     #confirm-help { height: 1; color: $text-muted; margin-top: 1; }
     LoadingScreen { align: center middle; }
-    #loading-box { width: 72; height: auto; border: thick $accent;
-                   background: $panel; padding: 1 2; }
+    #loading-box { width: 72; height: auto; padding: 1 2; }
     #loading-logo { width: 100%; height: auto; margin-bottom: 1; }
     #loading-image { width: 100%; margin-bottom: 1; }
     #loading-title { width: 1fr; height: 1; text-style: bold; }
     #loading-note { height: auto; color: $text-muted; margin-top: 1; }
     #loading-help { height: auto; color: $text-muted; margin-top: 1; }
     BusyScreen { align: center middle; }
-    #busy-box { width: auto; min-width: 26; height: auto; border: thick $accent;
-                background: $panel; padding: 1 2; }
+    #busy-box { width: auto; min-width: 26; height: auto; padding: 1 2; }
     #busy-msg { height: 1; text-style: bold; }
     #busy-help { height: 1; color: $text-muted; margin-top: 1; }
     """

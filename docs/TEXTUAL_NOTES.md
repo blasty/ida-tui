@@ -53,6 +53,20 @@ Hard-won Textual behaviour and the patterns this app relies on. Pairs with
   `build_byte_to_codepoint_dict`, so character offsets smear on non-ASCII), and
   a `TextAreaTheme` that sets `base_style` overrides the widget's CSS colours —
   ours sets only `syntax_styles` so the editor keeps the app's background.
+- **Modal chrome lives in ONE grouped CSS rule** (`#quit-box, #help-box, …` in
+  `IdaTui.CSS`): `border: round`, title colour, subtitle colour. Per-box rules
+  carry only size. Dialog titles are `border_title`/`border_subtitle` on the box,
+  not a docked `Static` — but **`border_title` parses Textual markup** when you
+  give it a `str` (`render_str`), so a title like `symbols [this binary]: 128`
+  loses or breaks on the `[…]`. Pass a `rich.text.Text` and it's taken literally.
+  Also note it keeps only the FIRST line of a multi-line title.
+- **Widgets inside a dialog bring their own frames.** `OptionList` defaults to
+  `border: tall $border-blurred` + `background: $surface`, which inside a bordered
+  dialog reads as a second panel; the modal rule clears both so the dialog has one
+  edge. Focus still reads from the highlight bar (bright focused / dim blurred).
+- **Look at chrome with `experiments/modal_shot.py`** (no IDA, no worker, any
+  python3 with textual): it renders each dialog over a fake background at a size
+  you choose. A tiled pane is the worst possible place to judge a dialog.
 - **A modal's `Input` messages bubble to the App.** `SymbolPalette` (the Ctrl+N
   fuzzy finder) has its own `Input`; its `Input.Changed`/`Input.Submitted` bubble
   up to the app's handlers (which would run the `#search`/`#func-filter` logic and
