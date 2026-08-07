@@ -140,21 +140,6 @@ graphics protocol, `logo.ans` everywhere else. Support is detected by *asking th
 terminal*, not by sniffing `$TERM` (under a multiplexer, every variable you'd
 test is empty while the protocol works fine).
 
-## Layout
-
-```
-idatui/codemode_client.py   lease a database, run operations through Code Mode
-idatui/remote_tools.py      IDAPython that runs inside the database process
-idatui/domain.py            paging + caching, synchronous and thread-safe
-idatui/app.py               the Textual app
-idatui/graph.py             CFG layout — pure, no IDA, no Textual
-idatui/rpc.py               unix-socket control channel
-```
-
-Layers stay separate: `domain.py` owns no processes, `graph.py` does no I/O
-(which is why its tests run offline in milliseconds), and `app.py` does no
-analysis.
-
 ## Tests
 
 ```sh
@@ -177,14 +162,8 @@ flake, and the four ways a test here wastes minutes.
 
 ## Docs
 
-| | |
-|---|---|
-| [`docs/RPC.md`](docs/RPC.md) | the RPC protocol |
-| [`docs/GRAPH_VIEW.md`](docs/GRAPH_VIEW.md) | graph layout engine |
-| [`docs/CODEMODE_PORT.md`](docs/CODEMODE_PORT.md) | lifecycle, API gaps, what's still IDAPython |
-| [`docs/CODEMODE_UPSTREAM.md`](docs/CODEMODE_UPSTREAM.md) | findings sent to the Code Mode maintainers |
-| [`docs/PAGING_FINDINGS.md`](docs/PAGING_FINDINGS.md) | paging and scale findings |
-| [`docs/TEXTUAL_NOTES.md`](docs/TEXTUAL_NOTES.md) | Textual pitfalls, the hard way |
+- [`docs/RPC.md`](docs/RPC.md) — the RPC protocol, verb by verb
+- [`docs/GRAPH_VIEW.md`](docs/GRAPH_VIEW.md) — how the graph is laid out
 
 ## Known sharp edges
 
