@@ -161,16 +161,6 @@ flake, and the four ways a test here wastes minutes.
 - [`docs/RPC.md`](docs/RPC.md) — the RPC protocol, verb by verb
 - [`docs/GRAPH_VIEW.md`](docs/GRAPH_VIEW.md) — how the graph is laid out
 
-## Known sharp edges
-
-- PLT/import stubs: following a libc symbol lands on `extrn X:near`, which
-  Hex-Rays can't decompile. No pretty-printing yet.
-- Xref-select can land on the wrong line in the `x` popup.
-- No "discard changes and quit": a managed worker saves when its last lease
-  closes, so the TUI can't promise your edits weren't persisted.
-- A GUI user editing the same database won't invalidate our caches — Code Mode
-  has no change feed yet (see `docs/CODEMODE_UPSTREAM.md`).
-
 —
 
 [sl0p.foo](https://sl0p.foo)

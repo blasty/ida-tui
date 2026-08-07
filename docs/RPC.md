@@ -49,6 +49,13 @@ Sequential connections (e.g. one `rpcclient` invocation per call) are fine.
 
 ## Methods
 
+### Session
+| method | params | notes |
+|--------|--------|-------|
+| `ping` | — | `{ok, proto, module, ready, functions, complete}` — also the default when `method` is omitted. Use it to wait for the index to finish loading. |
+| `methods` | — | this table, as data. |
+| `quit` | — | close the TUI gracefully (releases the database lease). |
+
 ### Raw injection (max fidelity)
 | method | params | notes |
 |--------|--------|-------|
@@ -88,6 +95,9 @@ predicate so the returned state is final.
 | `back` | — | Escape: pop the nav stack. |
 | `toggle_view` | — | Tab: disasm ⇄ pseudocode. |
 | `hex` | — | `\`: hex view. |
+| `trace` | `seek` \| `goto` \| `step`, `over?` | navigate an execution trace (needs `--trace`). `seek` takes a timestamp, or `"!50"` for a percentage; `step` moves one instruction, `over=true` steps over a call. |
+| `binaries` | — | project binaries as `{label, active, resident, indexed}` (project mode only). |
+| `switch` | `label` | make another project binary active. |
 | `graph` | `action?=show`, `target?`, `blocks?` | the control-flow graph (Space). `show` is a pure read — blocks, typed edges, ranks, box geometry and the cursor, **not** the box-drawing characters; `screen` gives you the drawing. `open`/`close`/`toggle` switch mode, `zoom` cycles full→compact→collapsed, `entry` jumps to the entry block, `succ`/`pred` follow one edge (`J`/`K`), `block target=<id\|0xADDR>` puts the cursor in a block. `blocks=false` omits the per-block list. See `docs/GRAPH_VIEW.md`. |
 | `xrefs` | — | `x`: open the xref picker. |
 | `symbols` | `query?` | Ctrl+N palette, optionally pre-typed. |

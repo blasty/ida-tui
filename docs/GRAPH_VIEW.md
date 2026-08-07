@@ -52,8 +52,8 @@ every editing verb work inside a box because they are working on listing rows.
 Growing a second disassembly renderer for graph mode would have been the real
 cost.
 
-The backend adds exactly one tool, `flowchart(addr)` in
-`server/patch_server.py`, which returns block ranges and typed edges — **not**
+The backend adds exactly one operation, `flowchart(addr)` in
+`idatui/codemode_client.py`, which returns block ranges and typed edges — **not**
 text.
 
 ## Layout (`idatui/graph.py`)
