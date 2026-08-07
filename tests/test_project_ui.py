@@ -56,10 +56,27 @@ async def run(bins):
             async def settle(pred, t=180.0):
                 return await wait_for(pred, pilot.pause, t, 0.05)
 
+            async def usable(t=180.0):
+                """Loaded AND drivable.
+
+                An index that has finished streaming does not mean the app is
+                taking keys yet: the loading overlay is a ModalScreen and it is
+                dismissed a moment later, by auto-land. Between those two the
+                app looks ready and swallows every keypress -- so a test that
+                waits only for the index presses Ctrl+O into the overlay and
+                sees no switcher. Which side of that gap the poll lands on is
+                decided by how fast the backend happens to be, so it has to be
+                waited for explicitly, not hoped for.
+                """
+                return await settle(
+                    lambda: app.program is not None
+                    and app._func_index is not None
+                    and app._func_index.complete
+                    and app._loading_screen is None
+                    and len(app.screen_stack) == 1, t)
+
             # -- boots on the project's first binary ----------------------- #
-            ok = await settle(lambda: app.program is not None
-                              and app._func_index is not None
-                              and app._func_index.complete)
+            ok = await usable()
             check("project mode boots on the first binary", ok,
                   f"binary={app._binary}")
             check("the active binary is the first one", app._binary == first,
@@ -100,7 +117,8 @@ async def run(bins):
             await pilot.press("enter")
             switched = await settle(
                 lambda: app._binary == second and app.program is not None
-                and app._func_index is not None and app._func_index.complete)
+                and app._func_index is not None and app._func_index.complete
+                and len(app.screen_stack) == 1)
             check("switching opens the other binary", switched,
                   f"binary={app._binary}")
             check("the second binary has its own function index",
@@ -127,7 +145,8 @@ async def run(bins):
             await pilot.press("enter")
             back = await settle(lambda: app._binary == first
                                 and app._func_index is not None
-                                and app._func_index.complete, 120)
+                                and app._func_index.complete
+                                and len(app.screen_stack) == 1, 120)
             check("switching back returns to the first binary", back,
                   f"binary={app._binary}")
             check("its function index came back intact",
