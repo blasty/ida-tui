@@ -683,36 +683,129 @@ for item in a.get("items", []):
 result = {"result": rows}
 result
 ''',
+    # Every category takes EITHER one edit or a LIST of them, and the answer is
+    # one row per edit. The port accepted only a single dict, so any batch path
+    # (rpc rename_many applying a whole symbol file, which is the entire point of
+    # that verb) died with "list indices must be integers or slices, not str" and
+    # reported the failure against addr=null. Mirrors the real tool: conflict
+    # detection before the write, dry_run/allow_overwrite/stop_on_error, per-row
+    # addr/old/name, and a summary counting EDITS rather than categories.
     "rename": r'''
-import ida_idaapi, ida_name, ida_typeinf
+import idaapi, ida_hexrays, ida_name
 batch = a.get("batch") or {}
-out = {}; ok_count = failed = 0
-for category, edit in batch.items():
-    try:
-        if category == "func":
-            ea, new = int(str(edit["addr"]), 16), str(edit["name"])
-            fn = db.functions.get_at(ea); ok = bool(fn and db.functions.set_name(fn, new))
-        elif category == "data":
-            new = str(edit.get("new") or "")
-            if edit.get("addr") is not None: ea = int(str(edit["addr"]), 16)
-            else: ea = int(ida_name.get_name_ea(ida_idaapi.BADADDR, str(edit.get("old") or "")))
-            ok = bool(db.names.set_name(ea, new))
-        elif category in ("local", "stack"):
-            ea, old, new = int(str(edit["func_addr"]), 16), str(edit["old"]), str(edit["new"])
-            pseudo = db.pseudocode.decompile(ea); var = pseudo.find_local_variable(old)
-            if var is None: ok = False
+dry_run = bool(batch.get("dry_run", False))
+allow_overwrite = bool(batch.get("allow_overwrite", False))
+stop_on_error = bool(batch.get("stop_on_error", False))
+
+def _items(value):
+    if value is None: return []
+    if isinstance(value, dict): return [value]
+    if isinstance(value, list): return [i for i in value if isinstance(i, dict)]
+    return []
+
+def _set_name_checked(ea, new):
+    conflict = idaapi.get_name_ea(idaapi.BADADDR, new)
+    if conflict != idaapi.BADADDR and conflict != ea and not allow_overwrite:
+        return False, f"can't rename at {hex(ea)} as {new!r}: name already used at {hex(conflict)}"
+    if dry_run:
+        return True, None
+    flags = idaapi.SN_CHECK
+    if allow_overwrite: flags |= int(getattr(idaapi, "SN_FORCE", 0))
+    if not idaapi.set_name(ea, new, flags):
+        return False, (f"Rename failed at {hex(ea)}: IDA rejected name {new!r} "
+                       "(invalid identifier or internal conflict)")
+    return True, None
+
+def _refresh_ctext(fn_addr):
+    # A renamed function must invalidate Hex-Rays' cache, which is per function
+    # and persisted in the .i64: without this the pseudocode keeps calling the
+    # old name forever while every other readback reports the new one.
+    if not ida_hexrays.init_hexrays_plugin(): return
+    failure = ida_hexrays.hexrays_failure_t()
+    cfunc = ida_hexrays.decompile_func(fn_addr, failure, ida_hexrays.DECOMP_WARNINGS)
+    if cfunc: cfunc.refresh_func_ctext()
+
+out = {}; ok_count = failed = 0; halted = False
+for category in ("func", "data", "local", "stack"):
+    if category not in batch: continue
+    rows = []
+    for edit in _items(batch.get(category)):
+        try:
+            if category == "func":
+                addr_text = edit.get("addr") or edit.get("func_addr") or edit.get("func")
+                new = edit.get("name") or edit.get("new") or edit.get("new_name")
+                if not addr_text or not new:
+                    row = {"addr": addr_text, "name": new,
+                           "error": "Function rename requires addr + name"}
+                else:
+                    ea = int(str(addr_text), 16)
+                    fn = idaapi.get_func(ea)
+                    if fn is None:
+                        row = {"addr": addr_text, "name": new, "error": "Function not found"}
+                    else:
+                        old = idaapi.get_name(fn.start_ea) or None
+                        ok, err = _set_name_checked(fn.start_ea, str(new))
+                        row = {"addr": addr_text, "old": old, "name": str(new)}
+                        if err: row["error"] = err
+                        if dry_run: row["dry_run"] = True
+                        if ok and not dry_run: _refresh_ctext(fn.start_ea)
+            elif category == "data":
+                addr_text = edit.get("addr")
+                old = edit.get("old") or edit.get("old_name")
+                new = edit.get("new") or edit.get("new_name") or edit.get("name")
+                if not new and new != "":
+                    row = {"old": old, "new": None,
+                           "error": "Global rename requires target and new name"}
+                else:
+                    if addr_text is not None:
+                        ea = int(str(addr_text), 16)
+                        old = old or (idaapi.get_name(ea) or None)
+                    else:
+                        ea = idaapi.get_name_ea(idaapi.BADADDR, str(old or ""))
+                    if ea == idaapi.BADADDR:
+                        row = {"old": old, "new": str(new), "error": f"Global {old!r} not found"}
+                    else:
+                        # An empty new name CLEARS the label; that is a real
+                        # request (tests revert with it), not a missing argument.
+                        if str(new) == "":
+                            ok = bool(ida_name.set_name(ea, "", idaapi.SN_CHECK))
+                            err = None if ok else f"Failed to clear the name at {hex(ea)}"
+                        else:
+                            ok, err = _set_name_checked(ea, str(new))
+                        row = {"addr": hex(ea), "old": old, "new": str(new)}
+                        if err: row["error"] = err
+                        if dry_run: row["dry_run"] = True
             else:
-                var.set_user_name(new)
-                ok = bool(pseudo.save_local_variable_info(var, save_name=True))
-        else:
-            raise ValueError(f"unsupported rename category: {category}")
-        row = {"ok": ok, **({} if ok else {"error": "IDA rejected the name"})}
-    except Exception as exc:
-        row = {"ok": False, "error": str(exc)}
-    out[category] = [row]
-    if row["ok"]: ok_count += 1
-    else: failed += 1
+                fa, old, new = edit.get("func_addr"), edit.get("old"), edit.get("new")
+                if not fa or not old or not new:
+                    row = {"old": old, "new": new,
+                           "error": f"{category} rename requires func_addr + old + new"}
+                else:
+                    ea = int(str(fa), 16)
+                    pseudo = db.pseudocode.decompile(ea)
+                    var = pseudo.find_local_variable(str(old))
+                    if var is None:
+                        row = {"func_addr": fa, "old": old, "new": new,
+                               "error": f"no local {old!r} in that function"}
+                    elif dry_run:
+                        row = {"func_addr": fa, "old": old, "new": new, "dry_run": True}
+                    else:
+                        var.set_user_name(str(new))
+                        ok = bool(pseudo.save_local_variable_info(var, save_name=True))
+                        row = {"func_addr": fa, "old": old, "new": new}
+                        if not ok: row["error"] = "IDA rejected the local variable name"
+        except Exception as exc:
+            row = {"addr": edit.get("addr"), "error": str(exc)}
+        rows.append(row)
+        if row.get("error"): failed += 1
+        else: ok_count += 1
+        if row.get("error") and stop_on_error:
+            halted = True; break
+    out[category] = rows
+    if halted: break
 out["summary"] = {"ok": ok_count, "failed": failed}
+if dry_run: out["summary"]["dry_run"] = True
+if halted: out["summary"]["halted"] = True
 result = out
 result
 ''',

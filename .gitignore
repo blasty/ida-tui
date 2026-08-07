@@ -19,3 +19,4 @@ bin/
 # core dumps (idalib/SWIG can segfault under differential probes)
 core
 core.*
+.fastfeedback/
