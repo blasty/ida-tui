@@ -15,12 +15,15 @@ Needs IDA. ~40s.
 NEEDS_IDA = True
 import asyncio
 import os
+import shutil
 import sys
+import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from textual.widgets import Static  # noqa: E402
 
+from idatui._sync import settle  # noqa: E402
 from idatui.app import DecompView, IdaTui, ListingView  # noqa: E402
 
 PASS = FAIL = 0
@@ -38,6 +41,36 @@ def check(name, ok, detail=""):
         print(f"  FAIL {name}   {detail}")
 
 
+
+#: Every phase gets its OWN copy of the fixture.
+#:
+#: This suite used to delete <BIN>.i64 and reopen the SAME path for each phase.
+#: That was safe when the TUI owned a private worker that died with it; under
+#: Code Mode the database is leased and the previous phase's worker can still
+#: hold it through its lease grace, so the delete raced a live owner and the
+#: next open never produced a listing (the crash this fixed). Separate paths
+#: cannot collide, and nothing has to wait for anyone else to let go.
+_SCRATCH = []
+
+
+def fresh_copy(src: str, tag: str) -> str:
+    d = tempfile.mkdtemp(prefix=f"idatui-thumb-{tag}-")
+    _SCRATCH.append(d)
+    dst = os.path.join(d, os.path.basename(src))
+    shutil.copy2(src, dst)
+    return dst
+
+
+def drop_scratch() -> None:
+    for d in _SCRATCH:
+        shutil.rmtree(d, ignore_errors=True)
+    _SCRATCH.clear()
+
+
+def status_of(app) -> str:
+    return str(app.query_one("#status", Static).render())
+
+
 async def wait(pred, pilot, t=240.0):
     for _ in range(int(t / 0.05)):
         await pilot.pause(0.05)
@@ -52,13 +85,8 @@ async def wait(pred, pilot, t=240.0):
 async def run() -> int:
     # A fresh database every time: the T flag and the segment's addressing mode
     # are SAVED in the .i64, so a previous run would answer the question for us.
-    for ext in (".i64", ".id0", ".id1", ".id2", ".nam", ".til"):
-        try:
-            os.remove(BIN + ext)
-        except OSError:
-            pass
-
-    app = IdaTui(open_path=BIN, keepalive=False, load_args="-parm")
+    app = IdaTui(open_path=fresh_copy(BIN, "arm"), keepalive=False,
+                 load_args="-parm")
     async with app.run_test(size=(140, 44)) as pilot:
         await wait(lambda: app._func_index is not None
                    and app._func_index.complete, pilot)
@@ -84,10 +112,14 @@ async def run() -> int:
 
         m1 = lst.model
         await pilot.press("t")
-        await wait(lambda: lst.model is not m1 and lst.model is not None, pilot, 60)
-        await pilot.pause(0.5)
+        # The mode switch announces itself; wait for THAT, plus quiescence.
+        # `lst.model is not m1` used to be the gate, but an item edit now keeps
+        # the listing's walk instead of rebuilding it, so the model object is
+        # never replaced -- every one of these waits sat out its full 60s and
+        # the suite still "passed", four times over.
+        await settle(app, lambda: "Thumb" in status_of(app), timeout=60)
 
-        status = str(app.query_one("#status", Static).render())
+        status = status_of(app)
         check("the status says it switched to Thumb", "Thumb" in status, status[:90])
         # Thumb doesn't exist in AArch64, and -parm on a headerless blob gives a
         # 64-bit segment, so setting T alone would change nothing and look broken.
@@ -114,9 +146,8 @@ async def run() -> int:
         m2 = lst.model
         lst.cursor = lst.model.index_of_ea(0)
         await pilot.press("t")
-        await wait(lambda: lst.model is not m2 and lst.model is not None, pilot, 60)
-        await pilot.pause(0.5)
-        status = str(app.query_one("#status", Static).render())
+        await settle(app, lambda: "ARM @" in status_of(app), timeout=60)
+        status = status_of(app)
         check("`t` toggles back to ARM", "ARM @" in status, status[:80])
 
     # -- and the reason a carved function wouldn't decompile ---------------- #
@@ -126,12 +157,8 @@ async def run() -> int:
     # disassembly that F5 can never turn into pseudocode. The database's bitness
     # is fixed at load and cannot be corrected afterwards, so the only honest
     # thing is to say so.
-    for ext in (".i64", ".id0", ".id1", ".id2", ".nam", ".til"):
-        try:
-            os.remove(BIN + ext)
-        except OSError:
-            pass
-    app = IdaTui(open_path=BIN, keepalive=False, load_args="-parm")   # 64-bit
+    app = IdaTui(open_path=fresh_copy(BIN, "arm64"), keepalive=False,
+                 load_args="-parm")   # 64-bit
     async with app.run_test(size=(140, 44)) as pilot:
         await wait(lambda: app._func_index is not None
                    and app._func_index.complete, pilot)
@@ -143,9 +170,8 @@ async def run() -> int:
         await pilot.pause(0.3)
         m = lst.model
         await pilot.press("t")
-        await wait(lambda: lst.model is not m and lst.model is not None, pilot, 60)
-        await pilot.pause(0.5)
-        status = str(app.query_one("#status", Static).render())
+        await settle(app, lambda: "64-bit" in status_of(app), timeout=60)
+        status = status_of(app)
         check("a 64-bit database warns that Hex-Rays won't decompile",
               "64-bit" in status and "decompile" in status, status[:120])
         check("and names the fix", "ARMv7-A" in status, status[:120])
@@ -158,9 +184,10 @@ async def run() -> int:
         await pilot.pause(0.2)
         mp = lst.model
         await pilot.press("p")
-        await wait(lambda: lst.model is not mp and lst.model is not None, pilot, 60)
-        await wait(lambda: app._func_index is not None
-                   and len(app._func_index) > 0, pilot, 60)
+        # The function appearing in the index IS the signal; the model identity
+        # never was one.
+        await settle(app, lambda: app._func_index is not None
+                     and len(app._func_index) > 0, timeout=60)
         await pilot.press("tab")
         await wait(lambda: "cannot decompile" in
                    str(app.query_one("#status", Static).render()), pilot, 90)
@@ -177,12 +204,8 @@ async def run() -> int:
               len(status) < 110, f"{len(status)} chars: {status[:130]}")
 
     # -- the whole point: a 32-bit database decompiles ---------------------- #
-    for ext in (".i64", ".id0", ".id1", ".id2", ".nam", ".til"):
-        try:
-            os.remove(BIN + ext)
-        except OSError:
-            pass
-    app = IdaTui(open_path=BIN, keepalive=False, load_args="-parm:ARMv7-A")
+    app = IdaTui(open_path=fresh_copy(BIN, "armv7a"), keepalive=False,
+                 load_args="-parm:ARMv7-A")
     async with app.run_test(size=(140, 44)) as pilot:
         await wait(lambda: app._func_index is not None
                    and app._func_index.complete, pilot)
@@ -216,12 +239,8 @@ async def run() -> int:
     if not os.path.isfile(vec):
         check("the cortexm fixture exists", False, vec)
     else:
-        for ext in (".i64", ".id0", ".id1", ".id2", ".nam", ".til"):
-            try:
-                os.remove(vec + ext)
-            except OSError:
-                pass
-        app = IdaTui(open_path=vec, keepalive=False, load_args="-parm:ARMv7-M")
+        app = IdaTui(open_path=fresh_copy(vec, "cortexm"), keepalive=False,
+                     load_args="-parm:ARMv7-M")
         async with app.run_test(size=(140, 44)) as pilot:
             await wait(lambda: app._func_index is not None
                        and app._func_index.complete, pilot)
@@ -252,6 +271,8 @@ async def run() -> int:
             status = str(app.query_one("#status", Static).render())
             check("the result survives the reload AND the reindex",
                   "3 Thumb entries" in status, status[:90])
+
+    drop_scratch()
 
     print(f"\n{PASS} passed, {FAIL} failed")
     return 1 if FAIL else 0
