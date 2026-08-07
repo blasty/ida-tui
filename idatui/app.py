@@ -690,15 +690,21 @@ class SearchMixin:
         key = (count, src)
         if self._hay_key == key:
             return self._hay
-        text_of = self._search_line_text
         starts: list[int] = []
         parts: list[str] = []
         pos = 0
-        for i in range(count):
-            s = text_of(i) or ""
+        chunk = 4096
+        for base in range(0, count, chunk):
+            for s in self._search_line_texts(base, min(chunk, count - base)):
+                if not s:
+                    s = ""
+                starts.append(pos)
+                parts.append(s)
+                pos += len(s) + 1
+        while len(starts) < count:      # a short window: keep the indices lined up
             starts.append(pos)
-            parts.append(s)
-            pos += len(s) + 1
+            parts.append("")
+            pos += 1
         blob = "\n".join(parts)
         folded = blob.lower()
         hay = None if len(folded) != len(blob) else (starts, blob, folded)
@@ -712,6 +718,12 @@ class SearchMixin:
 
     def _search_line_text(self, i: int) -> str | None:
         raise NotImplementedError
+
+    def _search_line_texts(self, start: int, count: int) -> list:
+        """``count`` line texts from ``start``. Overridable so a view whose rows
+        come from a locked model can fetch a window in one go."""
+        text_of = self._search_line_text
+        return [text_of(i) for i in range(start, start + count)]
 
     def _search_ensure(self, done) -> None:
         """Ensure all line texts are available, then call ``done()`` on the UI
@@ -1031,8 +1043,7 @@ class ListingView(SearchMixin, NavMixin, ColumnCursor, ScrollView, can_focus=Tru
             return ""
         return self._op_bytes_text(h).ljust(self._op_w) + "  "
 
-    def _line_plain(self, idx: int) -> str | None:
-        h = self._head(idx)
+    def _plain_of(self, h: Head | None) -> str | None:
         if h is None:
             return None
         # Function headers and code labels sit at depth 0 (with the address);
@@ -1044,6 +1055,22 @@ class ListingView(SearchMixin, NavMixin, ColumnCursor, ScrollView, can_focus=Tru
             return base + h.text
         extra = _LST_INDENT if h.kind == "member" else ""
         return base + self._op_field(h) + extra + self._name_prefix(h) + h.text
+
+    def _line_plain(self, idx: int) -> str | None:
+        return self._plain_of(self._head(idx))
+
+    def _search_line_texts(self, start: int, count: int) -> list:
+        """A window of plain lines in one model call.
+
+        Building the search body row by row took the model's lock and bisected
+        its row table a quarter of a million times; ``window`` does both once
+        for the whole window.
+        """
+        model = self.model
+        if model is None:
+            return []
+        plain = self._plain_of
+        return [plain(h) for h in model.window(start, count)]
 
     def _insn_col(self, idx: int) -> int:
         """Column where the instruction/content text begins, past the address +

@@ -280,6 +280,33 @@ def _pair_cross(a: int, b: int, side: dict[int, list[int]],
     return n
 
 
+def _swap_delta(a: int, b: int, down: dict[int, list[int]],
+                up: dict[int, list[int]], pos: dict[int, int]) -> tuple[int, int]:
+    """``(keep, swap)`` for the adjacent pair (a, b), both sides, in one pass.
+
+    The same as calling :func:`_pair_cross` four times, which is what the
+    transposition loop used to do: every neighbour pair was visited twice (once
+    per direction) and each visit was a python call. Counting both outcomes
+    while the pair is in hand halves the comparisons and removes three calls per
+    candidate swap — and this runs a third of a million times over a corpus.
+    """
+    keep = swap = 0
+    for side in (down, up):
+        va = side[a]
+        vb = side[b]
+        if not va or not vb:
+            continue
+        pbs = [pos[v] for v in vb]
+        for u in va:
+            pu = pos[u]
+            for pv in pbs:
+                if pu > pv:
+                    keep += 1
+                elif pu < pv:
+                    swap += 1
+    return keep, swap
+
+
 def crossings(layers: list[list[int]], down: dict[int, list[int]],
               pos: dict[int, int]) -> int:
     return sum(_cross_below(l, down, pos) for l in layers)
@@ -306,11 +333,20 @@ def _order_layers(g: _Graph, root: int, sweeps: int = 6) -> list[list[int]]:
     pos = {i: k for layer in layers for k, i in enumerate(layer)}
 
     def median(i: int, side: dict[int, list[int]]) -> float:
-        ps = sorted(pos[j] for j in side[i])
-        if not ps:
+        # Almost every node in a control-flow graph has one or two neighbours
+        # on a given side, so answer those without building and sorting a list:
+        # this runs tens of thousands of times per corpus layout.
+        js = side[i]
+        n = len(js)
+        if n == 1:
+            return float(pos[js[0]])
+        if n == 2:
+            return (pos[js[0]] + pos[js[1]]) / 2
+        if not n:
             return -1.0
-        m = len(ps) // 2
-        return float(ps[m]) if len(ps) % 2 else (ps[m - 1] + ps[m]) / 2
+        ps = sorted(pos[j] for j in js)
+        m = n // 2
+        return float(ps[m]) if n % 2 else (ps[m - 1] + ps[m]) / 2
 
     best, best_x = [list(l) for l in layers], crossings(layers, down, pos)
     for s in range(sweeps):
@@ -327,8 +363,7 @@ def _order_layers(g: _Graph, root: int, sweeps: int = 6) -> list[list[int]]:
             for layer in layers:
                 for k in range(len(layer) - 1):
                     a, b = layer[k], layer[k + 1]
-                    keep = _pair_cross(a, b, down, pos) + _pair_cross(a, b, up, pos)
-                    swap = _pair_cross(b, a, down, pos) + _pair_cross(b, a, up, pos)
+                    keep, swap = _swap_delta(a, b, down, up, pos)
                     if swap < keep:
                         layer[k], layer[k + 1] = b, a
                         pos[a], pos[b] = k + 1, k
