@@ -15,3 +15,7 @@ build/
 targets/
 bin/
 *.pristine.i64
+
+# core dumps (idalib/SWIG can segfault under differential probes)
+core
+core.*
