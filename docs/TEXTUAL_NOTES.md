@@ -53,6 +53,13 @@ Hard-won Textual behaviour and the patterns this app relies on. Pairs with
   `build_byte_to_codepoint_dict`, so character offsets smear on non-ASCII), and
   a `TextAreaTheme` that sets `base_style` overrides the widget's CSS colours —
   ours sets only `syntax_styles` so the editor keeps the app's background.
+- **Centre modals with a rule, not a list.** `ModalScreen { align: center middle; }`
+  matches subclasses, so every dialog inherits it and the next one is centred
+  for free. Naming the screens instead (`SymbolPalette, StringsPalette, …`) is
+  how two palettes shipped pinned to the top of the screen. Textual's own
+  `CommandPalette` is a ModalScreen too and wants its stock top alignment, so it
+  opts out explicitly. The `modal_centering` scenario asserts both the rule and
+  that it reaches a real dialog's `region`.
 - **Modal chrome lives in ONE grouped CSS rule** (`#quit-box, #help-box, …` in
   `IdaTui.CSS`): `border: round`, title colour, subtitle colour. Per-box rules
   carry only size. Dialog titles are `border_title`/`border_subtitle` on the box,

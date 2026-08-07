@@ -4997,11 +4997,9 @@ class IdaTui(App):
     #pal-box OptionList, #se-box OptionList {
         border: none; background: transparent; padding: 0 1;
     }
-    QuitScreen { align: center middle; }
     #quit-box { width: 64; height: auto; padding: 1 1 0 1; }
     #quit-list { height: auto; padding: 0 1; }
     #quit-help { height: 1; color: $text-muted; padding: 0 1; margin-top: 1; }
-    HelpScreen { align: center middle; }
     #help-box { width: auto; max-width: 98%; height: auto; max-height: 90%; }
     #help-body { height: auto; max-height: 100%; width: auto; padding: 1 1; }
     #help-cols { height: auto; width: auto; }
@@ -5009,12 +5007,19 @@ class IdaTui(App):
     .help-card { height: auto; width: auto; padding: 0 1;
                  border: round $panel-lighten-2; }
     #help-foot { dock: bottom; height: 1; color: $text-muted; padding: 0 2; }
-    XrefsScreen { align: center middle; }
     #xref-box { width: 84; max-height: 70%; height: auto; padding: 0 0; }
     #xref-list { height: auto; max-height: 100%; }
-    /* every #pal-box palette centres, not just the symbol one */
-    SymbolPalette, StringsPalette, ProjectPalette,
-    LoadOptionsScreen, RegWriteScreen { align: center middle; }
+    /* A dialog centres because it is a dialog — not because someone remembered
+       to add it to a list. That list is how SearchPalette shipped pinned to the
+       top of the screen, and the comment that used to sit here ("every #pal-box
+       palette centres, not just the symbol one") was itself the second time.
+       ModalScreen matches subclasses, so every modal below inherits this and
+       the next one gets it for free; `modal_centering` in the pilot suite
+       fails if one ever opts out by accident. Textual's own Ctrl+P palette is a
+       ModalScreen too and wants its stock top alignment, so it opts out here,
+       deliberately and visibly. */
+    ModalScreen { align: center middle; }
+    CommandPalette { align: center top; }
     /* Give the stock Ctrl+P command palette side padding instead of full width;
        the input + results inherit this width (results is an overlay, so pin it). */
     CommandPalette > Vertical { width: 80%; max-width: 120; }
@@ -5035,7 +5040,6 @@ class IdaTui(App):
     #load-base { border: none; height: 1; margin: 1 1 0 1; background: $panel; color: $text; }
     #load-help { height: 1; padding: 0 1; color: $text-muted; }
     #confirm-note { height: auto; color: $text-muted; }
-    StructEditor { align: center middle; }
     #se-box { width: 90%; height: 84%; }
     #se-panes { height: 1fr; }
     #se-left { width: 38; border-right: solid $panel-lighten-3; }
@@ -5052,18 +5056,15 @@ class IdaTui(App):
        instead of the old near-black bar. */
     #se-status { height: 1; background: $panel-darken-1; color: $text-muted;
                  padding: 0 1; }
-    ConfirmScreen { align: center middle; }
     #confirm-box { width: 60; height: auto; padding: 1 2; }
     #confirm-msg { height: auto; }
     #confirm-help { height: 1; color: $text-muted; margin-top: 1; }
-    LoadingScreen { align: center middle; }
     #loading-box { width: 72; height: auto; padding: 1 2; }
     #loading-logo { width: 100%; height: auto; margin-bottom: 1; }
     #loading-image { width: 100%; margin-bottom: 1; }
     #loading-title { width: 1fr; height: 1; text-style: bold; }
     #loading-note { height: auto; color: $text-muted; margin-top: 1; }
     #loading-help { height: auto; color: $text-muted; margin-top: 1; }
-    BusyScreen { align: center middle; }
     #busy-box { width: auto; min-width: 26; height: auto; padding: 1 2; }
     #busy-msg { height: 1; text-style: bold; }
     #busy-help { height: 1; color: $text-muted; margin-top: 1; }

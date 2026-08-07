@@ -1094,6 +1094,51 @@ async def s_structs(c: Ctx):
     c.check("Esc closes the struct editor", not isinstance(app.screen, StructEditor))
 
 
+@scenario("modal_centering")
+async def s_modal_centering(c: Ctx):
+    """Every dialog we define is centred, without anyone maintaining a list.
+
+    The CSS used to name the screens that centre, so a new palette shipped
+    pinned to the top of the screen (twice). The rule is on ModalScreen now;
+    this fails if a modal ever opts out by accident, which the naked eye only
+    catches when the dialog is already in front of a user.
+    """
+    from textual.screen import ModalScreen
+
+    import idatui.app as A
+
+    ours = sorted(
+        (n for n, v in vars(A).items()
+         if isinstance(v, type) and issubclass(v, ModalScreen)
+         and v is not ModalScreen and v.__module__ == A.__name__),
+        key=str)
+    c.check("found the app's modal screens", len(ours) >= 8, f"{ours}")
+    styles = A.IdaTui.CSS
+    c.check("centring is a rule about modals, not a list of them",
+            "ModalScreen { align: center middle; }" in styles,
+            "the ModalScreen rule is gone")
+    # And prove it REACHES a dialog, rather than just being present in the text.
+    await c.press("ctrl+f")
+    opened = await c.wait(lambda: isinstance(c.app.screen, A.SearchPalette), 10)
+    if not opened:
+        c.check("the search palette opened", False,
+                f"screen={type(c.app.screen).__name__}")
+        return
+    scr = c.app.screen
+    await c.wait(lambda: scr.query_one("#pal-box").region.height > 0, 5)
+    box = scr.query_one("#pal-box").region
+    above, below = box.y, c.app.size.height - (box.y + box.height)
+    c.check("the search palette is vertically centred",
+            box.height > 0 and abs(above - below) <= 1,
+            f"box={box} screen={c.app.size} above={above} below={below}")
+    left = box.x
+    right = c.app.size.width - (box.x + box.width)
+    c.check("and horizontally centred", abs(left - right) <= 1,
+            f"left={left} right={right}")
+    await c.press("escape")
+    await c.wait(lambda: not isinstance(c.app.screen, A.SearchPalette), 5)
+
+
 @scenario("db_search")
 async def s_db_search(c: Ctx):
     """Ctrl+F: search the whole database, by disassembly text or by bytes."""
