@@ -673,49 +673,128 @@ for query in a.get("queries", []):
 result = {"result": rows}
 result
 ''',
+    # Ours: the coarse code/data type plus a fine `kind` (call/jump/flow,
+    # read/write/offset/text/info) that the xref dialog draws its badges from.
+    # Deliberately NOT sorted -- the dialog lists xrefs in IDA's own order.
     "xref_types": r'''
+import idaapi, idautils, ida_bytes, ida_funcs, ida_xref
+code_kind = {ida_xref.fl_CF: "call", ida_xref.fl_CN: "call", ida_xref.fl_JF: "jump",
+             ida_xref.fl_JN: "jump", ida_xref.fl_F: "flow"}
+data_kind = {ida_xref.dr_O: "offset", ida_xref.dr_W: "write", ida_xref.dr_R: "read",
+             ida_xref.dr_T: "text", ida_xref.dr_I: "info"}
+def _kind(xr):
+    return (code_kind if xr.iscode else data_kind).get(xr.type, "code" if xr.iscode else "data")
+def _fn(ea):
+    f = ida_funcs.get_func(ea)
+    return {"addr": hex(int(f.start_ea)), "name": ida_funcs.get_func_name(f.start_ea) or ""} if f else None
 queries = a.get("queries") or []
 all_results = []
 for query in queries:
-    ea, direction = int(str(query["addr"]), 16), str(query.get("direction", "both"))
-    refs = []
-    if direction in ("to", "both"): refs += list(db.xrefs.to_ea(ea))
-    if direction in ("from", "both"): refs += list(db.xrefs.from_ea(ea))
-    rows, seen = [], set()
-    for ref in refs:
-        key = (int(ref.from_ea), int(ref.to_ea), int(ref.type))
-        if query.get("dedup") and key in seen: continue
-        seen.add(key)
-        fn = db.functions.get_at(int(ref.from_ea))
-        kind = ("call" if ref.is_call else "jump" if ref.is_jump else "flow" if ref.is_flow
-                else "read" if ref.is_read else "write" if ref.is_write else ref.type.name.lower())
-        row = {"from": hex(int(ref.from_ea)), "to": hex(int(ref.to_ea)),
-               "type": "code" if ref.is_code else "data", "kind": kind}
-        if query.get("include_fn") and fn is not None:
-            row["fn"] = {"addr": hex(int(fn.start_ea)), "name": db.functions.get_name(fn) or ""}
-        rows.append(row)
-        if len(rows) >= int(query.get("count", 2000)): break
-    all_results.append({"data": rows})
+    query = query if isinstance(query, dict) else {"addr": query}
+    raw = str(query.get("addr", "")).strip()
+    direction = str(query.get("direction", "to") or "to").lower()
+    include_fn = bool(query.get("include_fn", True))
+    dedup = bool(query.get("dedup", True))
+    try: count = int(query.get("count", 2000) or 2000)
+    except (TypeError, ValueError): count = 2000
+    try: target = int(raw, 16)
+    except ValueError: target = idaapi.get_name_ea(idaapi.BADADDR, raw)
+    rows = []
+    if target is not None and target != idaapi.BADADDR and ida_bytes.is_mapped(target):
+        if direction in ("to", "both"):
+            for xr in idautils.XrefsTo(target, 0):
+                row = {"direction": "to", "addr": hex(int(xr.frm)), "from": hex(int(xr.frm)),
+                       "to": hex(int(target)), "type": "code" if xr.iscode else "data", "kind": _kind(xr)}
+                if include_fn: row["fn"] = _fn(xr.frm)
+                rows.append(row)
+        if direction in ("from", "both"):
+            for xr in idautils.XrefsFrom(target, 0):
+                row = {"direction": "from", "addr": hex(int(xr.to)), "from": hex(int(target)),
+                       "to": hex(int(xr.to)), "type": "code" if xr.iscode else "data", "kind": _kind(xr)}
+                if include_fn: row["fn"] = _fn(xr.to)
+                rows.append(row)
+        if dedup:
+            seen, deduped = set(), []
+            for r in rows:
+                k = (r["direction"], r["from"], r["to"], r["kind"])
+                if k in seen: continue
+                seen.add(k); deduped.append(r)
+            rows = deduped
+        rows = rows[:count]
+    all_results.append({"query": raw, "data": rows, "next_offset": None})
 result = {"result": all_results}
 result
 ''',
+    # Mirrors the tool ida-tui was written against, ORDER INCLUDED. The rows are
+    # sorted by the far-end address and deduped by default, and the pseudocode
+    # follow's address fallback silently depends on it: at a call site the raw
+    # IDA order yields the ordinary-flow xref (the next instruction) first, so an
+    # unsorted result makes "follow the call" land on the following line instead.
     "xref_query": r'''
+import idaapi, idautils, ida_bytes, ida_funcs
+def _fn(ea):
+    f = ida_funcs.get_func(ea)
+    return {"addr": hex(int(f.start_ea)), "name": ida_funcs.get_func_name(f.start_ea) or ""} if f else None
 queries = a.get("queries") or []
 all_results = []
 for query in queries:
-    ea, direction = int(str(query["addr"]), 16), str(query.get("direction", "both"))
-    refs = []
-    if direction in ("to", "both"): refs += list(db.xrefs.to_ea(ea))
-    if direction in ("from", "both"): refs += list(db.xrefs.from_ea(ea))
-    rows = []
-    for ref in refs[:int(query.get("count", 2000))]:
-        fn = db.functions.get_at(int(ref.from_ea))
-        row = {"from": hex(int(ref.from_ea)), "to": hex(int(ref.to_ea)),
-               "type": "code" if ref.is_code else "data"}
-        if query.get("include_fn") and fn is not None:
-            row["fn"] = {"addr": hex(int(fn.start_ea)), "name": db.functions.get_name(fn) or ""}
-        rows.append(row)
-    all_results.append({"data": rows})
+    raw = str(query.get("addr", "")).strip()
+    direction = str(query.get("direction", "both") or "both").lower()
+    if direction not in ("to", "from", "both"): direction = "both"
+    xref_type = str(query.get("xref_type", "any") or "any").lower()
+    if xref_type not in ("any", "code", "data"): xref_type = "any"
+    include_fn = bool(query.get("include_fn", True))
+    dedup = bool(query.get("dedup", True))
+    sort_by = str(query.get("sort_by", "addr") or "addr")
+    descending = bool(query.get("descending", False))
+    try: offset = max(0, int(query.get("offset", 0) or 0))
+    except (TypeError, ValueError): offset = 0
+    try: count = max(0, min(int(query.get("count", 200) or 200), 5000))
+    except (TypeError, ValueError): count = 200
+    try:
+        try: target = int(raw, 16)
+        except ValueError:
+            target = idaapi.get_name_ea(idaapi.BADADDR, raw)
+            if target == idaapi.BADADDR: raise ValueError(f"Failed to resolve address/name: {raw}")
+        if not ida_bytes.is_mapped(target): raise ValueError(f"Address not mapped: {raw}")
+        rows = []
+        if direction in ("to", "both"):
+            for xr in idautils.XrefsTo(target, 0):
+                kind = "code" if xr.iscode else "data"
+                if xref_type != "any" and kind != xref_type: continue
+                row = {"direction": "to", "addr": hex(int(xr.frm)), "from": hex(int(xr.frm)),
+                       "to": hex(int(target)), "type": kind}
+                if include_fn: row["fn"] = _fn(xr.frm)
+                rows.append(row)
+        if direction in ("from", "both"):
+            for xr in idautils.XrefsFrom(target, 0):
+                kind = "code" if xr.iscode else "data"
+                if xref_type != "any" and kind != xref_type: continue
+                row = {"direction": "from", "addr": hex(int(xr.to)), "from": hex(int(target)),
+                       "to": hex(int(xr.to)), "type": kind}
+                if include_fn: row["fn"] = _fn(xr.to)
+                rows.append(row)
+        if dedup:
+            seen, deduped = set(), []
+            for row in rows:
+                key = (row["direction"], row["from"], row["to"], row["type"])
+                if key in seen: continue
+                seen.add(key); deduped.append(row)
+            rows = deduped
+        if sort_by == "type":
+            rows.sort(key=lambda r: (str(r.get("type", "")), int(str(r["addr"]), 16)), reverse=descending)
+        else:
+            rows.sort(key=lambda r: int(str(r["addr"]), 16), reverse=descending)
+        page = rows[offset:offset + count] if count else rows[offset:]
+        nxt = offset + len(page)
+        all_results.append({"target": raw, "resolved_addr": hex(int(target)), "direction": direction,
+                            "xref_type": xref_type, "data": page,
+                            "next_offset": nxt if nxt < len(rows) else None,
+                            "total": len(rows), "error": None})
+    except Exception as exc:
+        all_results.append({"target": raw, "resolved_addr": None, "direction": direction,
+                            "xref_type": xref_type, "data": [], "next_offset": None,
+                            "total": 0, "error": str(exc)})
 result = {"result": all_results}
 result
 ''',
