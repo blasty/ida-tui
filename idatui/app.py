@@ -50,7 +50,7 @@ from . import kittygfx
 from .edit_ctl import EditController
 from .prompt import PromptBar
 from .trace_ctl import TraceController
-from .highlight import highlight_c
+from .highlight import CTextArea, highlight_c
 
 from .errors import IDAToolError, IDAConnectionError
 from .codemode_client import CodeModeClient, registered_database
@@ -4314,7 +4314,7 @@ class StructEditor(ModalScreen):
                     yield OptionList(id="se-list")
                 with Vertical(id="se-right"):
                     yield Static(" C definition", id="se-hint")
-                    yield TextArea("", id="se-edit")
+                    yield CTextArea("", id="se-edit")
             yield Static(
                 "Enter edit · Ctrl+S save · Ctrl+Y copy · Ctrl+N new · d/Del delete · Esc close",
                 id="se-status")

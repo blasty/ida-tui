@@ -45,6 +45,14 @@ Hard-won Textual behaviour and the patterns this app relies on. Pairs with
   the Footer (see `#search`/`#rename`/`#status`).
 - Textual ships **no C/C++ tree-sitter grammar** — `TextArea(language="cpp")` is a
   silent no-op. We highlight pseudocode with Pygments (`idatui/highlight.py`).
+  For the **editable** C in the struct editor, `highlight.CTextArea` overrides
+  `TextArea._build_highlight_map()` and fills the widget's own `_highlights`
+  map from the same lexer — the hook the tree-sitter path would fill, so the
+  line cache, selection and cursor stay stock. Two traps: those spans are
+  **byte** offsets into the line (the renderer decodes them with
+  `build_byte_to_codepoint_dict`, so character offsets smear on non-ASCII), and
+  a `TextAreaTheme` that sets `base_style` overrides the widget's CSS colours —
+  ours sets only `syntax_styles` so the editor keeps the app's background.
 - **A modal's `Input` messages bubble to the App.** `SymbolPalette` (the Ctrl+N
   fuzzy finder) has its own `Input`; its `Input.Changed`/`Input.Submitted` bubble
   up to the app's handlers (which would run the `#search`/`#func-filter` logic and

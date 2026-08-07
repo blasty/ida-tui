@@ -920,6 +920,15 @@ async def s_structs(c: Ctx):
     await c.wait(lambda: tname in ta.text and "{" in ta.text, 15)
     c.check("selecting a struct shows its C definition",
             tname in ta.text and "{" in ta.text, f"text={ta.text[:40]!r}")
+    # The definition is C, so it must be coloured as C (no tree-sitter grammar
+    # for it: idatui.highlight fills TextArea's highlight map from Pygments).
+    names = {n for spans in ta._highlights.values() for _, _, n in spans}
+    c.check("the C definition is syntax-highlighted",
+            {"keyword", "name"} <= names, f"names={sorted(names)}")
+    styled = {s.style.color.name for s in ta.render_line(0)
+              if s.style and s.style.color}
+    c.check("highlight styles reach the rendered line", len(styled) > 1,
+            f"colors={sorted(styled)}")
     app._clipboard = ""
     se.query_one(TextArea).focus()
     await c.press("ctrl+y")
@@ -936,6 +945,10 @@ async def s_structs(c: Ctx):
     c.check("Ctrl+S declares a new struct",
             any(s.name == sname for s in se._structs), "not created")
     await c.wait(lambda: "\n" in ta.text, 10)
+    c.check("editing re-highlights the definition",
+            any(n == "keyword" for spans in ta._highlights.values()
+                for _, _, n in spans),
+            f"rows={len(ta._highlights)}")
     c.check("save auto-formats the definition in the editor",
             ta.text.count("\n") >= 3 and f"struct {sname}" in ta.text
             and not se._is_dirty(), f"text={ta.text[:50]!r}")
