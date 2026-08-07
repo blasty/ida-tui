@@ -22,10 +22,61 @@ doesn't silently test the previous one. `.pristine.i64` is gitignored.
 """
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import os
 import shutil
 import tempfile
+
+
+def fast_keys() -> None:
+    """Make a simulated keypress cost ~2ms instead of ~85ms. Call before the app.
+
+    **The problem.** Textual sends a key and then calls ``wait_for_idle``
+    *twice*, and that helper sleeps in 20ms granules until *process* time stops
+    advancing -- a CPU-load heuristic standing in for "the state is predictable
+    now", which takes even more granules on a loaded box. Measured here: 84ms
+    per keypress, which was 23s of the pilot suite's 43s.
+
+    **The fix, and why it is not just deletion.** Removing the heuristic alone
+    broke nine checks that read state straight after a keypress -- so it *was*
+    doing a job, badly. This replaces it with the real gate the rest of the
+    suite already uses: send the keys, then ``settle`` (message pump drained,
+    threaded workers finished). That is strictly stronger than "the CPU looks
+    idle", and it is ~2ms.
+
+    **What it still cannot see:** anything driven by a TIMER rather than a
+    worker -- the function-list filter's 80ms debounce, and Textual's own frame
+    timer (so a widget's ``region``/``size`` is not laid out just because the
+    app settled). Those need a wait on the effect: ``wait(lambda: rows < full)``,
+    ``wait(lambda: inp.region.height >= 1)``. Every such site in this repo is
+    commented; if a check that reads geometry or a debounced view starts
+    flaking, that is the reason.
+
+    Verified equivalent, not just faster: pressing j 40 times moves 40 rows with
+    and without the patch, and the full suite passes with identical counts.
+    """
+    import textual.app
+    from textual.pilot import Pilot
+
+    from idatui._sync import settle
+
+    if not hasattr(textual.app, "wait_for_idle"):  # pragma: no cover
+        raise RuntimeError(
+            "textual.app.wait_for_idle is gone -- tests/_fixtures.fast_keys "
+            "needs updating for this Textual version")
+
+    async def _yield_instead_of_sleeping(min_sleep: float = 0.0,
+                                         max_sleep: float = 1.0) -> None:
+        await asyncio.sleep(0)
+
+    async def _press(self, *keys: str) -> None:
+        if keys:
+            await self._app._press_keys(keys)
+            await settle(self._app, timeout=5.0)
+
+    textual.app.wait_for_idle = _yield_instead_of_sleeping
+    Pilot.press = _press
 
 
 def cache_path(binary: str) -> str:

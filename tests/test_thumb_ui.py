@@ -20,10 +20,14 @@ import sys
 import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from textual.widgets import Static  # noqa: E402
 
+from _fixtures import fast_keys  # noqa: E402
 from idatui._sync import settle  # noqa: E402
+
+fast_keys()   # ~85ms -> ~2ms per keypress; see _fixtures.fast_keys
 from idatui.app import DecompView, IdaTui, ListingView  # noqa: E402
 
 PASS = FAIL = 0
@@ -95,7 +99,7 @@ async def run() -> int:
         lst.focus()
         lst.cursor = lst.model.index_of_ea(0)
         lst._scroll_cursor_into_view()
-        await pilot.pause(0.3)
+        await settle(app)
         check("starts undefined at the entry", lst.model.get(lst.cursor).kind == "unknown",
               f"{lst.model.get(lst.cursor).text!r}")
 
@@ -104,7 +108,10 @@ async def run() -> int:
         # the Thumb prologue.
         m0 = lst.model
         await pilot.press("c")
-        await pilot.pause(2.5)
+        # A refusal produces no new signal to wait for, so the gate is "the app
+        # finished reacting" -- 2.5s of hoping bought nothing a drained worker
+        # queue doesn't say better.
+        await settle(app)
         h = lst.model.get(lst.model.index_of_ea(0))
         check("`c` alone does not produce the Thumb prologue",
               h is None or h.kind != "code" or "PUSH" not in h.text.upper(),
@@ -167,7 +174,7 @@ async def run() -> int:
         lst.focus()
         lst.cursor = lst.model.index_of_ea(0)
         lst._scroll_cursor_into_view()
-        await pilot.pause(0.3)
+        await settle(app)
         m = lst.model
         await pilot.press("t")
         await settle(app, lambda: "64-bit" in status_of(app), timeout=60)
@@ -181,7 +188,7 @@ async def run() -> int:
         # the reason, which is the only part that tells you what to do — with it
         # missing, F5 doing nothing is indistinguishable from a bug in the TUI.
         lst.cursor = lst.model.index_of_ea(0)
-        await pilot.pause(0.2)
+        await settle(app)
         mp = lst.model
         await pilot.press("p")
         # The function appearing in the index IS the signal; the model identity
@@ -214,7 +221,7 @@ async def run() -> int:
         check("a 32-bit ARM database finds functions by itself",
               len(app._func_index) > 5, f"n={len(app._func_index)}")
         await pilot.press("escape")
-        await pilot.pause(0.5)
+        await settle(app, lambda: type(app.screen).__name__ == "Screen")
         f = app._func_index.all_loaded()[0]
         app._goto_ea(f.addr, push=True)
         await wait(lambda: app._cur is not None
@@ -248,14 +255,14 @@ async def run() -> int:
                   len(app._func_index) == 0, f"n={len(app._func_index)}")
             if type(app.screen).__name__ != "Screen":
                 await pilot.press("escape")
-                await pilot.pause(0.5)
+                await settle(app, lambda: type(app.screen).__name__ == "Screen")
             app._goto_ea(0, push=True)
             lst = app.query_one(ListingView)
             await wait(lambda: lst.model is not None, pilot, 60)
             lst.focus()
             lst.cursor = lst.model.index_of_ea(0)
             lst._scroll_cursor_into_view()
-            await pilot.pause(0.3)
+            await settle(app)
             await pilot.press("T")
             await wait(lambda: app._func_index is not None
                        and len(app._func_index) >= 3, pilot, 90)

@@ -22,7 +22,9 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from textual.widgets import Input, Static  # noqa: E402
 
 from idatui.app import ConfirmScreen, IdaTui, ListingView  # noqa: E402
-from _fixtures import staged, synthetic  # noqa: E402
+from _fixtures import fast_keys, staged, synthetic  # noqa: E402
+
+fast_keys()   # ~85ms -> ~2ms per keypress; see _fixtures.fast_keys
 from idatui._sync import settle  # noqa: E402
 
 PASS = FAIL = 0
@@ -135,7 +137,7 @@ async def run() -> int:
             lst.focus()
             await pilot.press("down")
             await pilot.press("down")
-            await pilot.pause(0.3)
+            await settle(app)
             status2 = str(app.query_one("#status", Static).render())
             check("the hint survives navigating", "no functions" in status2,
                   status2[:90])
@@ -167,7 +169,7 @@ async def run() -> int:
             target = 0x4000 + PLANTED        # a NOP we put there ourselves
             lst.cursor = m.index_of_ea(target)
             lst._scroll_cursor_into_view()
-            await pilot.pause(0.1)
+            await settle(app, lambda: lst._cursor_ea() == target)
             check("the cursor sits on the byte we aimed at",
                   lst._cursor_ea() == target,
                   f"{lst._cursor_ea():#x} want {target:#x}")
@@ -219,7 +221,7 @@ async def run() -> int:
             # suite it can mutate the database freely.
             lst.cursor = m.index_of_ea(0x4200)
             lst._scroll_cursor_into_view()
-            await pilot.pause(0.4)
+            await settle(app, lambda: lst._cursor_ea() == 0x4200)
             ctop = lst.model.get(round(lst.scroll_offset.y)).ea
             ccur = lst._cursor_ea()
             old = lst.model
@@ -254,7 +256,7 @@ async def run() -> int:
             far = 0x4000 + 0x600
             lst.cursor = lst.model.index_of_ea(far)
             lst._scroll_cursor_into_view()
-            await pilot.pause(0.4)
+            await settle(app, lambda: lst._cursor_ea() == far)
             top_before = lst.model.get(round(lst.scroll_offset.y)).ea
             cur_before = lst._cursor_ea()
             check("scrolled somewhere with rows above us",
@@ -286,7 +288,7 @@ async def run() -> int:
                   f"n={len(app._func_index)}")
             lst.cursor = lst.model.index_of_ea(target)
             lst._scroll_cursor_into_view()
-            await pilot.pause(0.3)
+            await settle(app, lambda: lst._cursor_ea() == target)
             mp = lst.model
             await pilot.press("p")
             await wait(lambda: lst.model is not mp and lst.model is not None,
@@ -313,7 +315,7 @@ async def run() -> int:
                       "1 function," in note and "nothing is lost" not in note,
                       note[:80])
                 await pilot.press("escape")
-                await pilot.pause(0.3)
+                await settle(app, lambda: not isinstance(app.screen, ConfirmScreen))
                 check("declining leaves the binary open",
                       not isinstance(app.screen, ConfirmScreen) and app._cur is not None)
 

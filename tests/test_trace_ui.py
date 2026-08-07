@@ -19,7 +19,9 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from textual.widgets import Input, OptionList, Static  # noqa: E402
 
-from _fixtures import staged  # noqa: E402
+from _fixtures import fast_keys, staged  # noqa: E402
+
+fast_keys()   # ~85ms -> ~2ms per keypress; see _fixtures.fast_keys
 from idatui._sync import settle  # noqa: E402
 from idatui.app import (DecompView, IdaTui, ListingView,  # noqa: E402
                         RegWriteScreen, TraceDock)
@@ -108,7 +110,7 @@ async def run() -> int:
             # -- stepping --------------------------------------------------- #
             lst = app.query_one(ListingView)
             lst.focus()
-            await pilot.pause(0.4)
+            await settle(app)
             await pilot.press("]")
             # `app._t` is assigned the moment the key is handled, so it is NOT a
             # signal that the VIEW has followed -- the navigation it kicks off
@@ -126,7 +128,10 @@ async def run() -> int:
                          timeout=20)
             check("[ steps backward", app._t == 0, f"t={app._t}")
             await pilot.press("[")
-            await pilot.pause(0.4)
+            # Nothing should happen, so there is no signal to wait FOR: the
+            # honest gate is "the app finished reacting" (workers drained), not
+            # a sleep long enough that a bug would have shown by now.
+            await settle(app)
             check("and stops at the start of the trace", app._t == 0)
 
             # -- step over -------------------------------------------------- #
@@ -252,12 +257,14 @@ async def run() -> int:
                 # opens the LISTING unless the decompiler is preferred — so
                 # stepping through C used to drop you into disassembly on the
                 # first keypress. Found by watching a demo, not by a test.
+                was = app._t
                 await pilot.press("]")
-                await pilot.pause(1.2)
+                await settle(app, lambda: app._t != was)
                 check("stepping in pseudocode stays in pseudocode",
                       app._active == "decomp", f"active={app._active}")
+                was = app._t
                 await pilot.press("[")
-                await pilot.pause(1.2)
+                await settle(app, lambda: app._t != was)
                 check("and so does stepping backward",
                       app._active == "decomp", f"active={app._active}")
 
@@ -336,7 +343,10 @@ async def run() -> int:
                 app._seek(s0)
                 await wait(lambda: lst._cursor_ea() == dbaddr, pilot, 60)
                 app._seek(s1)
-                await pilot.pause(3.0)     # long enough for a stale one to land
+                # The stale navigation this guards against is a WORKER, so wait
+                # for the workers to drain rather than for three seconds and a
+                # hope: same question, ~50ms instead of 3s.
+                await settle(app)
                 check("a stale navigation doesn't drag the cursor away",
                       lst._cursor_ea() == dbaddr and app._cur.ea == dbaddr,
                       f"cursor={lst._cursor_ea():#x} cur={app._cur.ea:#x} "
@@ -354,47 +364,49 @@ async def run() -> int:
             else:
                 if app._split:
                     app.action_toggle_split()
-                    await pilot.pause(1.0)
+                    await settle(app, lambda: not app._split)
                 if app._active != "listing":
                     # focus() does NOT make a view active outside split mode;
                     # Tab is what switches which one is showing.
                     await pilot.press("tab")
                     await wait(lambda: app._active == "listing", pilot, 60)
                 app._seek(stamps[0])
-                await pilot.pause(1.2)
+                await settle(app, lambda: app._t == stamps[0])
                 lst.focus()
                 row = lst.model.index_of_ea(db)
                 lst.cursor = row
                 lst._scroll_cursor_into_view()
-                await pilot.pause(0.4)
+                await settle(app, lambda: lst._cursor_ea() == db)
                 check("cursor is on the repeated instruction",
                       lst._cursor_ea() == db, f"{lst._cursor_ea():#x} vs {db:#x}")
                 await pilot.press(">")
-                await pilot.pause(1.0)
+                await settle(app, lambda: app._t == stamps[1])
                 check("> seeks to the next execution of it",
                       app._t == stamps[1], f"t={app._t}, expected {stamps[1]}")
                 status = str(app.query_one("#status", Static).render())
                 check("and says which execution this is",
                       f"2 of {len(stamps)}" in status, status[:80])
                 lst.cursor = row
-                await pilot.pause(0.2)
+                await settle(app)
                 await pilot.press("<")
-                await pilot.pause(1.0)
+                await settle(app, lambda: app._t == stamps[0])
                 check("< seeks back to the previous one",
                       app._t == stamps[0], f"t={app._t}, expected {stamps[0]}")
                 # An edge must SAY it's an edge rather than silently doing
                 # nothing, which is indistinguishable from a broken key.
                 lst.cursor = row
-                await pilot.pause(0.2)
+                await settle(app)
                 await pilot.press("<")
-                await pilot.pause(1.0)
+                await settle(app, lambda: "first" in str(
+                    app.query_one("#status", Static).render()))
                 status = str(app.query_one("#status", Static).render())
                 check("and the first execution says so instead of moving",
                       app._t == stamps[0] and "first" in status, status[:80])
 
             # -- "which instruction set this register?" ---------------------- #
-            app._seek(min(200, t.length - 1))
-            await pilot.pause(1.0)
+            want_t = min(200, t.length - 1)
+            app._seek(want_t)
+            await settle(app, lambda: app._t == want_t)
             lst.focus()
             await pilot.press("W")
             opened = await wait(lambda: isinstance(app.screen, RegWriteScreen),
@@ -411,7 +423,7 @@ async def run() -> int:
                 else:
                     name, _v, last, _n = sc._rows[pick]
                     sc.query_one(OptionList).highlighted = pick
-                    await pilot.pause(0.3)
+                    await settle(app)
                     await pilot.press("enter")
                     await wait(lambda: app._t == last, pilot, 30)
                     check("choosing one seeks to the write that set it",

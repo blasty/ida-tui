@@ -19,7 +19,11 @@ import sys
 import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from idatui._sync import wait_for  # noqa: E402
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from _fixtures import fast_keys  # noqa: E402
+from idatui._sync import settle as quiesce, wait_for  # noqa: E402
+
+fast_keys()   # ~85ms -> ~2ms per keypress; see _fixtures.fast_keys
 from idatui.app import IdaTui, ProjectPalette  # noqa: E402
 from idatui.project import Project  # noqa: E402
 from textual.widgets import Input, OptionList, Static  # noqa: E402
@@ -113,7 +117,7 @@ async def run(bins):
 
             # -- switch to the second binary -------------------------------- #
             pal.query_one(Input).value = second
-            await pilot.pause(0.2)
+            await settle(lambda: bool(pal._results), 20)
             await pilot.press("enter")
             switched = await settle(
                 lambda: app._binary == second and app.program is not None
@@ -141,7 +145,7 @@ async def run(bins):
             if not reopened:
                 return
             app.screen.query_one(Input).value = first
-            await pilot.pause(0.2)
+            await settle(lambda: bool(app.screen._results), 20)
             await pilot.press("enter")
             back = await settle(lambda: app._binary == first
                                 and app._func_index is not None
@@ -160,7 +164,7 @@ async def run(bins):
                       "switcher did not reopen")
                 return
             app.screen.query_one(Input).value = second
-            await pilot.pause(0.2)
+            await settle(lambda: bool(app.screen._results), 20)
             await pilot.press("enter")
             again = await settle(lambda: app._binary == second
                                  and app._cur is not None, 120)
@@ -181,15 +185,19 @@ async def run(bins):
             if await settle(lambda: isinstance(app.screen, SymbolPalette), 20):
                 pal = app.screen
                 pal.query_one(Input).value = "main"
-                await pilot.pause(0.3)
+                await settle(lambda: bool(pal._results), 20)
+                # The palette re-applies inside the key handler, so the gate is
+                # quiescence -- NOT "a foreign binary appeared", which is the
+                # thing under test and would sit out its whole timeout on the
+                # day it breaks.
                 await pilot.press("f2")          # widen to the whole project
-                await pilot.pause(0.4)
+                await quiesce(app)
                 names = [(b, n) for b, _, n in pal._results]
                 check("project scope finds a name shared by both binaries",
                       len({b for b, n in names if n == "main"}) == 2,
                       f"{names[:6]}")
                 await pilot.press("escape")
-                await pilot.pause(0.2)
+                await settle(lambda: not isinstance(app.screen, SymbolPalette), 20)
 
             # -- a cross-binary jump is not a one-way door ----------------- #
             # Nav history is per-binary, so arriving in another binary lands you
@@ -217,7 +225,7 @@ async def run(bins):
                     if not app._hops or app._binary != there:
                         break
                     await pilot.press("escape")
-                    await pilot.pause(0.6)
+                    await quiesce(app)
                 returned = await settle(lambda: app._binary == here, 180)
                 check("Esc crosses back to the binary the jump came from",
                       returned, f"binary={app._binary} want={here} hops={app._hops}")
@@ -269,17 +277,17 @@ async def run(bins):
             if await settle(lambda: isinstance(app.screen, StringsPalette), 30):
                 pal = app.screen
                 pal.query_one(Input).value = "usage"
-                await pilot.pause(0.3)
+                await settle(lambda: bool(pal._results), 20)
                 local = {b for b, _, _ in pal._results}
                 await pilot.press("f2")
-                await pilot.pause(0.4)
+                await quiesce(app)
                 wide = {b for b, _, _ in pal._results}
                 check("strings: local scope is this binary only", local == {None},
                       f"{local}")
                 check("strings: F2 widens across the project",
                       len(wide) >= 2 and None not in wide, f"{wide}")
                 await pilot.press("escape")
-                await pilot.pause(0.2)
+                await settle(lambda: not isinstance(app.screen, StringsPalette), 20)
 
         # -- the promise: nothing was written next to the sources ---------- #
         left = sorted(os.listdir(src))

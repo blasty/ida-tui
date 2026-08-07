@@ -29,7 +29,9 @@ import traceback
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from _fixtures import staged  # noqa: E402
+from _fixtures import fast_keys, staged  # noqa: E402
+
+fast_keys()   # ~85ms -> ~2ms per keypress; see _fixtures.fast_keys
 from idatui.app import (  # noqa: E402
     ConfirmScreen, DecompView, FunctionsPanel, GraphView, HexView, IdaTui,
     HelpScreen, ListingView, QuitScreen, StringsPalette, StructEditor,
@@ -40,11 +42,66 @@ from textual.widgets import (  # noqa: E402
     DataTable, Input, OptionList, Static, TextArea,
 )
 from rich.text import Text  # noqa: E402
-from idatui._sync import wait_for  # noqa: E402
+from idatui._sync import settle, wait_for  # noqa: E402
 
 PASS = FAIL = 0
 STOP_AFTER = None
 SCENARIOS: list[tuple[str, object]] = []
+
+
+class _Profile:
+    """Where the suite's wall clock goes, per scenario.
+
+    Two numbers matter and neither is visible from a scenario's total: seconds
+    spent in FIXED pauses (a guess about a state we could have observed), and
+    waits that ran out their timeout -- those cost the full timeout AND let the
+    check after them pass vacuously. ``--profile`` prints both.
+    """
+
+    def __init__(self) -> None:
+        self.enabled = False
+        self.paused: dict[str, float] = {}
+        self.waited: dict[str, float] = {}
+        self.pressed: dict[str, float] = {}
+        self.expired: list[tuple[str, float]] = []
+
+    def pause(self, scenario: str, secs: float) -> None:
+        if self.enabled:
+            self.paused[scenario] = self.paused.get(scenario, 0.0) + secs
+
+    def press(self, scenario: str, secs: float) -> None:
+        if self.enabled:
+            self.pressed[scenario] = self.pressed.get(scenario, 0.0) + secs
+
+    def wait(self, scenario: str, secs: float, ok: bool, line: int = 0) -> None:
+        if not self.enabled:
+            return
+        self.waited[scenario] = self.waited.get(scenario, 0.0) + secs
+        if not ok:
+            self.expired.append((f"{scenario} (line {line})", secs))
+
+    def report(self) -> None:
+        if not self.enabled:
+            return
+        tp, tw = sum(self.paused.values()), sum(self.waited.values())
+        tk = sum(self.pressed.values())
+        print(f"\nprofile: {tp:.1f}s settling, {tw:.1f}s in waits, "
+              f"{tk:.1f}s in keystrokes")
+        rows = sorted(self.paused.items(), key=lambda kv: -kv[1])[:8]
+        for name, secs in rows:
+            print(f"   pause {secs:5.2f}s  {name}")
+        rows = sorted(self.waited.items(), key=lambda kv: -kv[1])[:8]
+        for name, secs in rows:
+            print(f"   wait  {secs:5.2f}s  {name}")
+        rows = sorted(self.pressed.items(), key=lambda kv: -kv[1])[:8]
+        for name, secs in rows:
+            print(f"   keys  {secs:5.2f}s  {name}")
+        for name, secs in self.expired:
+            print(f"   EXPIRED wait {secs:5.2f}s in {name}  "
+                  f"(the check after it may have passed vacuously)")
+
+
+PROFILE = _Profile()
 
 
 class _StopSuite(Exception):
@@ -89,14 +146,52 @@ class Ctx:
             raise _StopSuite
 
     async def wait(self, pred, t=20.0, step=0.02):
-        return await wait_for(pred, self.pilot.pause, t, step)
+        t0 = asyncio.get_event_loop().time()
+        ok = await wait_for(pred, self.pilot.pause, t, step)
+        PROFILE.wait(self.scenario, asyncio.get_event_loop().time() - t0, ok,
+                     sys._getframe(1).f_lineno)
+        return ok
 
     async def press(self, *keys):
+        """Send keys, then wait for the app to finish reacting to them.
+
+        The wait is ours, deliberately. Textual's own ``press`` ends with two
+        ``wait_for_idle`` sleeps per key (~85ms), which is a CPU-load heuristic
+        standing in for a gate -- and scenarios came to lean on it, so removing
+        it alone broke nine checks that read state straight after a keypress.
+        ``settle`` is the real thing (pump drained, workers finished) at ~2ms,
+        and it holds on a loaded box where the heuristic is exactly as likely to
+        return early.
+        """
+        t0 = asyncio.get_event_loop().time()
         for k in keys:
             await self.pilot.press(k)
+        await settle(self.app, timeout=5.0)
+        PROFILE.press(self.scenario, asyncio.get_event_loop().time() - t0)
 
     async def pause(self, d=0.05):
+        """Yield until the app has finished reacting to what we just did.
+
+        This used to be a flat ``asyncio.sleep(d)``, and across ~140 call sites
+        that was 20s of the suite's 62s spent asleep -- a guess about a state we
+        can observe directly. ``settle`` drains the message pump and waits for
+        the threaded workers, so it returns the moment the app is quiescent
+        (single-digit ms in the common case) and, unlike a sleep, it does not
+        silently pass when the machine is loaded and the work took longer than
+        the guess. ``d`` survives as the upper BOUND, not as the cost.
+
+        Use :meth:`sleep` for the rare thing that is genuinely gated on a timer.
+        """
+        t0 = asyncio.get_event_loop().time()
+        await settle(self.app, timeout=max(d, 2.0))
+        PROFILE.pause(self.scenario, asyncio.get_event_loop().time() - t0)
+
+    async def sleep(self, d):
+        """A real wall-clock sleep -- only for what a TIMER drives (throttles,
+        debounces, blink), where there is no worker to wait for."""
+        t0 = asyncio.get_event_loop().time()
         await self.pilot.pause(d)
+        PROFILE.pause(self.scenario, asyncio.get_event_loop().time() - t0)
 
     async def type(self, text):
         for ch in text:
@@ -1390,7 +1485,9 @@ async def s_search(c: Ctx):
     si = app.query_one("#search", Input)
     status = app.query_one("#status", Static)
     await c.press("slash")
-    await c.pause(0.1)
+    # display flips synchronously; the REGION only exists once Textual has laid
+    # the prompt out, which is a frame, not a worker.
+    await c.wait(lambda: si.display and si.region.height >= 1, 5)
     c.check("search bar visible, status hidden (no overlap)",
             si.display and not status.display, f"si={si.display} status={status.display}")
     c.check("search input owns the bottom row (nothing overlaps it)",
@@ -1416,22 +1513,23 @@ async def s_incr_filter(c: Ctx):
     table.focus()
     full = table.row_count
     await c.press("slash")
-    await c.pause(0.1)
     for ch in "sub_":
         await c.press(ch)
-        await c.pause(0.05)
-    await c.pause(0.1)
+    # The filter is DEBOUNCED (set_timer(0.08)) -- a timer, not a worker, so
+    # settling can't see it. Wait for the effect instead of guessing at the
+    # debounce: it returns the moment the rows are rebuilt.
+    await c.wait(lambda: 0 < table.row_count < full, 5)
     c.check("filter narrows incrementally as you type",
             0 < table.row_count < full, f"{table.row_count}/{full}")
     cell = table.get_row_at(0)[1]
     c.check("filter highlights matched substring in name",
             isinstance(cell, Text) and any(s.style for s in cell.spans), repr(str(cell)))
     await c.press("enter")
-    await c.pause(0.1)
+    await c.wait(lambda: isinstance(app.focused, DataTable), 5)
     c.check("Enter keeps filter + focuses table",
             isinstance(app.focused, DataTable) and table.row_count < full)
     await c.press("escape")
-    await c.pause(0.15)
+    await c.wait(lambda: table.row_count == full, 5)
     c.check("Esc on the list clears the filter", table.row_count == full,
             f"{table.row_count}/{full}")
 
@@ -1811,8 +1909,12 @@ async def s_rename(c: Ctx):
                 f"display={ci.display}")
         ci.value = cnote
         await c.press("enter")
-        await c.wait(lambda: dec.loaded_ea == app._cur.ea
-                     and any(cnote in t for t in dec._texts), 25)
+        # Gate on the comment showing up, and ONLY that: the extra
+        # `dec.loaded_ea == app._cur.ea` conjunct this used to carry is not a
+        # signal the re-decompile ever sets, so on some orderings the wait sat
+        # out its full 25s (9s of wall clock) and then the check below passed
+        # vacuously anyway.
+        await c.wait(lambda: any(cnote in t for t in dec._texts), 25)
         c.check("comment appears in the pseudocode after ';'",
                 any(cnote in t for t in dec._texts), "comment not shown")
         app.program.client.invoke("set_comments", items=[{"addr": hex(cea), "comment": ""}])
@@ -2021,7 +2123,10 @@ async def s_scroll_restore(c: Ctx):
     await c.press("escape")
     await c.wait(lambda: app._cur.ea == fa.addr, 20)
     await c.wait(lambda: dis.total > 40, 20)
-    await c.pause(0.25)
+    # A repaint is driven by Textual's frame timer, so settling does not imply
+    # one happened. Wait for the paint we are actually asserting about (each
+    # poll ticks the screen, so this is ~one frame, not a quarter second).
+    await c.wait(lambda: bool(renders) and renders[-1] == want_sy, 5)
     c.check("disasm scroll + cursor restored on back (mid-viewport)",
             round(dis.scroll_offset.y) == want_sy and dis.cursor == want_cur and want_rel > 0,
             f"scroll={round(dis.scroll_offset.y)} (want {want_sy}) "
@@ -2202,8 +2307,12 @@ async def s_listing_view(c: Ctx):
         return
 
     await c.goto_ui(hex(data_ea))
+    # `total > 0` is set from the segment's size before a single page has
+    # materialised, so waiting on it and then reading rows was the suite's
+    # one known flake (it failed roughly one run in three). Wait for a ROW.
     await c.wait(lambda: app._cur is not None and app._active == "listing"
-                 and c.lst.total > 0, 25)
+                 and c.lst.total > 0 and c.lst.model is not None
+                 and any(h.kind == "data" for h in c.lst.model.window(0, 40)), 25)
     c.check("navigating to a data segment opens the listing view",
             app._active == "listing" and c.lst.display and c.lst.total > 0,
             f"active={app._active} total={c.lst.total}")
@@ -3110,8 +3219,14 @@ async def s_graph_render(c: Ctx):
     if gv.lay is None:
         c.check("graph loaded", False)
         return
-    rows = [gv.render_line(y).text for y in range(gv.size.height)]
-    blob = "\n".join(rows)
+    # The layout being ready (`gv.lay`) is not the same as the view having a
+    # SIZE to render into -- that needs a laid-out frame, and reading glyphs
+    # before one lands scrapes an empty canvas. Gate on the paint itself.
+    def _blob():
+        return "\n".join(gv.render_line(y).text for y in range(gv.size.height))
+
+    await c.wait(lambda: gv.size.height > 0 and "\u250c" in _blob(), 10)
+    blob = _blob()
     c.check("boxes are drawn", blob.count("\u250c") >= 1 and blob.count("\u2502") > 4,
             f"corners={blob.count(chr(0x250c))} verts={blob.count(chr(0x2502))}")
     c.check("edges are drawn", any(ch in blob for ch in "\u25bc\u2570\u256d\u256e\u256f"),
@@ -3126,11 +3241,11 @@ async def s_graph_render(c: Ctx):
     # minimap on/off actually changes the picture
     before = blob
     await c.press("m")
-    await c.pause(0.1)
-    after = "\n".join(gv.render_line(y).text for y in range(gv.size.height))
+    await c.wait(lambda: _blob() != before, 5)
+    after = _blob()
     c.check("m toggles the minimap", after != before and not gv._show_minimap)
     await c.press("m")
-    await c.pause(0.1)
+    await c.wait(lambda: gv._show_minimap, 5)
     c.check("and toggles it back", gv._show_minimap)
     # a row query must never paint inside a box (that is what dummies buy us)
     bad = 0
@@ -3180,6 +3295,9 @@ async def s_graph_minimap(c: Ctx):
     if gv.lay is None:
         c.check("graph loaded", False)
         return
+    # The minimap's rect is derived from the view's SIZE, so it needs a laid-out
+    # frame -- not just a settled app.
+    await c.wait(lambda: gv._minimap_rect() is not None, 5)
     rect = gv._minimap_rect()
     c.check("the minimap has a hit-box while it's shown", rect is not None,
             f"size={gv.size} shown={gv._show_minimap}")
@@ -3392,6 +3510,8 @@ def main(argv):
             STOP_AFTER = next(it)
         elif a in ("--worker", "--binary"):
             binary = os.path.abspath(os.path.expanduser(next(it)))
+        elif a == "--profile":
+            PROFILE.enabled = True
         elif a == "--list":
             for name, _ in SCENARIOS:
                 print(name)
@@ -3406,6 +3526,7 @@ def main(argv):
         asyncio.run(run(binary, only))
     except _StopSuite:
         print(f"  … stopped after '{STOP_AFTER}'")
+    PROFILE.report()
     print(f"\n{PASS} passed, {FAIL} failed")
     return 1 if FAIL else 0
 
