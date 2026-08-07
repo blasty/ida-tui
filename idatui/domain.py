@@ -754,7 +754,9 @@ class ListingModel:
 
     def _phys(self, row: int) -> tuple[int, int]:
         """(physical head index, byte offset into it) for logical ``row``."""
-        import bisect
+        # bisect is imported at module scope; re-importing it here cost a
+        # sys.modules lookup on a function that runs once per rendered row and
+        # once per row a search reads.
         i = bisect.bisect_right(self._row_at, row) - 1
         if i < 0:
             return (-1, 0)
@@ -909,7 +911,6 @@ class ListingModel:
 
     def _head_index_at(self, ea: int) -> int:
         """Index of the physical head containing ``ea`` (caller holds the lock)."""
-        import bisect
         eas = self._head_eas
         i = bisect.bisect_right(eas, ea) - 1
         return i if 0 <= i < len(self._heads) else -1

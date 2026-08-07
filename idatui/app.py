@@ -901,11 +901,16 @@ class ListingView(SearchMixin, NavMixin, ColumnCursor, ScrollView, can_focus=Tru
 
     def _op_bytes_text(self, h: Head) -> str:
         """Hex bytes for ``h``, truncated with an ellipsis in 'limited' mode so a
-        long x86-64 instruction doesn't blow out the column."""
+        long x86-64 instruction doesn't blow out the column.
+
+        ``bytes.hex(" ")`` rather than a per-byte f-string generator: this is
+        called for every row of every plain line, and search builds the plain
+        line for the whole segment.
+        """
         raw = h.raw or b""
         if self._op_mode == 1 and len(raw) > _OP_LIMIT:
-            return " ".join(f"{b:02X}" for b in raw[:_OP_LIMIT]) + "\u2026"
-        return " ".join(f"{b:02X}" for b in raw)
+            return raw[:_OP_LIMIT].hex(" ").upper() + "\u2026"
+        return raw.hex(" ").upper()
 
     @staticmethod
     def _span_segments(h: Head, fallback: Style):
