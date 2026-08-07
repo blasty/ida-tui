@@ -139,6 +139,14 @@ python -m idatui.drive rename sub_5BE0 foo   # goto + rename
 
 → [`docs/RPC.md`](docs/RPC.md)
 
+There's a scripted feature tour on top of it, for screen recordings — it spawns
+its own pane on a scratch copy, drives ten scenes through the real prompts, and
+reverts its own edits:
+
+```sh
+python tools/demo.py --spawn          # --speed 0.5 to rehearse, --list for the scenes
+```
+
 **Splash** — the logo renders as a real image on terminals that speak the kitty
 graphics protocol, `logo.ans` everywhere else. Support is detected by *asking the
 terminal*, not by sniffing `$TERM` (under a multiplexer, every variable you'd

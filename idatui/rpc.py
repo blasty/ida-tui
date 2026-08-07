@@ -1148,7 +1148,12 @@ class RpcServer:
 
             return await self._press(["tab"], _toggled, timeout, "toggle_view")
         if method == "hex":
-            return await self._press(["backslash"], lambda: app.is_hex,
+            # Backslash TOGGLES the hex view, so the predicate has to be "the
+            # mode flipped", not "we are in hex". Waiting for is_hex meant the
+            # call that LEAVES hex could never be satisfied and always timed
+            # out -- a driver could open the hex view but never close it.
+            was_hex = app.is_hex
+            return await self._press(["backslash"], lambda: app.is_hex != was_hex,
                                      timeout, "hex")
         if method == "graph":
             return await self._graph(params, timeout)
