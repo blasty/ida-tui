@@ -20,6 +20,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from textual.widgets import Input, OptionList, Static  # noqa: E402
 
 from _fixtures import staged  # noqa: E402
+from idatui._sync import settle  # noqa: E402
 from idatui.app import (DecompView, IdaTui, ListingView,  # noqa: E402
                         RegWriteScreen, TraceDock)
 
@@ -109,13 +110,20 @@ async def run() -> int:
             lst.focus()
             await pilot.pause(0.4)
             await pilot.press("]")
-            await wait(lambda: app._t == 1, pilot, 20)
+            # `app._t` is assigned the moment the key is handled, so it is NOT a
+            # signal that the VIEW has followed -- the navigation it kicks off
+            # runs in a worker. Waiting on it and then reading the cursor was a
+            # race that the (slower) Code Mode backend loses. Gate on the thing
+            # the check is about.
+            await settle(app, lambda: app._t == 1 and lst._cursor_ea() == t.ip(1),
+                         timeout=20)
             check("] steps forward one instruction", app._t == 1, f"t={app._t}")
             check("the code view follows the trace",
                   lst._cursor_ea() == t.ip(1),
                   f"{lst._cursor_ea()} vs {t.ip(1)}")
             await pilot.press("[")
-            await wait(lambda: app._t == 0, pilot, 20)
+            await settle(app, lambda: app._t == 0 and lst._cursor_ea() == t.ip(0),
+                         timeout=20)
             check("[ steps backward", app._t == 0, f"t={app._t}")
             await pilot.press("[")
             await pilot.pause(0.4)
