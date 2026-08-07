@@ -78,9 +78,17 @@ class Demo:
     # -- scenes ------------------------------------------------------------ #
     def scene_open(self):
         """Land on a real function and show the listing."""
-        self.say("goto main")
-        self.do("goto", target="main", delay_ms=TYPE_MS)
-        self.beat(1.5)
+        # The app auto-lands on main once the index is in, so typing a goto to
+        # get there is a redundant round trip -- and every keystroke a driver
+        # injects costs real time. Only navigate if we are somewhere else.
+        st = self.do("state") or {}
+        if ((st.get("function") or {}).get("name")) != "main":
+            self.say("goto main")
+            self.do("goto", target="main", delay_ms=TYPE_MS)
+            self.beat(1.5)
+        else:
+            self.say("already landed on main")
+            self.beat(0.4)
         self.say("scroll the listing")
         self.do("move", dir="down", n=12)
         self.beat(0.8)
