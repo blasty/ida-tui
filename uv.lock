@@ -94,7 +94,7 @@ wheels = [
 [[package]]
 name = "ida-codemode"
 version = "0.3.1"
-source = { editable = "../ida-codemode" }
+source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "httpx" },
     { name = "ida-domain" },
@@ -103,21 +103,9 @@ dependencies = [
     { name = "packaging" },
     { name = "zeromcp" },
 ]
-
-[package.metadata]
-requires-dist = [
-    { name = "httpx", specifier = "<1" },
-    { name = "ida-domain", specifier = ">=0.5.1.dev2" },
-    { name = "ida-hcli", specifier = ">=0.19.0" },
-    { name = "idapro" },
-    { name = "packaging" },
-    { name = "zeromcp", specifier = ">=1.6.0" },
-]
-
-[package.metadata.requires-dev]
-dev = [
-    { name = "pytest", specifier = ">=9.0.3" },
-    { name = "ruff", specifier = ">=0.12.0" },
+sdist = { url = "https://files.pythonhosted.org/packages/84/8b/710e2c46c1f353ee5231300b87b3b4c19e7d9db8f81dd7f42721b06c0fca/ida_codemode-0.3.1.tar.gz", hash = "sha256:5c15425d2d9bc614f0bfebedeba77ef6aa4b7b570716be7b4b2e165ef10ea603", size = 170892, upload-time = "2026-08-07T08:53:17.897Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/4e/72/09746e0367564dd00fb74e73277f2548d6ee332c9d9f3e1607fbae27f50d/ida_codemode-0.3.1-py3-none-any.whl", hash = "sha256:5e5e673335951f59a386b576dc3de9d67aeb8387916b99002cf679f402b821e0", size = 76984, upload-time = "2026-08-07T08:53:17.006Z" },
 ]
 
 [[package]]
@@ -183,7 +171,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "ida-codemode", editable = "../ida-codemode" },
+    { name = "ida-codemode", specifier = ">=0.3.1" },
     { name = "pygments", specifier = ">=2" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8" },
     { name = "textual", specifier = ">=8" },

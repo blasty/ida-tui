@@ -32,17 +32,25 @@ this draws it.
 
 ## Install
 
-Needs **Python ≥ 3.11**, **IDA Pro 9.4+ with idalib**, and
-[ida-codemode](https://github.com/HexRaysSA/ida-codemode) checked out next to
-this repo (`../ida-codemode`):
+Needs **Python ≥ 3.11** and **IDA Pro 9.4+ with idalib**.
 
 ```sh
-git clone https://github.com/HexRaysSA/ida-codemode ../ida-codemode
 uv sync
 ```
 
-Install the ida-codemode plugin in IDA too, if you want the TUI to attach to
-databases you already have open in the GUI.
+That pulls [ida-codemode](https://github.com/HexRaysSA/ida-codemode) from PyPI,
+which is how ida-tui talks to IDA. To also attach to databases you have open in
+the IDA GUI, install its plugin:
+
+```sh
+uvx --prerelease=allow --from ida-codemode ida-codemode-mcp --install-plugin
+```
+
+Hacking on ida-codemode itself? Point at a checkout instead:
+
+```sh
+uv add --editable ../ida-codemode
+```
 
 ## Run
 
