@@ -1,22 +1,15 @@
-"""WorkerPool — keeps a live idalib worker per project binary, within a budget.
+"""DatabasePool — LRU leases on Code Mode databases for a project.
 
-One worker process holds exactly one database (idalib is single-DB and
-main-thread-only), so a project with N binaries means up to N processes. They are
-not cheap and they do not share: a worker on ``bash`` measures ~126 MB RSS /
-117 MB PSS, and the database working set dominates for anything larger
-(``libcrypto.so.3``'s ``.i64`` alone is 72 MB).
+Code Mode may bind a lease to an existing IDA GUI or to a shared managed idalib
+worker. The pool therefore owns *client interest*, never an IDA process. Releasing
+an LRU entry persists managed IDBs but does not implicitly save a GUI, then closes
+only this TUI's lease; other clients and GUI sessions remain alive. Managed workers exit themselves after their final lease.
 
-Residency is therefore bounded by a **memory budget**, not a worker count — a
-count is the wrong knob when one project holds both a 50 KB helper and a 6 MB
-crypto library. Workers are spawned lazily on first use, kept resident while they
-fit, and least-recently-used ones evicted when they don't. Eviction **saves the
-database first**, so coming back is a load rather than a re-analysis.
-
-The pool never evicts the active binary, nor anything pinned.
+The historical memory budget remains useful for managed idalib instances, while
+GUI process memory is only advisory. The active and pinned databases are never
+released to satisfy it.
 """
 from __future__ import annotations
-
-import os
 
 from .project import BinaryRef, Project
 
@@ -36,11 +29,11 @@ def _total_ram_mb() -> int:
 
 
 def _pss_mb(pid: int | None) -> int:
-    """Proportional set size of a worker, in MB.
+    """Proportional set size of the leased instance process, in MB.
 
-    PSS (not RSS) is the honest per-worker cost: it splits shared pages between
-    the processes mapping them. In practice workers share very little, so the two
-    are close, but PSS is what makes summing across workers meaningful.
+    PSS is useful for managed idalib workers. For GUI/shared processes it is only
+    advisory because the TUI neither owns all that memory nor controls process
+    exit.
     """
     if not pid:
         return 0
@@ -54,13 +47,19 @@ def _pss_mb(pid: int | None) -> int:
     return 0
 
 
-def _default_spawn(ref: BinaryRef, ttl: int):  # pragma: no cover - needs idalib
-    from .worker_client import WorkerClient
-    return WorkerClient(ref.staged, ttl=ttl, load_args=ref.load_args)
+def _default_spawn(ref: BinaryRef, ttl: int, *, new_database: bool = False):  # pragma: no cover - needs IDA
+    from .codemode_client import CodeModeClient
+    return CodeModeClient(
+        ref.staged,
+        ttl=ttl,
+        load_args=ref.load_args,
+        output_database=ref.db,
+        new_database=new_database,
+    )
 
 
-class WorkerPool:
-    """Live workers for a project's binaries, keyed by label."""
+class DatabasePool:
+    """Live Code Mode database leases, keyed by project label."""
 
     def __init__(self, project: Project, *, budget_mb: int | None = None,
                  ttl: int = 1800, spawn=None, mem_fn=None) -> None:
@@ -71,6 +70,7 @@ class WorkerPool:
         self._clients: dict[str, object] = {}
         self._lru: list[str] = []       # least-recently-used first
         self._pinned: set[str] = set()
+        self._recreate: set[str] = set()  # Ctrl+L: next attachment creates a fresh IDB
         self.active: str | None = None  # never evicted
         if budget_mb is None:
             ram = _total_ram_mb()
@@ -98,11 +98,11 @@ class WorkerPool:
 
     # -- acquire ----------------------------------------------------------- #
     def get(self, label: str, progress=None):
-        """A live client for ``label``, spawning it (and making room) if needed.
+        """A live client for ``label``, attaching or spawning as needed.
 
-        Staging and the scratch sweep happen here: a worker killed hard last time
-        leaves unpacked ``.id0/.id1/...`` behind, and the database then refuses to
-        reopen. Nothing else holds this DB (one worker per label), so it is safe.
+        Do not sweep IDA scratch files here: a registered GUI or another Code
+        Mode client may own the database. Code Mode's registry locks and health
+        probes are the authority for safe discovery and stale-record cleanup.
         """
         client = self._clients.get(label)
         if client is not None:
@@ -118,28 +118,29 @@ class WorkerPool:
 
         note(f"staging {ref.label}\u2026")
         self.project.stage(ref)
-        self.project.sweep_scratch(ref)
         note(f"opening {ref.label}\u2026")
-        client = self._spawn(ref, self._ttl)
+        fresh = label in self._recreate
+        client = (_default_spawn(ref, self._ttl, new_database=fresh)
+                  if self._spawn is _default_spawn else self._spawn(ref, self._ttl))
         connect = getattr(client, "connect", None)
         if connect is not None:
             connect(progress=progress) if progress is not None else connect()
         self._clients[label] = client
+        self._recreate.discard(label)
         self._lru.append(label)
         self._enforce_budget(protect=label)
         return client
 
     def prewarm(self, label: str, progress=None) -> bool:
-        """Spawn a worker for ``label`` only if it fits the budget AS IT STANDS.
+        """Attach a database for ``label`` only if it fits the current budget.
 
         Pre-warming must never cost residency: evicting a binary the user
         actually visited to speculatively load one they haven't is a straight
         downgrade, and the eviction would also throw away that binary's caches.
         So this refuses rather than making room, and returns False.
 
-        The cost of a worker that doesn't exist yet can only be estimated; the
-        largest resident one is the best evidence available (they are all the
-        same program with a different database). With nothing resident we have
+        The cost of a database not attached yet can only be estimated; the
+        largest resident instance is the best evidence available. With nothing resident we have
         no evidence at all, so we allow one — that is the case where the budget
         is certainly free.
         """
@@ -153,12 +154,18 @@ class WorkerPool:
             return False
         self.get(label, progress=progress)
         # get() enforces the budget protecting the NEW label; if that had to
-        # evict, our estimate was wrong and the speculative worker is the one
+        # evict, our estimate was wrong and the speculative lease is the one
         # that should go — never a binary the user chose.
         if self.memory_mb() > self.budget_mb and label != self.active:
             self.evict(label)
             return False
         return True
+
+    def recreate_on_next_open(self, label: str) -> None:
+        """Request a fresh IDB after the current lease has been released."""
+        if self.project.by_label(label) is None:
+            raise KeyError(f"no such binary in the project: {label}")
+        self._recreate.add(label)
 
     def _touch(self, label: str) -> None:
         if label in self._lru:
@@ -171,16 +178,21 @@ class WorkerPool:
             self._touch(label)
 
     # -- release ----------------------------------------------------------- #
-    def evict(self, label: str, save: bool = True) -> bool:
-        """Drop a resident worker, persisting its database first."""
+    def evict(self, label: str, save: bool = True,
+              save_gui: bool = False) -> bool:
+        """Release a resident lease, persisting a managed database first.
+
+        A budget-driven eviction must not save somebody's GUI implicitly. GUI
+        saves are reserved for an explicit/defensive ``close_all(save=True)``.
+        """
         client = self._clients.pop(label, None)
         if client is None:
             return False
         if label in self._lru:
             self._lru.remove(label)
-        if save:
+        if save and (save_gui or getattr(client, "backend", None) != "gui"):
             try:  # persist analysis + edits so the next open is a load
-                client.call("idb_save")
+                client.save_database()
             except Exception:  # noqa: BLE001 -- evict regardless
                 pass
         try:
@@ -198,7 +210,7 @@ class WorkerPool:
         return None
 
     def _enforce_budget(self, protect: str | None = None) -> int:
-        """Evict LRU workers until the pool fits its budget. Returns how many."""
+        """Release LRU leases until the pool fits its budget. Returns how many."""
         n = 0
         while self.memory_mb() > self.budget_mb:
             victim = self._evictable(protect)
@@ -210,7 +222,7 @@ class WorkerPool:
 
     def close_all(self, save: bool = True) -> None:
         for label in list(self._clients):
-            self.evict(label, save=save)
+            self.evict(label, save=save, save_gui=save)
         self.active = None
 
     # -- introspection ------------------------------------------------------ #
@@ -231,5 +243,9 @@ class WorkerPool:
         return out
 
     def __repr__(self) -> str:  # pragma: no cover - debug aid
-        return (f"<WorkerPool {len(self._clients)}/{len(self.project.refs)} resident "
+        return (f"<DatabasePool {len(self._clients)}/{len(self.project.refs)} resident "
                 f"{self.memory_mb()}/{self.budget_mb}MB active={self.active}>")
+
+
+# Source compatibility for callers that imported the pre-Code-Mode name.
+WorkerPool = DatabasePool

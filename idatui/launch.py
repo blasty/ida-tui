@@ -1,27 +1,19 @@
-"""One-shot launcher: ``ida-tui foo.elf`` and you're in the TUI.
+"""One-shot launcher for the IDA Code Mode-backed TUI.
 
-Spawns a private idalib worker (``idatui.worker``) that opens + auto-analyzes
-THIS binary in its own process, talking to the TUI over a unix socket. No shared
-supervisor, no HTTP: everything slow (open + analysis) happens behind the TUI's
-loading overlay.
+A path first resolves to a registered GUI database; when none matches, Code Mode
+reuses or starts a managed idalib worker. With no path, a single registered
+database is selected automatically.
 
-Usage:
+Usage::
 
-    ida-tui /path/to/binary          # open a binary and drive it
-
-Extras: --ttl, --no-keepalive, --rpc (all forwarded to the TUI).
+    ida-tui /path/to/binary
+    ida-tui                         # attach when exactly one database is registered
 """
 from __future__ import annotations
 
 import argparse
 import os
 import sys
-
-# The unpacked working-copy files IDA writes next to a `.i64` while a database is
-# open. A hard-killed worker leaves them behind and the `.i64` then refuses to
-# reopen ("Failed to open database"). Safe to delete when nothing holds the DB.
-_LOCK_SUFFIXES = (".id0", ".id1", ".id2", ".nam", ".til")
-
 
 def _load_args(load: dict) -> str:
     """``load`` as IDA switches, for the single-binary path (no project ref).
@@ -41,35 +33,19 @@ def _log(msg: str) -> None:
     print(f"ida-tui: {msg}", file=sys.stderr)
 
 
-def _sweep_locks(binary: str) -> int:
-    """Remove stale unpacked DB files next to ``binary``. Returns how many.
-
-    Never touches the ``.i64`` -- that is the real database, and nothing is
-    saved unless ``idb_save`` was called -- and never the input file itself.
-    The second guard is not theoretical: ``.til`` is both an unpacked-DB suffix
-    and the extension of an IDA type library, so ``ida-tui mylib.til`` swept its
-    own argument out of existence. Same for anything named ``*.id0``/``*.nam``.
-    """
-    keep = os.path.abspath(binary)
-    stem = os.path.splitext(binary)[0]
-    n = 0
-    for base in (binary, stem):  # IDA may key on the full name or the stem
-        for suf in _LOCK_SUFFIXES:
-            victim = base + suf
-            if os.path.abspath(victim) == keep:
-                continue          # that's what the user asked us to open
-            try:
-                os.remove(victim)
-                n += 1
-            except OSError:
-                pass
-    return n
+def _registered_databases() -> tuple[list[dict], list[dict]]:
+    """Ready and blocked Code Mode registrations, with normalized errors."""
+    try:
+        from ida_codemode.registry import discover_instances
+        return discover_instances()
+    except Exception as exc:  # discovery diagnostics belong at the CLI boundary
+        return [], [{"error": str(exc)}]
 
 
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(
         prog="ida-tui",
-        description="Open a binary in the IDA TUI (private idalib worker).")
+        description="Open a registered GUI or managed idalib database in the IDA TUI.")
     p.add_argument("binary", nargs="*",
                    help="binary to open and analyze (several with --project "
                         "creates/extends that project)")
@@ -77,9 +53,9 @@ def main(argv: list[str] | None = None) -> int:
                    help="open a multi-binary project (created from the given "
                         "binaries if FILE doesn't exist)")
     p.add_argument("--ttl", type=int, default=1800,
-                   help="worker idle-TTL seconds (default 1800)")
+                   help="deprecated compatibility option (Code Mode uses leases)")
     p.add_argument("--no-keepalive", action="store_true",
-                   help="do not run the keepalive heartbeat")
+                   help="deprecated compatibility option (the lease is the heartbeat)")
     p.add_argument("--rpc", metavar="PATH",
                    help="listen for RPC on this unix socket (puppeteer the TUI)")
     p.add_argument("--trace", metavar="FILE",
@@ -94,7 +70,7 @@ def main(argv: list[str] | None = None) -> int:
     g.add_argument("--base", metavar="ADDR",
                    help="load address, e.g. 0x8000000 (any base; NOT paragraphs)")
     g.add_argument("--ida-args", metavar="STR", dest="ida_args",
-                   help="extra IDA command-line switches, passed through as-is")
+                   help="legacy switches; only Code Mode-representable -p/-b/-T are accepted")
     args = p.parse_args(argv)
 
     load: dict = {}
@@ -152,27 +128,42 @@ def main(argv: list[str] | None = None) -> int:
             _log(str(e))
             return 2
     else:
-        if len(args.binary) != 1:
-            _log("give exactly one binary, or use --project for several")
+        ready, blocked = _registered_databases()
+        if len(args.binary) > 1:
+            _log("give at most one binary, or use --project for several")
             return 2
-        binary = os.path.abspath(os.path.expanduser(args.binary[0]))
-        if not os.path.isfile(binary):
-            _log(f"no such file: {binary}")
+        if args.binary:
+            binary = os.path.abspath(os.path.expanduser(args.binary[0]))
+            key = os.path.normcase(os.path.realpath(binary))
+            registered = any(
+                key == os.path.normcase(os.path.realpath(str(item.get(field) or "")))
+                for item in ready for field in ("exe_path", "idb_path")
+                if item.get(field)
+            )
+            if not os.path.isfile(binary) and not registered:
+                _log(f"no such file or registered database: {binary}")
+                return 2
+        elif len(ready) == 1:
+            item = ready[0]
+            binary = str(item.get("exe_path") or item.get("idb_path") or "")
+            _log(f"attaching to registered {item.get('backend')} database: {binary}")
+        elif not ready:
+            detail = f" ({blocked[0].get('error')})" if blocked else ""
+            _log(f"no registered Code Mode database; pass a binary path{detail}")
             return 2
-        if not os.access(os.path.dirname(binary), os.W_OK):
-            _log(f"directory not writable (IDA writes a .i64 there): "
-                 f"{os.path.dirname(binary)}")
+        else:
+            _log("several Code Mode databases are registered; pass one of these paths:")
+            for item in ready:
+                _log(f"  {item.get('exe_path') or item.get('idb_path')} "
+                     f"[{item.get('backend')}, {item.get('record_id')}]")
             return 2
-        swept = _sweep_locks(binary)  # a crashed worker can leave the DB wedged
-        if swept:
-            _log(f"cleared {swept} stale lock file(s) from a crashed worker")
 
-    # Hand off to the TUI (imported late so --help works without textual). It
-    # spawns the worker behind its loading overlay while auto-analysis runs.
+    # Hand off to the TUI (imported late so --help works without Textual). Code
+    # Mode discovery/opening happens behind its loading overlay.
     try:
         from .app import IdaTui
     except ImportError as e:
-        _log(f"the TUI needs textual; run with ~/ida-venv/bin/python  ({e})")
+        _log(f"TUI dependencies are missing; run `uv sync` ({e})")
         return 1
     # Ask the terminal about graphics support NOW: the query needs a reply from
     # stdin, and once Textual starts it reads stdin on its own thread and would

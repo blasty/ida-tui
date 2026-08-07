@@ -10,8 +10,8 @@ Design notes:
   without ever materializing 52k lines in a widget.
 * All network/domain work runs in Textual worker threads; the UI never blocks.
 * An address-history stack backs Enter (follow) / Esc (back), IDA-style.
-* On startup we bump the worker idle-TTL and run a keepalive heartbeat so the
-  session never gets reaped while we chill.
+* Database lifecycle is lease-based through ida_codemode: matching GUI sessions
+  are reused, otherwise a shared managed idalib worker is opened on demand.
 """
 
 from __future__ import annotations
@@ -32,7 +32,7 @@ from textual import work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.command import DiscoveryHit, Hit, Provider
-from textual.containers import Grid, Horizontal, Vertical, VerticalScroll
+from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.geometry import Region, Size
 from textual.message import Message
 from textual.reactive import reactive
@@ -53,8 +53,8 @@ from .trace_ctl import TraceController
 from .highlight import highlight_c
 
 from .errors import IDAToolError, IDAConnectionError
-from .worker_client import WorkerClient
-from .domain import DisasmModel, Func, Head, ListingModel, Program, Struct
+from .codemode_client import CodeModeClient, registered_database
+from .domain import Func, Head, ListingModel, Program, Struct
 
 # Styles for the disassembly listing.
 _S_ADDR = Style(color="#6b7684")
@@ -173,8 +173,8 @@ _ADDR_MARK_STRIP_RE = re.compile(r"\s*/\*\s*0x[0-9A-Fa-f]+\s*\*/")
 @dataclass
 class BinaryState:
     """Everything that makes one project binary's session resumable across a
-    switch. Addresses outlive the worker, so nav history survives eviction; the
-    Program/index only survive while that worker is still resident."""
+    switch. Addresses outlive a database lease, so nav history survives eviction;
+    the Program/index only survive while that lease remains resident."""
 
     label: str
     program: object | None = None
@@ -1085,9 +1085,9 @@ class ListingView(SearchMixin, NavMixin, ColumnCursor, ScrollView, can_focus=Tru
     def _span_segments(h: Head, fallback: Style):
         """Segments for a row's disassembly text.
 
-        Uses IDA's own token classification when the worker supplied it; falls
-        back to the old mnemonic/rest split so an older worker (or a row whose
-        spans didn't match the text) still renders.
+        Uses IDA's own token classification when Code Mode supplies it; falls
+        back to the mnemonic/rest split when spans are absent or disagree with
+        the plain text.
         """
         if h.spans:
             return [Segment(t, _S_SPAN.get(k, fallback)) for k, t in h.spans]
@@ -3493,12 +3493,16 @@ _HELP = (
 
 
 class QuitScreen(ModalScreen):
-    """Asked before exiting with unsaved database changes. Dismisses with
-    "save", "discard" or None (stay)."""
+    """Asked before exiting with unsaved database changes.
+
+    Code Mode clients cannot roll a shared database back. The ``d`` choice means
+    "do not explicitly save": a GUI keeps the changes dirty, while a managed
+    idalib worker may persist them when its final lease closes.
+    """
 
     BINDINGS = [
         Binding("s", "save", "Save & quit"),
-        Binding("d", "discard", "Discard & quit"),
+        Binding("d", "discard", "Leave & quit"),
         Binding("escape,c", "cancel", "Cancel"),
     ]
 
@@ -3515,7 +3519,7 @@ class QuitScreen(ModalScreen):
             for label in self._labels:
                 body.append(f"  \u2022 {label}\n", _S_LABEL)
             yield Static(body, id="quit-list")
-            yield Static("s  save & quit      d  discard & quit      Esc  cancel",
+            yield Static("s  save & quit      d  leave as-is & quit      Esc  cancel",
                          id="quit-help")
 
     def action_save(self) -> None:
@@ -4780,15 +4784,16 @@ class IdaTui(App):
         self._index = None                    # project-wide symbol/string index
         if project is not None:
             from .index import ProjectIndex
-            from .pool import WorkerPool
-            self._pool = WorkerPool(project, ttl=ttl)
+            from .pool import DatabasePool
+            self._pool = DatabasePool(project, ttl=ttl)
             self._index = ProjectIndex(
                 os.path.join(project.index_dir, "project.db"))
             self._binary = project.refs[0].label
             open_path = project.refs[0].staged
         self._open_path = open_path
         self._ttl = ttl
-        self._load_args = load_args or ""   # IDA switches for a headerless blob
+        self._load_args = load_args or ""   # first-open options for a headerless blob
+        self._new_database = False           # Ctrl+L asks Code Mode for a fresh IDB
         self._title = (os.path.basename(open_path) if open_path else "")
         #: Where we are in the execution trace, and everything that moves us.
         #: Owns the trace state; the _trace/_t/_trail_* properties below
@@ -4797,7 +4802,7 @@ class IdaTui(App):
         self._do_keepalive = keepalive
         self._rpc_path = rpc_path
         self._rpc = None
-        self.client: WorkerClient | None = None
+        self.client: CodeModeClient | None = None
         self.program: Program | None = None
         self._loading_screen: LoadingScreen | None = None
         self._ka = None
@@ -4900,8 +4905,8 @@ class IdaTui(App):
         if self._rpc_path:
             self._start_rpc()
         # A file no loader recognises has to be described before it can be
-        # opened, so ask BEFORE the worker starts — once IDA has made a database
-        # the answer is baked in and changing it means deleting the .i64.
+        # opened, so ask BEFORE Code Mode creates it — once IDA has made a database
+        # the answer is baked in and changing it requires a fresh-IDB reopen.
         if self._project is not None:
             ref = self._pending_load_ref()
             if ref is not None:
@@ -4932,6 +4937,11 @@ class IdaTui(App):
         if os.path.exists(self._open_path + ".i64") or os.path.exists(
                 os.path.splitext(self._open_path)[0] + ".i64"):
             return False
+        try:
+            if registered_database(self._open_path):
+                return False
+        except Exception:
+            pass  # connect() will surface registry failures with full diagnostics
         return needs_load_options(self._open_path)
 
     def action_load_options(self) -> None:
@@ -4945,7 +4955,11 @@ class IdaTui(App):
         forward.
         """
         if not self._can_reload():
-            self._status("nothing to reload")
+            if self.client is not None and self.client.backend == "gui":
+                self._status(
+                    "reload unavailable for a GUI-owned database — reopen it in IDA")
+            else:
+                self._status("nothing to reload")
             return
         n = len(self._func_index) if self._func_index else 0
         note = ("this image has no functions, so nothing is lost"
@@ -4964,10 +4978,13 @@ class IdaTui(App):
             ref = self._project.by_label(self._binary)
             if ref is not None:
                 path, label = ref.source, ref.label
-        # Drop the worker first: it holds the database open, and the .i64 can't
-        # be removed (or rebuilt) underneath a live one.
-        self._release_worker()
-        self._drop_database()
+        # Release our lease first. Code Mode waits for a managed worker's final
+        # lease grace, then creates the replacement IDB atomically. A GUI-backed
+        # database is rejected by _can_reload(): the TUI must never close it.
+        self._release_database()
+        self._new_database = True
+        if label is not None and self._pool is not None:
+            self._pool.recreate_on_next_open(label)
         self._reset_for_reload()
         self._load_args = ""
         if label is not None and self._project is not None:
@@ -4979,7 +4996,9 @@ class IdaTui(App):
             self._pending_switch = None
         self._ask_load_options(path, label=label)
 
-    def _release_worker(self) -> None:
+    def _release_database(self) -> None:
+        if self.program is not None:
+            self.program.close()
         if self._pool is not None and self._binary is not None:
             try:
                 self._pool.evict(self._binary, save=False)
@@ -4992,23 +5011,6 @@ class IdaTui(App):
                 pass
         self.client = None
         self.program = None
-
-    def _drop_database(self) -> None:
-        """Remove the .i64 (and any unpacked scratch) so the next open re-reads
-        the raw image with new options."""
-        base = self._open_path
-        if self._project is not None and self._binary is not None:
-            ref = self._project.by_label(self._binary)
-            if ref is not None:
-                base = ref.staged
-        if not base:
-            return
-        for suffix in (".i64", ".id0", ".id1", ".id2", ".nam", ".til"):
-            for cand in (base + suffix, os.path.splitext(base)[0] + suffix):
-                try:
-                    os.remove(cand)
-                except OSError:
-                    pass
 
     def _reset_for_reload(self) -> None:
         self._no_functions = False
@@ -5053,6 +5055,11 @@ class IdaTui(App):
         if os.path.exists(ref.db) or os.path.exists(
                 os.path.splitext(ref.staged)[0] + ".i64"):
             return None    # already analysed: the .i64 records how
+        try:
+            if registered_database(ref.staged, output_database=ref.db):
+                return None
+        except Exception:
+            pass
         from .formats import needs_load_options
         return ref if needs_load_options(ref.source) else None
 
@@ -5105,10 +5112,6 @@ class IdaTui(App):
             self._status(f"rpc: listening on {self._rpc_path}")
 
         asyncio.get_running_loop().create_task(_serve())
-
-    async def on_unmount(self) -> None:
-        if self._rpc is not None:
-            await self._rpc.stop()
 
     # -- status helper ----------------------------------------------------- #
     def _status(self, text: str, priority: bool = False) -> None:
@@ -5174,9 +5177,10 @@ class IdaTui(App):
 
     # -- connection loss / recovery --------------------------------------- #
     def _handle_exception(self, error: BaseException) -> None:
-        """Intercept a lost-connection error from any worker so the whole app
-        doesn't die when the analysis server goes away (it can idle out, be
-        killed, or the box can sleep). Everything else crashes as usual."""
+        """Intercept a lost Code Mode lease so the app can rediscover the DB.
+
+        Everything unrelated to database connectivity crashes as usual.
+        """
         from textual.worker import WorkerFailed
         orig = error.error if isinstance(error, WorkerFailed) else error
         if isinstance(orig, IDAConnectionError):
@@ -5208,15 +5212,15 @@ class IdaTui(App):
 
     @work(thread=True, exclusive=True, group="reconnect")
     def _reconnect(self) -> None:
-        # The worker died (segfault -> dropped socket). Respawn it: it re-opens
-        # and re-analyzes the binary in a fresh process, then we rebuild.
+        # The registered instance disappeared. Rediscover it; Code Mode may find
+        # a GUI/replacement worker, then we rebuild caches against the new handle.
         try:
             if self._open_path is None:
                 self.app.call_from_thread(self._reconnect_failed,
                                           "no binary to reopen")
                 return
-            client = WorkerClient(self._open_path, ttl=self._ttl,
-                                  load_args=self._load_args)
+            client = CodeModeClient(self._open_path, ttl=self._ttl,
+                                    load_args=self._load_args)
             client.connect(progress=lambda m: self.app.call_from_thread(
                 self._conn_note, m))
         except Exception as e:  # noqa: BLE001
@@ -5224,7 +5228,7 @@ class IdaTui(App):
             return
         self.app.call_from_thread(self._after_reconnect, client, Program(client))
 
-    def _after_reconnect(self, client: "WorkerClient", program: "Program") -> None:
+    def _after_reconnect(self, client: "CodeModeClient", program: "Program") -> None:
         self.client = client
         self.program = program
         self._reconnecting = False
@@ -5244,13 +5248,13 @@ class IdaTui(App):
     @work(thread=True, exclusive=True, group="connect")
     def _connect(self) -> None:
         try:
-            client = self._open_worker_client()
+            client = self._open_database_client()
             if client is None:
                 return  # the opener already reported + dismissed the overlay
             module = client.health().get("module", "?")
             if self._do_keepalive:
-                # Keep the session warm while we run; don't make it immortal, so
-                # it's reclaimed after the TUI closes. (No-op for the worker.)
+                # Compatibility shim: DatabaseHandle's SSE lease already owns
+                # liveness and heartbeat behavior.
                 self._ka = client.keepalive(interval=120.0).start()
             program = Program(client)
         except Exception as e:  # noqa: BLE001
@@ -5265,14 +5269,14 @@ class IdaTui(App):
             return
         self.client = client
         self.program = program
-        self.app.call_from_thread(self._status, f"{module} — loading functions…")
+        self._new_database = False
+        self.app.call_from_thread(
+            self._status, f"{module} [{client.backend}] — loading functions…")
         self._load_functions()
 
-    def _open_worker_client(self):  # type: ignore[no-untyped-def]
-        """Our idalib-worker path: spawn the worker (it opens + analyzes the
-        binary in its own process) and connect. Returns the client, or None."""
-        from .worker_client import WorkerClient
-        if self._pool is not None:  # project mode: the pool owns the workers
+    def _open_database_client(self):  # type: ignore[no-untyped-def]
+        """Attach through Code Mode, reusing a GUI or managed idalib database."""
+        if self._pool is not None:  # project mode: the pool owns the leases
             label = self._binary or self._project.refs[0].label
             client = self._pool.get(label, progress=lambda m:
                                     self.app.call_from_thread(self._status, m))
@@ -5283,14 +5287,15 @@ class IdaTui(App):
             return client
         if not self._open_path:
             self.app.call_from_thread(
-                self._status, "the worker backend needs a binary path")
+                self._status, "Code Mode needs a database or executable path")
             self.app.call_from_thread(self._dismiss_loading)
             return None
         base = os.path.basename(self._open_path)
         self.app.call_from_thread(
-            self._status, f"starting worker — initial auto-analysis of {base}…")
-        client = WorkerClient(self._open_path, ttl=self._ttl,
-                              load_args=self._load_args)
+            self._status, f"discovering Code Mode database for {base}…")
+        client = CodeModeClient(self._open_path, ttl=self._ttl,
+                                load_args=self._load_args,
+                                new_database=self._new_database)
         client.connect(progress=lambda m: self.app.call_from_thread(
             self._status, m))
         return client
@@ -5362,7 +5367,7 @@ class IdaTui(App):
     @work(thread=True, exclusive=True, group="index")
     def _index_binary(self) -> None:
         """Fold this binary's symbols + strings into the project index, so it can
-        be searched later even when its worker is gone."""
+        be searched later even when its Code Mode lease is gone."""
         if self._index is None or self._project is None or self._binary is None:
             return
         ref = self._project.by_label(self._binary)
@@ -5380,7 +5385,7 @@ class IdaTui(App):
             imps, exps = self.program.linkage()
             entries += [(KIND_IMPORT, i.addr, i.name) for i in imps]
             entries += [(KIND_EXPORT, e.addr, e.name) for e in exps]
-        except Exception:  # noqa: BLE001 -- an old worker has no list_linkage
+        except Exception:  # noqa: BLE001 -- indexing is best-effort
             pass
         try:
             n = self._index.reindex(self._binary, entries, source=ref.source)
@@ -5465,7 +5470,13 @@ class IdaTui(App):
                       cursor=0, push=True, is_region=True)
 
     def _can_reload(self) -> bool:
-        """Whether we're able to re-open this binary with different options."""
+        """Whether Code Mode can replace this IDB with different options.
+
+        A GUI database is owned by the user and has no remote close/rollback
+        route. Managed idalib databases can be released and reopened fresh.
+        """
+        if self.client is not None and self.client.backend == "gui":
+            return False
         if self._project is not None and self._binary is not None:
             return True
         return bool(self._open_path)
@@ -5654,6 +5665,9 @@ class IdaTui(App):
 
     def _on_quit_choice(self, choice: str | None) -> None:
         if choice == "discard":
+            # Code Mode has no rollback/close-without-save operation. For GUI
+            # sessions this leaves changes dirty in IDA; a managed worker owns
+            # its final save policy and may persist them on final lease release.
             self._save_on_exit = False
             self.exit()
         elif choice == "save":
@@ -5670,7 +5684,7 @@ class IdaTui(App):
             if self._pool is not None:
                 self._pool.close_all(save=True)  # saves each resident worker
             elif self.program is not None:
-                self.program.client.call("idb_save", timeout=600.0)
+                self.program.client.save_database()
         except Exception as e:  # noqa: BLE001 -- still exit, but say so
             self.app.call_from_thread(self._status, f"save failed: {e}")
         self.app.call_from_thread(self._finish_exit)
@@ -5710,7 +5724,7 @@ class IdaTui(App):
             self._ask_load_options(ref.source, label=label)
             return
         # Snapshot what we're leaving so coming back restores the view, then let
-        # the pool hand us a worker (spawning + evicting as the budget dictates).
+        # the pool hand us a lease (attaching + evicting as the budget dictates).
         if self._binary is not None:
             self._states[self._binary] = BinaryState(
                 label=self._binary, program=self.program,
@@ -5731,8 +5745,8 @@ class IdaTui(App):
             self.app.call_from_thread(self._switch_failed, label, str(e))
             return
         st = self._states.get(label)
-        # The Program (and its caches) only survive while that worker does; a
-        # binary that was evicted comes back with a fresh one. Either way the nav
+        # The Program (and its caches) only survive while that lease does; an
+        # evicted binary reattaches. Either way the nav
         # history is just addresses, so it always survives.
         reuse = (st is not None and st.program is not None
                  and getattr(st.program, "client", None) is client)
@@ -5769,7 +5783,7 @@ class IdaTui(App):
                 self._did_auto_land = False
                 self._auto_land()
             return
-        # Cold (first visit, or the worker was evicted): rebuild the index, then
+        # Cold (first visit, or the lease was evicted): rebuild the index, then
         # land back where we were via _pending_restore.
         self._cur = None
         self._func_index = None
@@ -5825,28 +5839,6 @@ class IdaTui(App):
             self._switch_then_goto(binary, addr)
             return
         self._goto_ea(addr, push=True)  # land on the literal in the listing
-
-    def on_descendant_focus(self, event) -> None:  # type: ignore[no-untyped-def]
-        """Keep ``_active`` in step with focus while split.
-
-        Tab moves both together, but focus also moves on its own — a click, or a
-        pane focusing itself after a load — and then ``_active`` still names the
-        pane you're NOT in. Everything downstream trusts ``_active``: follow
-        resolves the word under that pane's cursor and pushes history for it, so
-        Enter in the pseudocode would follow something from the listing and the
-        next Esc got spent undoing it.
-        """
-        if not self._split:
-            return
-        w = self.focused
-        mode = ("decomp" if isinstance(w, DecompView)
-                else "listing" if isinstance(w, ListingView) else None)
-        if mode is None or mode == self._active:
-            return
-        self._active = mode
-        self._sync_split(mode)   # re-link the band from the new driver
-        if not self.query_one(DecompView).loading:
-            self._status_for_cur("split")  # never clobber "decompiling…"
 
     def action_toggle_view(self) -> None:
         """Tab: switch the code pane between disassembly and pseudocode (or leave
@@ -6356,7 +6348,7 @@ class IdaTui(App):
     def _cross_binary_impl(self, name: str) -> tuple[str, int] | None:
         """``(binary, addr)`` of a project binary that EXPORTS ``name``.
 
-        Reads the on-disk index, so a provider resolves even when its worker was
+        Reads the on-disk index, so a provider resolves even when its lease was
         evicted — the whole reason the index exists.
         """
         if self._index is None or self._project is None or not name:
@@ -6529,7 +6521,7 @@ class IdaTui(App):
     def _foreign_importers(self, subj: int, subj_name, fn):  # type: ignore[no-untyped-def]
         """Project binaries that IMPORT the symbol at ``subj`` — the other half
         of the phase-3 join, read from the on-disk index so a caller shows up
-        whether or not its worker is resident.
+        whether or not its database lease is resident.
 
         Only for a symbol this binary actually exports: a local name that
         happens to collide with another binary's import isn't a caller of ours.
@@ -6742,7 +6734,7 @@ class IdaTui(App):
     def _save(self) -> None:
         assert self.program is not None
         try:
-            self.program.client.call("idb_save", timeout=300.0)
+            self.program.client.save_database()
         except Exception as e:  # noqa: BLE001
             self.app.call_from_thread(self._status, f"save failed: {e}")
             return
@@ -7727,7 +7719,9 @@ class IdaTui(App):
                          "(c code · p func · u undefine · Enter follow)")
 
     # -- teardown ---------------------------------------------------------- #
-    def on_unmount(self) -> None:
+    async def on_unmount(self) -> None:
+        if self._rpc is not None:
+            await self._rpc.stop()
         if self._ka is not None:
             self._ka.stop()
         if self.program is not None:
@@ -7739,7 +7733,7 @@ class IdaTui(App):
         elif self.client is not None:
             if self._save_on_exit is None and self._dirty:
                 try:  # unexpected teardown with edits: don't drop them
-                    self.client.call("idb_save", timeout=600.0)
+                    self.client.save_database()
                 except Exception:  # noqa: BLE001
                     pass
             self.client.close()

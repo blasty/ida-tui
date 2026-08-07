@@ -2,10 +2,10 @@
 
 Measured against a real target: `libcrypto.so.3` (5.7 MB, **10,092 functions**,
 biggest function **52,120 instructions**). These constraints drive the domain /
-paging layer. They describe the ida-pro-mcp *tool functions* (`list_funcs`,
-`disasm`, `decompile`, `xref_query`, …) which the idalib worker now calls
-in-process (`idatui/worker.py`) — the shapes and caps below are the tools'
-behaviour and are unchanged by dropping the HTTP transport.
+paging layer. The measurements below came from the former ida-pro-mcp tool
+backend. The Code Mode port preserves the adapter response shapes and conservative
+page sizes, but executes enumeration through ida-domain; old server caps and RTT
+numbers are historical rather than Code Mode constraints.
 
 ## Response shape (list_* / *_query tools)
 
@@ -93,32 +93,26 @@ disasm totals are **top-level** fields, not under `asm`:
 (correct). The pseudocode view must handle "decompilation failed" gracefully —
 fall back to the disassembly view or show an error panel.
 
-Normal decompile bodies are server-truncated with a `[N chars total]` marker
-(still to be solved for full-body display — see Phase 2).
+Code Mode returns the complete execution result directly; ida-tui no longer
+needs MCP structured-content/download-URL recovery for large pseudocode bodies.
 
-## Worker lifecycle (idatui's own idalib worker)
+## Code Mode lifecycle
 
-idatui no longer uses ida-pro-mcp's shared HTTP supervisor. `idatui/worker.py`
-opens exactly **one** database with `idapro.open_database(...)` in its own process
-and serves tool calls over a unix socket (`WorkerClient`). Consequences vs the
-old supervisor model, which several design choices here were built around:
+`CodeModeClient` owns an authenticated SSE lease on a registered database:
 
-* **No `max_workers` cap, no cross-session contention.** Each TUI owns its
-  worker; there is no "Maximum idalib worker count reached" and no shared license
-  slot to free.
-* **No idle self-exit / keepalive dance.** The old per-worker `WorkerLifecycle`
-  watchdog (`idle_ttl_sec`, default 600s) and the `KeepAlive` heartbeat that
-  fought it are gone with the supervisor. The worker lives as long as the TUI
-  holds the socket and dies with it. `WorkerClient.keepalive()` is a no-op kept
-  for API parity, and `--ttl` is passed through but the single owned worker does
-  not self-reap.
-* **A crashed worker drops the socket**, surfacing as `IDAConnectionError`; the
-  app's `_reconnect` respawns a fresh worker (re-opening + re-analyzing the
-  binary). The hard-kill lock recovery below still applies.
+* A matching GUI is preferred and remains open when the TUI exits.
+* Otherwise Code Mode reuses or starts a shared managed idalib worker.
+* Releasing one lease never terminates another client's session. A managed
+  worker saves and exits after its final lease under Code Mode's grace policy.
+* Lease loss surfaces as `IDAConnectionError`; reconnect performs discovery
+  again and may bind a newly-created instance. It does not silently swap the
+  handle underneath an operation.
+* `--ttl` and the old keepalive flag are compatibility no-ops; the lease itself
+  carries heartbeats.
 
 ## Writable path requirement (operational)
 
-`idb_open` writes the `.i64` next to the input binary, so the path must be
-**writable**. Opening from read-only dirs (e.g. `/usr/lib`) fails with
-`"Failed to open database"`. Copy targets into a writable dir first
-(`targets/` in this repo).
+Attaching to a registered GUI does not require ida-tui to write beside the input.
+Creating a managed database does require a writable output path. Multi-binary
+projects provide one in their sidecar. ida-tui does not sweep IDA scratch files,
+because another registered session may own them.

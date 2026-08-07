@@ -1,10 +1,8 @@
-"""Transport-agnostic error hierarchy and the Session model.
+"""TUI-facing error hierarchy and lightweight database session model.
 
-These were originally defined in client.py (the ida-pro-mcp HTTP client), but the
-idalib worker path (worker_client / domain / app) needs the same exception types
-and Session dataclass without dragging in the HTTP transport. They live here so
-both backends share one definition; client.py re-exports them for backwards
-compatibility with the (deprecated) mcp tooling and the stress tests.
+The Code Mode adapter normalizes ``ida_codemode.client`` transport and execution
+errors into these types so the domain and Textual layers do not depend on HTTP or
+registry implementation details.
 """
 from __future__ import annotations
 

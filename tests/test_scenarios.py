@@ -694,18 +694,18 @@ async def s_split_view(c: Ctx):
     # to count. The bound is loose because the bug was three orders of magnitude
     # out, not a near miss.
     _lookups = {"n": 0}
-    _orig_call = c.prog.client.call
+    _orig_call = c.prog.client.invoke
 
     def _counting(name, *a, **kw):
         if name == "lookup_funcs":
             _lookups["n"] += 1
         return _orig_call(name, *a, **kw)
 
-    c.prog.client.call = _counting
+    c.prog.client.invoke = _counting
     try:
         await _split_view_body(c, app, lst, dec)
     finally:
-        c.prog.client.call = _orig_call
+        c.prog.client.invoke = _orig_call
     c.check("split view doesn't storm the worker with function lookups",
             _lookups["n"] < 500, f"{_lookups['n']} lookup_funcs calls")
 
@@ -1586,14 +1586,14 @@ async def s_decomp_nav(c: Ctx):
     old_ea = dec._line_ea(drow)
     if old_ea is not None and dsym in old_line:
         tmp = f"stale_{os.getpid()}"
-        app.program.client.call("rename", batch={"func": {"addr": hex(dstale), "name": tmp}})
+        app.program.client.invoke("rename", batch={"func": {"addr": hex(dstale), "name": tmp}})
         app.program.bump_names()
         d2 = len(app._nav)
         app._follow_decomp(old_line, dsym, old_ea)
         await c.wait(lambda: len(app._nav) > d2, 25)
         c.check("decomp follow works with a stale name (ea-marker fallback)",
                 app._cur.ea == dstale, f"cur={app._cur.ea:#x} want={dstale:#x}")
-        app.program.client.call("rename", batch={"func": {"addr": hex(dstale), "name": dsym}})
+        app.program.client.invoke("rename", batch={"func": {"addr": hex(dstale), "name": dsym}})
         app.program.bump_names()
 
 
@@ -1674,7 +1674,7 @@ async def s_rename(c: Ctx):
     c.check("rename updates the function name",
             app._func_index.by_addr(dtarget).name == newname,
             app._func_index.by_addr(dtarget).name)
-    rr = app.program.client.call("rename", batch={"func": {"addr": hex(dtarget), "name": dsym}})
+    rr = app.program.client.invoke("rename", batch={"func": {"addr": hex(dtarget), "name": dsym}})
     c.check("rename reverted cleanly",
             rr.get("summary", {}).get("ok", 0) == 1, str(rr.get("summary")))
     # goto label refuse
@@ -1724,7 +1724,7 @@ async def s_rename(c: Ctx):
                      and any(cnote in t for t in dec._texts), 25)
         c.check("comment appears in the pseudocode after ';'",
                 any(cnote in t for t in dec._texts), "comment not shown")
-        app.program.client.call("set_comments", items=[{"addr": hex(cea), "comment": ""}])
+        app.program.client.invoke("set_comments", items=[{"addr": hex(cea), "comment": ""}])
     else:
         c.check("found a pseudocode line to comment", False, "no marker line")
 
@@ -1766,7 +1766,7 @@ async def s_comment_func(c: Ctx):
             la is not None and lb is not None and lb > la
             and a not in dec._texts[lb],
             f"la={la} lb={lb}")
-    app.program.client.call("set_comments", items=[{"addr": hex(fn.addr), "comment": ""}])
+    app.program.client.invoke("set_comments", items=[{"addr": hex(fn.addr), "comment": ""}])
 
 
 @scenario("retype")
@@ -2031,7 +2031,7 @@ async def s_rename_history(c: Ctx):
     await c.pause(0.15)
     c.check("caller pseudocode shows renamed callee after 'back'",
             any(hnew in tx for tx in dec._texts), "pseudocode still stale")
-    app.program.client.call("rename", batch={"func": {"addr": hex(htarget), "name": hsym}})
+    app.program.client.invoke("rename", batch={"func": {"addr": hex(htarget), "name": hsym}})
 
 
 @scenario("region_define")
@@ -2250,7 +2250,7 @@ async def s_listing_name_addr(c: Ctx):
     finally:
         # revert: drop the label and restore raw bytes at A
         try:
-            c.prog.client.call("rename", batch={"data": {"addr": hex(A + 1), "new": ""}})
+            c.prog.client.invoke("rename", batch={"data": {"addr": hex(A + 1), "new": ""}})
         except Exception:  # noqa: BLE001
             pass
         c.prog.undefine(A, size=8)
@@ -2327,7 +2327,7 @@ async def s_listing_struct_expand(c: Ctx):
         c.check("found a data address for the struct test", False)
         return
     try:
-        c.prog.client.call(
+        c.prog.client.invoke(
             "declare_type",
             decls=["struct TuiExpandS { int a; char b[4]; short c; };"])
         c.prog.make_data(A, "TuiExpandS")
@@ -3206,7 +3206,7 @@ async def s_graph_rename(c: Ctx):
             f"resolve({new}) -> {got if got is None else hex(got)} want {ea:#x}")
     # revert, so the suite stays idempotent
     if got is not None:
-        app.program.client.call(
+        app.program.client.invoke(
             "rename", batch={"data": {"addr": hex(ea), "new": ""}})
         app.program.bump_names()
 
@@ -3259,7 +3259,7 @@ async def run(binary, only=None):
 
 
 async def _run_on(binary, only=None):
-    # Own idalib worker: opens the binary in-process over a unix socket.
+    # Code Mode attaches a registered GUI or starts/reuses a managed worker.
     app = IdaTui(open_path=binary, keepalive=False)
     async with app.run_test(size=(140, 44)) as pilot:
         c = Ctx(app, pilot)
@@ -3279,6 +3279,14 @@ async def _run_on(binary, only=None):
                 print(f"── {name}  ({asyncio.get_event_loop().time() - _t0:.1f}s) CRASHED")
                 c.check("scenario did not crash", False, f"{type(e).__name__}: {e}")
                 traceback.print_exc()
+    # Headless run_test does not reliably emit App.Unmount; explicitly release
+    # the lease. Then wait through the managed worker's final-lease grace and
+    # IDB close so Windows can remove this suite's TemporaryDirectory safely.
+    if app.program is not None:
+        app.program.close()
+    if app.client is not None:
+        app.client.close()
+        await asyncio.to_thread(app.client.wait_released, 45.0)
 
 
 def main(argv):

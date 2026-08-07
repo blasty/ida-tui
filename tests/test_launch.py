@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
-"""The launcher's file handling -- the part that deletes things.
+"""The launcher's option handling, and the file handling it must NOT do.
 
-`_sweep_locks` runs automatically when a database fails to open, and it removes
-files next to the user's binary. That is exactly the kind of code that must not
-be tested by trying it, so it is tested here: which files it takes, which it
-must never take, and what it reports.
+The old `_sweep_locks` deleted `.id0/.id1/.id2/.nam/.til` next to the user's
+binary when a database failed to open. That was only defensible while the TUI
+exclusively owned a private worker; under Code Mode a GUI or another client may
+own the database, so the sweep is gone. Its tests are replaced by one that keeps
+it gone -- deleting a shared database's working files is unrecoverable, and this
+is the cheapest guard against someone reintroducing the "helpful" cleanup.
 
-Pure: no IDA, no worker, no Textual.
+Pure: no IDA, no Code Mode library, no Textual.
 """
 from __future__ import annotations
 
@@ -20,7 +22,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 #: Read by tests/run.py (--fast skips every NEEDS_IDA file).
 NEEDS_IDA = False
 
-from idatui.launch import _LOCK_SUFFIXES, _load_args, _sweep_locks  # noqa: E402
+import idatui.launch as launch  # noqa: E402
+from idatui.launch import _load_args  # noqa: E402
 
 PASS = FAIL = 0
 
@@ -41,100 +44,18 @@ def touch(*paths):
             fh.write(b"x")
 
 
-def t_sweeps_the_scratch_files():
-    """IDA unpacks a .i64 into .id0/.id1/.id2/.nam/.til while it is open; a
-    hard-killed worker leaves them and the .i64 then refuses to reopen."""
-    with tempfile.TemporaryDirectory() as d:
-        binary = os.path.join(d, "echo")
-        touch(binary, *[binary + s for s in _LOCK_SUFFIXES])
-        n = _sweep_locks(binary)
-        check("every unpacked scratch file is swept", n == len(_LOCK_SUFFIXES),
-              f"swept {n} of {len(_LOCK_SUFFIXES)}")
-        check("none of them survive",
-              not any(os.path.exists(binary + s) for s in _LOCK_SUFFIXES))
-        check("the binary itself is untouched", os.path.exists(binary))
+def t_no_lock_sweeping():
+    """The launcher must not delete database working files any more.
 
-
-def t_sweeps_by_stem_too():
-    """IDA keys the scratch on the full name or the stem depending on how the
-    database was created, so both are swept."""
-    with tempfile.TemporaryDirectory() as d:
-        binary = os.path.join(d, "prog.elf")
-        stem = os.path.join(d, "prog")
-        touch(binary, stem + ".id0", stem + ".nam", binary + ".id1")
-        n = _sweep_locks(binary)
-        check("scratch named after the stem is swept too", n == 3, f"n={n}")
-        check("stem-keyed files are gone",
-              not os.path.exists(stem + ".id0")
-              and not os.path.exists(stem + ".nam"))
-        check("full-name-keyed files are gone", not os.path.exists(binary + ".id1"))
-        check("the binary itself is untouched", os.path.exists(binary))
-
-
-def t_never_the_database():
-    """The .i64 IS the database. Nothing is saved unless idb_save was called, so
-    deleting it throws away every rename and comment in the session."""
-    with tempfile.TemporaryDirectory() as d:
-        binary = os.path.join(d, "echo")
-        db = binary + ".i64"
-        stem_db = os.path.join(d, "echo.i64")
-        touch(binary, db, binary + ".id0")
-        _sweep_locks(binary)
-        check("the .i64 is never swept", os.path.exists(db))
-        check("nor the stem-keyed .i64", os.path.exists(stem_db))
-        check(".i64 is not in the suffix list", ".i64" not in _LOCK_SUFFIXES,
-              str(_LOCK_SUFFIXES))
-
-
-def t_never_the_input_itself():
-    """`.til` is both an unpacked-DB suffix and the extension of an IDA type
-    library, so `ida-tui mylib.til` used to sweep its own argument out of
-    existence -- irreversibly, on a path that runs automatically when an open
-    fails. Same for anything named *.id0/*.id1/*.id2/*.nam.
+    Code Mode's registry locks, health probes and IDA itself arbitrate database
+    ownership now. A sweep here would delete files out from under a live GUI.
     """
-    for suf in _LOCK_SUFFIXES:
-        with tempfile.TemporaryDirectory() as d:
-            binary = os.path.join(d, "mylib" + suf)
-            touch(binary)
-            _sweep_locks(binary)
-            check(f"a binary named *{suf} is not deleted by its own sweep",
-                  os.path.exists(binary), f"{binary} was removed")
-
-
-def t_relative_path_is_still_the_input():
-    """The guard compares absolute paths -- a relative argument names the same
-    file and must be protected the same way."""
-    with tempfile.TemporaryDirectory() as d:
-        cwd = os.getcwd()
-        try:
-            os.chdir(d)
-            touch("mylib.til")
-            _sweep_locks("mylib.til")
-            check("a relative path to the input is protected too",
-                  os.path.exists("mylib.til"))
-        finally:
-            os.chdir(cwd)
-
-
-def t_missing_files_are_fine():
-    with tempfile.TemporaryDirectory() as d:
-        binary = os.path.join(d, "nothing-here")
-        touch(binary)
-        n = _sweep_locks(binary)
-        check("sweeping with nothing to sweep reports 0", n == 0, f"n={n}")
-        check("and does not raise", True)
-
-
-def t_leaves_the_neighbours_alone():
-    with tempfile.TemporaryDirectory() as d:
-        binary = os.path.join(d, "echo")
-        other = os.path.join(d, "other.id0")       # another binary's scratch
-        src = os.path.join(d, "echo.c")
-        touch(binary, other, src, binary + ".id0")
-        _sweep_locks(binary)
-        check("another binary's scratch is left alone", os.path.exists(other))
-        check("unrelated neighbours are left alone", os.path.exists(src))
-        check("our own scratch is still swept", not os.path.exists(binary + ".id0"))
+    check("_sweep_locks is gone", not hasattr(launch, "_sweep_locks"))
+    check("the scratch-suffix list is gone", not hasattr(launch, "_LOCK_SUFFIXES"))
+    src = open(launch.__file__, encoding="utf-8").read()
+    check("the launcher does not remove files at all",
+          "os.remove" not in src and "shutil.rmtree" not in src,
+          "launch.py deletes something again")
 
 
 def t_load_args():
@@ -154,10 +75,7 @@ def t_load_args():
 
 
 def main() -> int:
-    for fn in (t_sweeps_the_scratch_files, t_sweeps_by_stem_too,
-               t_never_the_database, t_never_the_input_itself,
-               t_relative_path_is_still_the_input, t_missing_files_are_fine,
-               t_leaves_the_neighbours_alone, t_load_args):
+    for fn in (t_no_lock_sweeping, t_load_args):
         print(f"\n{fn.__name__}")
         try:
             fn()

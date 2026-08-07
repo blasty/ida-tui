@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Unit tests for idatui.project (the multi-binary project model + staging).
 
-Pure stdlib: no IDA, no textual, no worker — runs anywhere in under a second.
+IDA-free: exercises staging plus Code Mode ownership checks without opening a database.
 
     python tests/test_project.py
 """

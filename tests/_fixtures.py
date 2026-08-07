@@ -37,6 +37,36 @@ def cache_is_fresh(binary: str) -> bool:
     return os.path.exists(c) and os.path.getmtime(c) >= os.path.getmtime(binary)
 
 
+#: Generated targets live here so their pristine caches survive between runs.
+#: Gitignored; safe to delete (the next run rebuilds both).
+SYNTHETIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".synthetic")
+
+
+def synthetic(name: str, build) -> str:
+    """A generated binary at a STABLE path, rebuilt only when its bytes change.
+
+    Generated targets used to be written into a fresh TemporaryDirectory on
+    every run, which quietly defeated the whole pristine-cache scheme: a new
+    path with new bytes every time means auto-analysis is paid in full, every
+    run, forever. `test_blob_ui`'s 64KB blob cost ~40s a run that way.
+
+    ``build()`` must be DETERMINISTIC and return bytes. That is also what makes
+    the suites reproducible: a blob built from os.urandom can, by luck, contain
+    something IDA reads as a function, and then a test asserting "no functions"
+    fails for reasons no one can reproduce.
+    """
+    os.makedirs(SYNTHETIC_DIR, exist_ok=True)
+    path = os.path.join(SYNTHETIC_DIR, name)
+    data = build()
+    if not os.path.exists(path) or open(path, "rb").read() != data:
+        with open(path, "wb") as fh:          # content changed -> cache is stale
+            fh.write(data)
+        for stale in (cache_path(path), path + ".i64"):
+            if os.path.exists(stale):
+                os.remove(stale)
+    return path
+
+
 async def build_pristine(binary: str, cache: str, app_factory) -> None:
     """Analyse ``binary`` once and keep the database as a golden copy.
 
@@ -50,7 +80,13 @@ async def build_pristine(binary: str, cache: str, app_factory) -> None:
             await pilot.pause(0.05)
             if app._func_index is not None and app._func_index.complete:
                 break
-        app.program.client.call("idb_save", timeout=600.0)
+        app.program.client.save_database()
+    # Textual's headless run_test context does not reliably emit App.Unmount on
+    # every platform/version; release the Code Mode lease explicitly.
+    if app.program is not None:
+        app.program.close()
+    if app.client is not None:
+        app.client.close()
     db = binary + ".i64"
     if os.path.exists(db):
         shutil.copy2(db, cache)
