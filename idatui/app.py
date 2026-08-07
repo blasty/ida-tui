@@ -2161,6 +2161,13 @@ _GPAD = 1          # columns of padding inside a box
 _MINI_W, _MINI_H = 30, 14
 
 
+#: Memo for ``Style + Style``. Rich rebuilds a whole Style on every ``+``, and
+#: the graph merges an overlay (cursor band, trail, highlight) over a run of
+#: cells that share only a handful of base styles -- so the same pair is
+#: recombined hundreds of times per frame.
+_STYLE_SUM: dict[tuple, Style] = {}
+
+
 class _CellRow:
     """A row of (char, style) cells that coalesces into a Strip.
 
@@ -2183,13 +2190,39 @@ class _CellRow:
             self.st[i] = style
 
     def text(self, i: int, s: str, style: Style) -> None:
-        for k, c in enumerate(s):
-            self.put(i + k, c, style)
+        """Write ``s`` at cell ``i``, clipped to the row.
+
+        Slice assignment rather than a call per character: a graph row is drawn
+        from box borders, instruction text and the minimap, and doing it a cell
+        at a time made painting one frame thousands of bound-method calls.
+        Assigning a str to a list slice expands it to characters in C.
+        """
+        if not s:
+            return
+        a = i if i > 0 else 0
+        b = i + len(s)
+        if b > self.width:
+            b = self.width
+        if b <= a:
+            return
+        self.ch[a:b] = s[a - i:b - i]
+        self.st[a:b] = [style] * (b - a)
 
     def restyle(self, a: int, b: int, style: Style) -> None:
         """Merge ``style`` over the cells in [a, b) (keeps the characters)."""
-        for i in range(max(a, 0), min(b, self.width)):
-            self.st[i] = self.st[i] + style
+        if a < 0:
+            a = 0
+        if b > self.width:
+            b = self.width
+        st = self.st
+        combine = _STYLE_SUM
+        for i in range(a, b):
+            base = st[i]
+            key = (base, style)
+            got = combine.get(key)
+            if got is None:
+                got = combine[key] = base + style
+            st[i] = got
 
     def strip(self) -> Strip:
         segs: list[Segment] = []
@@ -2796,10 +2829,8 @@ class GraphView(NavMixin, ScrollView, can_focus=True):
             label = f"loc_{n.block.start:X}" if n.block else ""
             if b is not None and b.rows and b.rows[0].name:
                 label = b.rows[0].name
-            out.put(left, graph.BOX["tl"], bs)
-            for i in range(1, w - 1):
-                out.put(left + i, graph.BOX["h"], bs)
-            out.put(left + w - 1, graph.BOX["tr"], bs)
+            out.text(left, graph.BOX["tl"] + graph.BOX["h"] * (w - 2)
+                     + graph.BOX["tr"], bs)
             tag = f" {label} "
             if len(tag) <= w - 4:
                 st = _S_GENTRY if (self.fc and n.id == self.fc.entry) else (
@@ -2809,15 +2840,12 @@ class GraphView(NavMixin, ScrollView, can_focus=True):
                 out.put(left + w - 2, "↺", _S_EDGE[graph.E_BACK])
             return
         if row == n.y + n.h - 1:
-            out.put(left, graph.BOX["bl"], bs)
-            for i in range(1, w - 1):
-                out.put(left + i, graph.BOX["h"], bs)
-            out.put(left + w - 1, graph.BOX["br"], bs)
+            out.text(left, graph.BOX["bl"] + graph.BOX["h"] * (w - 2)
+                     + graph.BOX["br"], bs)
             return
         out.put(left, graph.BOX["v"], bs)
         out.put(left + w - 1, graph.BOX["v"], bs)
-        for i in range(1, w - 1):
-            out.put(left + i, " ", _S_INSN)
+        out.text(left + 1, " " * (w - 2), _S_INSN)
         i = row - n.y - 1
         rows = self._rows(n.id)
         if not (0 <= i < len(rows)):
