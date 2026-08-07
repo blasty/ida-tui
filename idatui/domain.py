@@ -27,6 +27,7 @@ import re
 import threading
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
+from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
 from typing import NamedTuple
 from typing import Callable, TYPE_CHECKING
@@ -115,12 +116,18 @@ class Head(NamedTuple):
     #: [(kind, text)] from IDA's own colour tags — mnem/reg/num/name/str/punct/…
     #: None when the worker didn't provide them (older worker, or the spans
     #: disagreed with the plain text, in which case the text wins).
-    spans: tuple[tuple[str, str], ...] | None = None
+    #:
+    #: Held exactly as it came off the wire, and **read-only**. The worker
+    #: memoises its per-line render, so one list is shared by every row that
+    #: says the same thing — pickle preserves that, and 228 000 rows of bash
+    #: reference about 53 000 lists. Copying each row's into a fresh tuple threw
+    #: the sharing away and cost 0.9 µs a row for nothing.
+    spans: Sequence | None = None
     #: [(start, end, n)] — where each operand sits in ``text``, from IDA's own
     #: COLOR_OPND markers. Lets the view show which operand the cursor is on,
     #: and is the same information the worker maps a column through, so the
-    #: highlight and the edit can't disagree.
-    ops: tuple[tuple[int, int, int], ...] | None = None
+    #: highlight and the edit can't disagree. Read-only, as ``spans`` is.
+    ops: Sequence | None = None
 
     @property
     def label(self) -> str | None:  # Line-compatible alias
@@ -135,12 +142,10 @@ class Head(NamedTuple):
 
     @classmethod
     def from_raw(cls, d: dict, raw: bytes | None = None) -> "Head":
-        sp = d.get("spans")
-        ops = d.get("ops")
-        # ``tuple(map(tuple, ...))`` rather than a per-item genexpr with str()/
-        # int() coercion: this runs once per listing row (hundreds of thousands
-        # on a real binary) and the worker's own tool already emits [str, str]
-        # and [int, int, int]. The coercion was re-proving that on every row.
+        # Spans and operand extents are stored as they arrive: the worker's own
+        # tool emits [str, str] and [int, int, int], so re-coercing them was
+        # re-proving that once per listing row -- and copying them into tuples
+        # destroyed the sharing the worker's line cache had just created.
         return cls(
             ea=_as_int(d["ea"]),
             kind=d.get("kind", "unknown"),
@@ -148,8 +153,8 @@ class Head(NamedTuple):
             text=d.get("text", ""),
             name=d.get("name"),
             raw=raw,
-            spans=tuple(map(tuple, sp)) if sp else None,
-            ops=tuple(map(tuple, ops)) if ops else None,
+            spans=d.get("spans") or None,
+            ops=d.get("ops") or None,
         )
 
 
