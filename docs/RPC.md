@@ -102,6 +102,7 @@ predicate so the returned state is final.
 | `xrefs` | — | `x`: open the xref picker. |
 | `symbols` | `query?` | Ctrl+N palette, optionally pre-typed. |
 | `structs` | — | Ctrl+T struct editor. |
+| `export` | `path?`, `types?=true` | write the session's findings as **markdown** and return `{path, comments, names, types, functions, bytes}`. Not typed through a prompt: the point of this verb is the file it leaves behind, so a driver gets the path back rather than a screenshot. Defaults to `<binary>.findings.md`. See *Findings export* below. |
 | `search` | `term`, `direction?=1` | `/` (or `?`) incremental search in the active code view. |
 | `select` | `index?` | in an open modal list (xrefs/symbols) choose the highlighted (or nth) item and activate it. |
 | `save` | — | Ctrl+S: persist the `.i64`. |
@@ -130,6 +131,27 @@ apply the whole symbol file with `rename_many`. Do **not** loop `rename` over a
 symbol file: each one costs a navigation (listing page + decompile) plus two
 prompt round-trips, i.e. tens of minutes for a few hundred symbols, where
 `rename_many` is one call and a few seconds.
+
+### Findings export
+
+`export` writes what the session **worked out** -- comments, names, prototypes
+and the types you declared -- as one markdown document.
+
+The interesting part is provenance. A `.i64` does not record *who* wrote a
+comment or a name: IDA's analyzer sets `; switch 73 cases` and `; s1` with the
+same `set_cmt` a person uses, the loader sets `elf_gnu_hash_nbuckets` and
+`File class: 64-bit` the same way, and the flags, `get_cmt` and even the colour
+tag in `generate_disasm_line` are identical for all of them. So idatui keeps its
+own **journal** (`idatui/journal.py`) of every edit it makes, in a netnode
+inside the database, and the report is built from that -- exact, and still there
+next session. Ask it on a database nobody journalled (worked on in the IDA GUI,
+or before this existed) and it falls back to filtering by shape and says so in
+the document.
+
+```sh
+python -m idatui.drive export                    # -> <binary>.findings.md
+python -m idatui.drive export /tmp/writeup.md
+```
 
 ### Movement (fast — bare keypresses, pump-only settle)
 | method | params | effect |

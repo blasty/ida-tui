@@ -296,6 +296,14 @@ def cmd_save(c, args):
     return "  saved"
 
 
+def cmd_export(c, args):
+    """export [path] -- write the session's findings as markdown."""
+    r = c.call("export", **({"path": args[0]} if args else {}))
+    return (f"  {r.get('path')}  ({r.get('bytes', 0)} bytes: "
+            f"{r.get('comments', 0)} comments, {r.get('names', 0)} names, "
+            f"{r.get('types', 0)} types)")
+
+
 def cmd_screen(c, args):
     return c.call("screen").get("text", "")
 
@@ -315,7 +323,7 @@ COMMANDS = {
     "callees": cmd_callees, "callers": cmd_callers, "names": cmd_names,
     "rename": cmd_rename, "mv": cmd_mv, "note": cmd_note, "retype": cmd_retype,
     "save": cmd_save, "screen": cmd_screen, "raw": cmd_raw, "define": cmd_define,
-    "syms": cmd_syms, "fmt": cmd_fmt,
+    "syms": cmd_syms, "fmt": cmd_fmt, "export": cmd_export,
     "binaries": cmd_binaries, "switch": cmd_switch,
 }
 

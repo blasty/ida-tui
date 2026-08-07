@@ -252,6 +252,37 @@ def link_name(raw: str) -> str:
 
 
 @dataclass(frozen=True)
+class Comment:
+    """One comment somebody wrote into the database.
+
+    ``line`` is the disassembly the comment is attached to, carried along so a
+    report can show what was being commented ON without a second round trip.
+    ``whole_func`` marks a function comment rather than an instruction one.
+    """
+    addr: int
+    text: str
+    repeatable: bool = False
+    whole_func: bool = False
+    line: str = ""
+    seg: str = ""
+    func: str | None = None
+    func_addr: int | None = None
+
+
+@dataclass(frozen=True)
+class NamedItem:
+    """An address carrying a real name -- one you typed, or one the file's own
+    symbols supplied. IDA records both as "user" names and does not remember
+    which was which, so a report must say so rather than claim authorship."""
+    addr: int
+    name: str
+    is_func: bool = False
+    size: int = 0
+    proto: str | None = None
+    seg: str = ""
+
+
+@dataclass(frozen=True)
 class Linkage:
     """One import or export: a name this binary takes from, or offers to, other
     modules. ``module`` is set for imports (the library IDA attributes it to),
@@ -1902,6 +1933,44 @@ class Program:
         with self._lock:
             self._linkage = out
         return out
+
+    def annotations(self, limit: int = 4000) -> tuple[list["Comment"], list["NamedItem"]]:
+        """``(comments, names)`` -- everything a person added to this database.
+
+        Not cached: it is the *current* state of your work, and the one caller
+        (the findings export) asks for it once. ``([], [])`` if the backend has
+        no such operation, so an alternate client degrades instead of breaking.
+        """
+        try:
+            payload = self.client.invoke("list_annotations", limit=int(limit))
+        except IDAToolError:
+            return ([], [])
+        if not isinstance(payload, dict):
+            return ([], [])
+        comments = [
+            Comment(addr=_as_int(r.get("addr", 0)), text=str(r.get("text", "")),
+                    repeatable=bool(r.get("repeatable")),
+                    whole_func=bool(r.get("whole_func")),
+                    line=str(r.get("line", "") or ""),
+                    seg=str(r.get("seg", "") or ""),
+                    func=(r.get("func") or None),
+                    func_addr=(_as_int(r["func_addr"]) if r.get("func_addr") else None))
+            for r in payload.get("comments", []) if isinstance(r, dict) and r.get("text")]
+        names = [
+            NamedItem(addr=_as_int(r.get("addr", 0)), name=str(r.get("name", "")),
+                      is_func=bool(r.get("func")), size=int(r.get("size", 0) or 0),
+                      proto=(r.get("proto") or None), seg=str(r.get("seg", "") or ""))
+            for r in payload.get("names", []) if isinstance(r, dict) and r.get("name")]
+        return (comments, names)
+
+
+    def journal_get(self) -> str:
+        """The findings journal blob stored in this database ('' if none)."""
+        payload = self.client.invoke("journal_get")
+        return str(payload.get("data", "")) if isinstance(payload, dict) else ""
+
+    def journal_put(self, data: str) -> None:
+        self.client.invoke("journal_put", data=str(data))
 
     def decomp_map(self, ea: int) -> list[list[int]]:
         """Per-pseudocode-line instruction coverage for the split-view region

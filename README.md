@@ -100,6 +100,12 @@ a 400 MB binary scrolls like a text file.
 **Decompiler** — Hex-Rays pseudocode with syntax highlighting, per-line address
 anchors, and rename/retype/comment that write back.
 
+**Findings export** (`ctrl+e`) — the session as a markdown writeup: your
+comments grouped by function, the names and prototypes you set, the types you
+declared. A `.i64` does not record *who* wrote a comment — IDA's own analyzer
+uses the same call — so idatui journals its edits into the database as it makes
+them, and the report is built from that. Also `python -m idatui.drive export`.
+
 **Structs / types** (`ctrl+t`) — local types as plain C: the list on the left,
 an editable, syntax-highlighted definition on the right. `Ctrl+S` declares it
 back into the database and reformats to IDA's own layout, `Ctrl+N` starts a new

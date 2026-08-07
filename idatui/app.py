@@ -50,7 +50,9 @@ from . import kittygfx
 from .edit_ctl import EditController
 from .prompt import PromptBar
 from .trace_ctl import TraceController
+from . import findings
 from .highlight import CTextArea, highlight_c
+from .journal import Journal
 
 from .errors import IDAToolError, IDAConnectionError
 from .codemode_client import CodeModeClient, registered_database
@@ -3444,6 +3446,7 @@ _HELP = (
         ("B", "cycle the opcode-bytes column"),
         ("Ctrl+B", "show/hide the names pane"),
         ("Ctrl+T", "structs / types editor"),
+        ("Ctrl+E", "export findings as markdown"),
         ("Ctrl+P", "command palette"),
     )),
     ("Move", (
@@ -4539,6 +4542,8 @@ class StructEditor(ModalScreen):
             self._set_status(f"save failed — {msg}", error=True)
             return
         self._loaded = name
+        if name:
+            self.app.journal.record("type", None, name)
         if formatted:
             # Reformat the editor to IDA's canonical layout (keeps cursor at top).
             ta = self.query_one("#se-edit", TextArea)
@@ -4590,6 +4595,7 @@ class StructEditor(ModalScreen):
             return
         if getattr(self.app, "_dirty", None) is not None:
             self.app._dirty = True
+        self.app.journal.record("del_type", None, name)
         self._refresh()
         self._set_status(f"deleted {name}")
 
@@ -4664,6 +4670,8 @@ class IdaCommands(Provider):
              app.action_strings),
             ("Switch binary…", "another binary in the project (Ctrl+O)",
              app.action_switch_binary),
+            ("Export findings…", "your comments, names and types as markdown "
+             "(Ctrl+E)", app.action_export),
             ("Keyboard shortcuts", "the key cheatsheet (F1 or H)",
              app.action_help),
             ("Follow symbol under cursor", "jump to the referenced symbol (Enter)",
@@ -4774,6 +4782,10 @@ class IdaTui(App):
         height: 1; border: none; padding: 0 1;
         background: $primary-darken-3; color: $text;
     }
+    #export {
+        height: 1; border: none; padding: 0 1;
+        background: $success-darken-3; color: $text;
+    }
     #status { height: 1; background: $panel; color: $text; padding: 0 1; }
     .decomp-loading {
         width: 100%; height: 100%; content-align: center middle;
@@ -4882,6 +4894,7 @@ class IdaTui(App):
         Binding("q", "quit", "Quit"),
         Binding("ctrl+n", "symbols", "Symbols"),
         Binding("ctrl+t", "structs", "Structs"),
+        Binding("ctrl+e", "export", "Export", show=False),
         Binding("backslash", "hex", "Hex"),
         Binding("s", "toggle_split", "Split", show=False),
         # IDA's own key for text/graph. Graph mode is opt-in and self-contained:
@@ -4993,9 +5006,12 @@ class IdaTui(App):
         #: The one-line prompts above the footer. Each holds its own context
         #: for exactly as long as it is on screen; see idatui/prompt.py.
         self.prompts = PromptBar(self, "search", "rename", "comment",
-                                 "retype", "makedata", "goto")
+                                 "retype", "makedata", "goto", "export")
         #: Everything that writes to the database (idatui/edit_ctl.py).
         self.edits = EditController(self)
+        #: What those writes were, so the findings export can say which
+        #: comments and names are YOURS -- the database cannot (journal.py).
+        self.journal = Journal()
         self._xref_focus_name: str | None = None
         self._dirty = False
 
@@ -5045,6 +5061,10 @@ class IdaTui(App):
         gi.display = False
         gi.can_focus = False
         yield gi
+        xi = Input(id="export")
+        xi.display = False
+        xi.can_focus = False
+        yield xi
         # markup=False: the status is plain text full of [listing]/[split]/[label]
         # markers and symbol names that may contain brackets. With Textual markup
         # on, a single-word marker parses as a style tag and is silently eaten —
@@ -6304,6 +6324,50 @@ class IdaTui(App):
         inp.value = self._filter_term
         inp.focus()
 
+    def action_export(self) -> None:
+        """Ctrl+E: write what you have worked out to a markdown report.
+
+        Prefilled with a path beside the binary, because the common case is
+        "just write it" and the rare case is worth one edit.
+        """
+        if self.program is None:
+            self._status("no database open", priority=True)
+            return
+        inp = self.query_one("#export", Input)
+        inp.placeholder = "export findings to… (markdown) — Enter"
+        inp.can_focus = True
+        inp.display = True
+        inp.value = findings.default_path(self._open_path or "findings")
+        self.query_one("#status", Static).display = False
+        inp.focus()
+
+    def _end_export(self) -> None:
+        inp = self.query_one("#export", Input)
+        inp.display = False
+        inp.can_focus = False
+        self.query_one("#status", Static).display = True
+
+    def export_findings(self, path: str | None = None) -> None:
+        """Gather + write the report off the UI thread (it walks the database)."""
+        self._status("exporting findings…", priority=True)
+        self._export_worker(path)
+
+    @work(thread=True, exclusive=True, group="export")
+    def _export_worker(self, path: str | None) -> None:
+        try:
+            self.journal.load(self.program)
+            self.journal.flush(self.program)
+            out, f = findings.export(self.program, self._open_path or "", path,
+                                     journal=self.journal)
+        except Exception as e:  # noqa: BLE001 -- a bad path is a message, not a crash
+            self.call_from_thread(self._status, f"export failed: {e}", True)
+            return
+        n_named = len(findings._user_names(f))
+        self.call_from_thread(
+            self._status,
+            f"exported {len(f.comments)} comments, {n_named} names, "
+            f"{len(f.types)} types → {out}", True)
+
     def action_goto(self) -> None:
         inp = self.query_one("#goto", Input)
         inp.placeholder = ("hex goto: 0xADDR or name — Enter" if self.is_hex
@@ -6892,6 +6956,7 @@ class IdaTui(App):
     def _save(self) -> None:
         assert self.program is not None
         try:
+            self.journal.flush(self.program)   # ride along into the .i64
             self.program.client.save_database()
         except Exception as e:  # noqa: BLE001
             self.app.call_from_thread(self._status, f"save failed: {e}")
@@ -7191,8 +7256,8 @@ class IdaTui(App):
             event.prevent_default()
             if prompt.id == "search":
                 self._end_search(cancel=True)
-            elif prompt.id == "goto":
-                self._end_goto()
+            elif prompt.id in ("goto", "export"):
+                self._end_goto() if prompt.id == "goto" else self._end_export()
                 (self.query_one(HexView) if self.is_hex
                  else (self._code_view() or self.query_one(ListingView))).focus()
             else:
@@ -7239,6 +7304,13 @@ class IdaTui(App):
              else (self._code_view() or self.query_one(ListingView))).focus()
             if value:
                 self._goto(value)
+            return
+        if inp.id == "export":
+            self._end_export()
+            (self.query_one(HexView) if self.is_hex
+             else (self._code_view() or self.query_one(ListingView))).focus()
+            if value:
+                self.export_findings(value)
             return
         # filter mode: already applied incrementally; Enter just confirms + closes.
         self._apply_filter(value)
@@ -7461,7 +7533,8 @@ class IdaTui(App):
     # Prompt overlays that own the keyboard while visible; a background
     # navigation must not yank focus out from under them (else typed keys leak
     # into a code view as destructive verbs — e.g. 'u' = undefine).
-    _PROMPT_IDS = ("search", "rename", "comment", "retype", "goto", "func-filter")
+    _PROMPT_IDS = ("search", "rename", "comment", "retype", "goto", "export",
+                   "func-filter")
 
     def _prompt_active(self) -> bool:
         for iid in self._PROMPT_IDS:

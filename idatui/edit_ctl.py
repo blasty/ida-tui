@@ -266,6 +266,7 @@ class EditController:
         if kind == "func" and addr is not None:
             self._rename_index(addr, new)
         app._dirty = True
+        app.journal.record("rename", addr, f"{old} → {new}", {"kind": kind})
         app._status(f"renamed  {old} → {new}   (Ctrl+S to save)")
 
     def do_name_addr(self, addr: int, name: str) -> None:  # worker context
@@ -317,6 +318,7 @@ class EditController:
             self._rename_index(addr, name)
         app._open_at(addr, label, idx, False, -1, 0, True)
         app._dirty = True
+        app.journal.record("rename", addr, f"→ {name}")
         app._status(f"named {addr:#x} → {name}   (Ctrl+S to save)")
 
     # -- comments (IDA ';') ------------------------------------------------- #
@@ -382,6 +384,7 @@ class EditController:
         app.program.bump_names()
         self.reload_active_code()
         app._dirty = True
+        app.journal.record("comment" if text else "uncomment", ea, text)
         verb = "cleared comment" if not text else "commented"
         app._status(f"{verb} @ {ea:#x}   (Ctrl+S to save)")
 
@@ -470,6 +473,8 @@ class EditController:
         app.program.bump_names()
         self.reload_active_code()
         app._dirty = True
+        app.journal.record("retype", getattr(app._cur, "ea", None), word,
+                           {"kind": kind})
         what = "prototype" if kind == "func" else f"'{word}'"
         app._status(f"retyped {what}   (Ctrl+S to save)")
 

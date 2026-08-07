@@ -1093,6 +1093,88 @@ async def s_structs(c: Ctx):
     c.check("Esc closes the struct editor", not isinstance(app.screen, StructEditor))
 
 
+@scenario("export_findings")
+async def s_export_findings(c: Ctx):
+    """Ctrl+E writes a markdown report of what this session worked out.
+
+    Deliberately end-to-end: the interesting failure is not the formatting (that
+    is covered offline in test_findings.py) but whether a comment and a rename
+    made through the UI come back out of the database and into the file.
+    """
+    import tempfile
+
+    from idatui.findings import default_path
+
+    app = c.app
+    fn = c.biggest()
+    tag = os.getpid()
+    newname, note = f"exp_{tag}", f"found_it_{tag}"
+    old = fn.name
+    await c.open(fn.addr, "listing")
+
+    # Make something to find: a rename and a comment, through the real paths.
+    app.program.client.invoke(
+        "rename", batch={"func": {"addr": hex(fn.addr), "name": newname}})
+    app.program.bump_names()
+    app.program.set_comment(fn.addr, note)
+    app.program.invalidate(fn.addr)
+    # ...and tell the journal, exactly as the edit controller would. The
+    # database cannot say who wrote a comment (IDA's own analyzer uses the same
+    # call), so the journal is what makes this MY finding rather than noise.
+    app.journal.record("rename", fn.addr, f"{old} → {newname}")
+    app.journal.record("comment", fn.addr, note)
+
+    out = os.path.join(tempfile.gettempdir(), f"idatui-findings-{tag}.md")
+    try:
+        await c.press("ctrl+e")
+        inp = app.query_one("#export", Input)
+        opened = await c.wait(lambda: inp.display, 5)
+        c.check("Ctrl+E opens the export prompt", opened, f"display={inp.display}")
+        c.check("the prompt is prefilled with a path beside the binary",
+                inp.value == default_path(app._open_path), f"value={inp.value!r}")
+        inp.value = out
+        await c.press("enter")
+        written = await c.wait(lambda: os.path.exists(out), 30)
+        c.check("Enter writes the report", written, f"no {out}")
+        if not written:
+            return
+        doc = open(out, encoding="utf-8").read()
+        c.check("the report is markdown with the expected sections",
+                doc.startswith("# Findings") and "## Comments" in doc
+                and "## Named functions" in doc, doc[:60])
+        c.check("a comment written this session is in it", note in doc,
+                doc[:200])
+        c.check("and the function it belongs to is named", newname in doc,
+                doc[:200])
+        c.check("the report is sourced from the journal, not a scan",
+                "idatui's edit journal" in doc,
+                [l for l in doc.splitlines() if "**source**" in l])
+        c.check("the analyzer's own comments stay out of it",
+                "switch jump" not in doc and "jumptable" not in doc,
+                [l for l in doc.splitlines() if "switch" in l][:2])
+        c.check("the status line says where it went",
+                out in c.status(), c.status())
+        # The journal has to survive the database, or a report is only ever
+        # about the session that happened to be open.
+        from idatui.journal import Journal
+
+        app.journal.flush(app.program)
+        reloaded = Journal()
+        reloaded.load(app.program)
+        c.check("the journal round-trips through the .i64",
+                fn.addr in reloaded.addresses(),
+                f"{len(reloaded)} entries, {sorted(reloaded.addresses())[:3]}")
+    finally:
+        # Idempotent: hand the database back exactly as we found it.
+        app.program.set_comment(fn.addr, "")
+        app.program.client.invoke(
+            "rename", batch={"func": {"addr": hex(fn.addr), "name": old}})
+        app.program.bump_names()
+        app.program.invalidate(fn.addr)
+        if os.path.exists(out):
+            os.remove(out)
+
+
 @scenario("struct_filter")
 async def s_struct_filter(c: Ctx):
     app = c.app

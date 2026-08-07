@@ -501,6 +501,107 @@ for item in page:
 result = {"strings": rows, "total": len(items), "next_offset": offset + len(rows)}
 result
 ''',
+    # Everything a person ADDED to the database: comments, non-dummy names, and
+    # the prototypes they set.
+    #
+    # Names come from IDA's name list, which is already an index -- no scan at
+    # all. Comments have no index, so they need a walk, and the walk is over
+    # HEADS: `next_that`'s predicate is a *Python* callback (SWIG calls it with
+    # one argument, so `f_has_cmt` does not even fit), which would be one call
+    # per BYTE -- 400 million of them on a big image. `max_scan` bounds it and
+    # reports `truncated` rather than sitting there.
+    "list_annotations": r'''
+import ida_bytes, ida_funcs, ida_lines, ida_nalt, ida_name
+import ida_segment, ida_typeinf, idautils
+limit = max(1, int(a.get("limit", 4000)))
+max_scan = max(1000, int(a.get("max_scan", 2000000)))
+comments, names = [], []
+scanned = 0
+
+def _line(ea):
+    try:
+        txt = ida_lines.generate_disasm_line(ea, ida_lines.GENDSM_REMOVE_TAGS)
+    except Exception:
+        txt = ""
+    return " ".join((txt or "").split())
+
+for ea, nm in idautils.Names():
+    if len(names) >= limit:
+        break
+    if not nm or not ida_bytes.has_user_name(ida_bytes.get_flags(ea)):
+        continue
+    fn = ida_funcs.get_func(ea)
+    is_fn = fn is not None and int(fn.start_ea) == int(ea)
+    proto = None
+    if is_fn:
+        try:
+            ti = ida_typeinf.tinfo_t()
+            if ida_nalt.get_tinfo(ti, ea):
+                proto = str(ti)
+        except Exception:
+            proto = None
+    seg = ida_segment.getseg(ea)
+    names.append({"addr": hex(int(ea)), "name": nm, "func": is_fn,
+                  "size": (int(fn.end_ea - fn.start_ea) if is_fn else 0),
+                  "proto": proto,
+                  "seg": (ida_segment.get_segm_name(seg) if seg else "")})
+
+for i in range(ida_segment.get_segm_qty()):
+    seg = ida_segment.getnseg(i)
+    if seg is None or len(comments) >= limit or scanned >= max_scan:
+        continue
+    for ea in idautils.Heads(seg.start_ea, seg.end_ea):
+        scanned += 1
+        if len(comments) >= limit or scanned >= max_scan:
+            break
+        if not ida_bytes.has_cmt(ida_bytes.get_flags(ea)):
+            continue
+        for rep in (False, True):
+            text = ida_bytes.get_cmt(ea, rep)
+            if text:
+                fn = ida_funcs.get_func(ea)
+                comments.append({
+                    "addr": hex(int(ea)), "text": text, "repeatable": rep,
+                    "line": _line(ea), "seg": ida_segment.get_segm_name(seg),
+                    "func": (ida_funcs.get_func_name(fn.start_ea) if fn else None),
+                    "func_addr": (hex(int(fn.start_ea)) if fn else None)})
+
+# Whole-function comments are not on the byte flags, so the scan cannot see them.
+for fn_ea in idautils.Functions():
+    fn = ida_funcs.get_func(fn_ea)
+    if fn is None or len(comments) >= limit:
+        continue
+    for rep in (False, True):
+        text = ida_funcs.get_func_cmt(fn, rep)
+        if text:
+            seg = ida_segment.getseg(fn_ea)
+            comments.append({"addr": hex(int(fn_ea)), "text": text,
+                             "repeatable": rep, "line": "", "whole_func": True,
+                             "seg": (ida_segment.get_segm_name(seg) if seg else ""),
+                             "func": ida_funcs.get_func_name(fn_ea),
+                             "func_addr": hex(int(fn_ea))})
+result = {"comments": comments, "names": names, "scanned": scanned,
+          "truncated": (len(comments) >= limit or len(names) >= limit
+                        or scanned >= max_scan)}
+result
+''',
+    # The findings journal (idatui/journal.py). A netnode blob rides along in
+    # the .i64, so "what did I work out here" survives closing the database.
+    "journal_get": r'''
+import ida_netnode
+n = ida_netnode.netnode(a.get("node", "$ idatui.journal"))
+blob = n.getblob(0, "I") if ida_netnode.exist(n) else None
+result = {"data": blob.decode("utf-8", "replace") if blob else ""}
+result
+''',
+    "journal_put": r'''
+import ida_netnode
+n = ida_netnode.netnode(a.get("node", "$ idatui.journal"), 0, True)
+payload = (a.get("data") or "").encode("utf-8")
+n.setblob(payload, 0, "I")
+result = {"ok": True, "bytes": len(payload)}
+result
+''',
     "list_linkage": r'''
 imports = [{"addr": hex(int(item.address)), "name": item.name, "module": item.module_name}
            for item in db.imports.get_all_imports() if item.name]

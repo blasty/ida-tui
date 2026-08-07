@@ -39,7 +39,7 @@ _PROGRAM_METHODS = {
     "goto", "open", "rename", "comment", "retype", "follow", "xrefs", "symbols",
     "structs", "search", "select", "save", "hex", "toggle_view",
     "pseudocode", "disassembly", "xrefs_to", "xrefs_from", "resolve",
-    "define", "rename_many", "opfmt", "graph",
+    "define", "rename_many", "opfmt", "graph", "export",
 }
 
 # Self-documenting method table (returned by the 'methods' verb).
@@ -75,6 +75,8 @@ METHODS = {
     "xrefs": "open the xref picker",
     "symbols": "{query?} open the symbol palette",
     "structs": "open the struct editor",
+    "export": "{path?,types?=true} write the session's comments/names/types as "
+              "a markdown report -> {path,comments,names,types}",
     "search": "{term,direction?=1} incremental search in the code view",
     "select": "{index?} choose the highlighted/nth item in the open modal",
     "save": "persist the .i64 (Ctrl+S)",
@@ -1173,6 +1175,24 @@ class RpcServer:
             return await self._press(
                 ["ctrl+t"], lambda: type(app.screen).__name__ == "StructEditor",
                 timeout, "structs")
+        if method == "export":
+            # Deliberately NOT driven through the prompt: this is the one verb
+            # whose whole point is the file it leaves behind, and a driver needs
+            # the path back, not a screenshot of a prompt closing.
+            from . import findings
+            path = params.get("path")
+            app.journal.load(app.program)
+            app.journal.flush(app.program)
+            out, f = await asyncio.to_thread(
+                findings.export, app.program, app._open_path or "",
+                str(path) if path else None,
+                types=bool(params.get("types", True)), journal=app.journal)
+            app._status(f"exported findings → {out}", priority=True)
+            await drain(app)
+            return {"path": out, "comments": len(f.comments),
+                    "names": len(findings._user_names(f)),
+                    "types": len(f.types), "functions": f.n_functions,
+                    "bytes": os.path.getsize(out) if os.path.exists(out) else 0}
         if method == "close":
             return await self._press(["escape"], timeout=timeout)
         if method == "save":
