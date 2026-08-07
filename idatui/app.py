@@ -616,6 +616,73 @@ class ColumnCursor:
         self.call_after_refresh(_fix)
 
 
+class _MatchRanges:
+    """Which lines matched, plus where in each line — the *where* computed lazily.
+
+    Searching a big segment for one character matches most of it: `c` over bash
+    hits 177 000 lines at 310 000 places. Building a range list for every one of
+    them costs more than finding them did, and all but the forty on screen are
+    thrown away unread.
+
+    So the line set is eager (search needs it to count and to jump) and the
+    offsets within a line are worked out when that line is painted, or when the
+    cursor lands on it, and cached from then on.
+
+    Quacks like the ``{line: [(start, end), ...]}`` dict it replaced: ``in``,
+    ``get``, ``[]``, ``items``, ``len``. Assigning a plain ``{}`` to reset stays
+    valid, because every reader only uses that same subset.
+    """
+
+    __slots__ = ("_lines", "_needle", "_n", "_ci", "_text", "_cache")
+
+    def __init__(self, lines, needle: str, n: int, ci: bool, text) -> None:
+        self._lines = lines            # set[int]
+        self._needle = needle          # already case-folded when ci
+        self._n = n                    # len(term); the needle may be folded
+        self._ci = ci
+        self._text = text              # callable: line index -> str | None
+        self._cache: dict[int, list[tuple[int, int]]] = {}
+
+    def _find(self, i: int) -> list[tuple[int, int]]:
+        s = self._text(i)
+        if not s:
+            return []
+        hay = s.lower() if self._ci else s
+        needle, n = self._needle, self._n
+        out = []
+        j = hay.find(needle)
+        while j >= 0:
+            out.append((j, j + n))
+            j = hay.find(needle, j + n)
+        return out
+
+    def __contains__(self, i) -> bool:
+        return i in self._lines
+
+    def __len__(self) -> int:
+        return len(self._lines)
+
+    def __iter__(self):
+        return iter(self._lines)
+
+    def get(self, i, default=None):
+        if i not in self._lines:
+            return default
+        got = self._cache.get(i)
+        if got is None:
+            got = self._cache[i] = self._find(i)
+        return got
+
+    def __getitem__(self, i):
+        got = self.get(i)
+        if got is None:
+            raise KeyError(i)
+        return got
+
+    def items(self):
+        return ((i, self.get(i)) for i in sorted(self._lines))
+
+
 class SearchMixin:
     """Vim-style in-view search shared by the disasm and pseudocode views.
 
@@ -822,26 +889,27 @@ class SearchMixin:
         # looked at, and narrowing would silently never find them.
         n = len(term)
         matches: list[int] = []
-        ranges: dict[int, list[tuple[int, int]]] = {}
+        ranges: object = {}
         hay = self._search_haystack(count, src)
         if hay is not None:
             starts, blob, folded = hay
             body = folded if ci else blob
             nlines = len(starts)
+            blen = len(body)
             line = 0
             j = body.find(needle)
             while j >= 0:
                 # find() walks forward, so the line only ever advances.
                 while line + 1 < nlines and starts[line + 1] <= j:
                     line += 1
-                off = j - starts[line]
-                rs = ranges.get(line)
-                if rs is None:
-                    ranges[line] = [(off, off + n)]
-                    matches.append(line)
-                else:
-                    rs.append((off, off + n))
-                j = body.find(needle, j + n)
+                matches.append(line)
+                # Only the LINE matters here; the offsets inside it are worked
+                # out on demand. So skip the rest of this line rather than
+                # finding every further occurrence in it.
+                nxt = starts[line + 1] if line + 1 < nlines else blen
+                j = body.find(needle, nxt)
+            ranges = _MatchRanges(set(matches), needle, n, ci,
+                                  self._search_line_text)
         else:
             # Typing forward can only ever REMOVE lines: a line holding "mov"
             # holds "mo". So when the term just grew (and nothing else moved --
@@ -862,15 +930,10 @@ class SearchMixin:
                 if not s:
                     continue
                 h = s.lower() if ci else s
-                j = h.find(needle)
-                if j < 0:
+                if h.find(needle) < 0:
                     continue
-                rs = []
-                while j >= 0:
-                    rs.append((j, j + n))
-                    j = h.find(needle, j + n)
                 matches.append(i)
-                ranges[i] = rs
+            ranges = _MatchRanges(set(matches), needle, n, ci, text_of)
         self._matches = matches
         self._ranges = ranges
         self._matched_key = (term, ci, count, src)
