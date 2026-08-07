@@ -116,7 +116,17 @@ class WorkerClient:
             # fifth of a second even when the worker was ready in milliseconds
             # (a small binary, or a seeded .i64), which is most of the time in
             # the tests and noticeable on a re-open.
+            #
+            # Backing off geometrically from the first probe was still too eager:
+            # a seeded database is ready at ~250ms, by which point the delay has
+            # grown to 134ms, so every open waited ~350ms whatever the binary --
+            # the same number for a 47KB `echo` and a 1.2MB `bash`, which is what
+            # gives a polling artefact away. Hold the fast rate for the first few
+            # seconds (a connect attempt on an absent socket is microseconds) and
+            # only slow down for a genuine cold auto-analysis, which runs for
+            # minutes and does not care about 200ms.
             delay = 0.005
+            fast_until = t0 + 5.0
             while time.time() < deadline:
                 try:
                     s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -132,7 +142,8 @@ class WorkerClient:
                         progress(f"auto-analyzing {os.path.basename(self._bin)}… "
                                  f"({int(time.time() - t0)}s)")
                     time.sleep(delay)
-                    delay = min(delay * 1.6, 0.2)
+                    if time.time() > fast_until:
+                        delay = min(delay * 1.6, 0.2)
             raise IDAConnectionError("worker did not become ready in time")
 
     @property

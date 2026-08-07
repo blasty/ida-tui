@@ -41,11 +41,24 @@ _DEFAULT = Style(color="#c3cad3")                           # 11.0:1 body
 _lexer = CLexer(stripnl=False, ensurenl=False)
 
 
+#: Resolved styles by token type. Pygments token types are interned singletons
+#: and a whole decompilation only ever uses about eighteen of them, but
+#: ``token in ttype`` is a hierarchy walk and _STYLES is scanned in order -- so
+#: without this every token in the body pays up to nine of those walks. It was a
+#: quarter of the time spent highlighting a function.
+_STYLE_CACHE: dict[object, Style] = {}
+
+
 def _style_for(token) -> Style:
-    for ttype, style in _STYLES:
-        if token in ttype:
-            return style
-    return _DEFAULT
+    style = _STYLE_CACHE.get(token)
+    if style is None:
+        style = _DEFAULT
+        for ttype, candidate in _STYLES:
+            if token in ttype:
+                style = candidate
+                break
+        _STYLE_CACHE[token] = style
+    return style
 
 
 def highlight_c(code: str) -> list[list[Segment]]:
@@ -55,6 +68,9 @@ def highlight_c(code: str) -> list[list[Segment]]:
         if not value:
             continue
         style = _style_for(token)
+        if "\n" not in value:      # the common case: a token inside one line
+            lines[-1].append(Segment(value, style))
+            continue
         parts = value.split("\n")
         for i, part in enumerate(parts):
             if i > 0:
