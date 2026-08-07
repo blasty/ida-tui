@@ -700,7 +700,7 @@ def heads(
     end: Annotated[str, "Optional exclusive end address; default = segment end"] = "",
     back: Annotated[bool, "Walk backwards: return the count heads ENDING just before addr, in forward order"] = False,
     annotate: Annotated[bool, "Emit IDA-style function boundary banner rows (kind sep/funchdr)"] = False,
-    digest: Annotated[bool, "Return only a digest+count of the rows, not the rows themselves"] = False,
+    expect: Annotated[str, "Digest a caller already holds: the rows are omitted when they still hash to it"] = "",
 ) -> dict:
     """Walk item heads from ``addr`` as a flat listing: every head is rendered
     (code OR data OR undefined) via generate_disasm_line and stepped with
@@ -824,15 +824,19 @@ def heads(
         rows.extend(_rows_for(ea, f))  # a struct head expands into member rows
         ea = _advance(ea, f)
     cursor = {"next": hex(ea)} if more else {"done": True}
-    out = {"addr": str(addr), "cursor": cursor,
-           "digest": _idatui_rows_digest(rows), "count": len(rows)}
-    # ``digest`` mode answers "is this page still exactly what you have?" without
-    # shipping it. The rows are built either way -- generate_disasm_line is the
-    # floor and there is no way to know a line is unchanged without rendering it
-    # -- but pickling several hundred rows with their colour spans, unpickling
-    # them and rebuilding Heads is about 40% of what a page costs, and after a
-    # rename almost every page comes back identical.
-    if not digest:
+    dig = _idatui_rows_digest(rows)
+    out = {"addr": str(addr), "cursor": cursor, "digest": dig, "count": len(rows)}
+    # ``expect`` says "I already hold a page that hashed to this". The rows are
+    # built either way -- generate_disasm_line is the floor and there is no way
+    # to know a line is unchanged without rendering it -- but pickling several
+    # hundred rows with their colour spans, unpickling them and rebuilding Heads
+    # is about 40% of what a page costs, and after a rename almost every page
+    # comes back identical.
+    #
+    # It carries the expected value rather than being a yes/no "digest mode" so
+    # that a page which HAS changed still costs one round trip: asking first and
+    # fetching afterwards made every changed page two.
+    if not (expect and str(dig) == expect):
         out["heads"] = rows
     return out
 

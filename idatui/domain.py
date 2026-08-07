@@ -1011,29 +1011,25 @@ class ListingModel:
             want_digest = self._page_digest[p]
             want_rows = self._page_rows[p]
             want = [(h.ea, h.kind) for h in self._heads[lo:hi]]
-        # Ask whether the page still renders as the client holds it. The worker
-        # builds the rows either way (there is no knowing a line is unchanged
-        # without rendering it), but skipping the pickling, the transfer, the
-        # unpickling and the Head rebuild is about 40% of what a page costs --
-        # and after a rename almost every page is unchanged.
-        if want_digest is not None:
-            try:
-                probe = self._prog.client.call(
-                    "heads", addr=hex(addr), count=self.PAGE, annotate=True,
-                    digest=True)
-            except Exception:  # noqa: BLE001 -- an older worker has no digest
-                probe = None
-            if (isinstance(probe, dict) and probe.get("digest") == want_digest
-                    and probe.get("count") == want_rows):
-                with self._lock:
-                    if self._text_gen == gen and len(self._heads) >= hi:
-                        for k in range(lo, hi):
-                            self._head_gen[k] = gen
-                return p + 1
+        # Tell the worker what we already hold. It builds the rows either way
+        # (there is no knowing a line is unchanged without rendering it), but if
+        # they still hash to the same value it keeps them: the pickling, the
+        # transfer, the unpickling and the Head rebuild are about 40% of what a
+        # page costs, and after a rename almost every page is unchanged. Sending
+        # the expectation rather than asking first means a page that HAS changed
+        # still costs one round trip.
         try:
             payload = self._prog.client.call(
-                "heads", addr=hex(addr), count=self.PAGE, annotate=True)
+                "heads", addr=hex(addr), count=self.PAGE, annotate=True,
+                expect="" if want_digest is None else str(want_digest))
         except Exception:  # noqa: BLE001 -- keep the old text rather than blank
+            return p + 1
+        if (isinstance(payload, dict) and "heads" not in payload
+                and payload.get("count") == want_rows):
+            with self._lock:
+                if self._text_gen == gen and len(self._heads) >= hi:
+                    for k in range(lo, hi):
+                        self._head_gen[k] = gen
             return p + 1
         rows = payload.get("heads", []) if isinstance(payload, dict) else []
         page = self._build_page(rows)
