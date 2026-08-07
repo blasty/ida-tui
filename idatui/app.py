@@ -2052,10 +2052,31 @@ class HexView(ScrollView, can_focus=True):
         if data is None:
             segs.append(Segment("… fetching", _S_DIM))
         else:
+            # Emit RUNS, not one segment per byte. A row is 32 cells whose style
+            # almost never changes (one cursor cell, or a trace boundary), and a
+            # segment per cell made every hex frame 1540 segments for the
+            # compositor to cut and merge again.
             n = len(data)
+            run: list[str] = []
+            run_st = None
+
+            def flush(st=None, _segs=segs) -> None:
+                nonlocal run, run_st
+                if run:
+                    _segs.append(Segment("".join(run), run_st))
+                    run = []
+                run_st = st
+
+            def put(text: str, st) -> None:
+                nonlocal run_st
+                if st is not run_st:
+                    flush(st)
+                run.append(text)
+
+            run_st = _S_HEX
             for i in range(16):
                 if i == 8:
-                    segs.append(Segment(" ", _S_HEX))
+                    put(" ", _S_HEX)
                 if i < n:
                     live = tknown is not None and tknown[i]
                     val = tmem[i] if live else data[i]
@@ -2065,10 +2086,10 @@ class HexView(ScrollView, can_focus=True):
                         st = _S_HEX
                     else:
                         st = _S_HEX_LIVE if live else _S_HEX_STALE
-                    segs.append(Segment(f"{val:02X} ", st))
+                    put(f"{val:02X} ", st)
                 else:
-                    segs.append(Segment("   ", _S_HEX))
-            segs.append(Segment(" |", _S_DIM))
+                    put("   ", _S_HEX)
+            put(" |", _S_DIM)
             for i in range(16):
                 if i < n:
                     live = tknown is not None and tknown[i]
@@ -2082,8 +2103,9 @@ class HexView(ScrollView, can_focus=True):
                         st = _S_HEX_LIVE if live else _S_HEX_STALE
                 else:
                     ch, st = " ", _S_ASCII
-                segs.append(Segment(ch, st))
-            segs.append(Segment("|", _S_DIM))
+                put(ch, st)
+            put("|", _S_DIM)
+            flush()
         return Strip(segs).adjust_cell_length(width, _S_HEX)
 
 

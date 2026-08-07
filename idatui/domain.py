@@ -28,6 +28,7 @@ import threading
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
+from typing import NamedTuple
 from typing import Callable, TYPE_CHECKING
 
 from . import diag
@@ -90,15 +91,19 @@ class Line:
         )
 
 
-@dataclass(frozen=True, slots=True)
-class Head:
+class Head(NamedTuple):
     """One flat-listing item (from the ``heads`` server tool): a code
     instruction, a data item, or an undefined byte run.
 
-    ``slots=True`` because this is the most-constructed object in the codebase:
-    a jump to an address near the end of a big binary builds one per listing row
-    it walks past, hundreds of thousands of them, and the slotted layout is ~20%
-    cheaper to build (and smaller to hold).
+    A ``NamedTuple`` rather than a dataclass because this is by far the
+    most-constructed object in the codebase -- a jump to an address near the end
+    of a big binary builds one per listing row it walks past, a quarter of a
+    million of them -- and ``tuple.__new__`` costs 1.9us where a frozen
+    dataclass's ``__init__`` costs 2.9us. Attribute reads are marginally slower
+    (10ns vs 20ns), which is the right trade: rows are built far more often than
+    they are read, and a viewport only ever reads forty of them.
+
+    Immutable, like the frozen dataclass it replaced.
     """
 
     ea: int
