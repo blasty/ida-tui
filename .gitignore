@@ -20,3 +20,4 @@ bin/
 core
 core.*
 .fastfeedback/
+tests/.synthetic/

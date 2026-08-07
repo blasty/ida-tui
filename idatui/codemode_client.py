@@ -1062,6 +1062,17 @@ class CodeModeClient:
         self._last_entry: RegistryEntry | None = None
         self._connect_lock = threading.Lock()
 
+    def _database_exists(self) -> bool:
+        """Whether the IDB this open would target is already on disk.
+
+        Its loader switches are baked in, so they must not be sent again.
+        """
+        try:
+            target = self._output_database or expected_idb_path(self._path)
+        except Exception:  # noqa: BLE001 -- resolver unavailable: assume fresh
+            return False
+        return bool(target) and os.path.exists(target)
+
     def connect(self, timeout: float = 1800.0, progress=None) -> "CodeModeClient":
         _require_codemode()
         with self._connect_lock:
@@ -1078,17 +1089,25 @@ class CodeModeClient:
                 deadline = time.monotonic() + min(timeout, 60.0)
                 while True:
                     try:
+                        # Loader switches describe how to IMPORT a raw file and
+                        # are recorded in the database it produces. Sending them
+                        # again for a database that already exists is a FATAL
+                        # error in IDA itself ("Switch '-b400' can be used only
+                        # when loading a new file"), which kills the worker
+                        # before it can report anything useful. So: describe the
+                        # import only when there is an import to describe.
+                        fresh = self._new_database or not self._database_exists()
                         handle = DatabaseHandle.open(
                             self._path,
                             spawn=self._spawn,
                             timeout=max(0.1, timeout),
                             output_database=self._output_database,
-                            processor=self._processor,
+                            processor=self._processor if fresh else None,
                             # DatabaseHandle calls this image_base and wants the
                             # natural (16-byte aligned) address; it does the
                             # conversion to IDA's paragraph-based -b itself.
-                            image_base=self._loading_address,
-                            file_type=self._file_type,
+                            image_base=self._loading_address if fresh else None,
+                            file_type=self._file_type if fresh else None,
                             new_database=self._new_database,
                         )
                         break

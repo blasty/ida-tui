@@ -17,10 +17,13 @@ import sys
 import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from textual.widgets import Input, Static  # noqa: E402
 
 from idatui.app import ConfirmScreen, IdaTui, ListingView  # noqa: E402
+from _fixtures import staged, synthetic  # noqa: E402
+from idatui._sync import settle  # noqa: E402
 
 PASS = FAIL = 0
 
@@ -46,28 +49,63 @@ async def wait(pred, pilot, t=240.0):
     return False
 
 
-async def run() -> int:
-    with tempfile.TemporaryDirectory() as tmp:
-        # Random bytes so IDA finds no functions... but with REAL AArch64
-        # instructions planted at a known offset. Whether arbitrary random bytes
-        # happen to decode is chance, and a test that depends on chance tells you
-        # nothing on the run where it fails.
-        data = bytearray(os.urandom(64 * 1024))
+#: File offset of the planted instruction run -> ea 0x4000 + PLANTED.
+PLANTED = 0x40
+
+
+def _blob_bytes() -> bytes:
+    """A DETERMINISTIC pseudo-random blob with real AArch64 instructions planted.
+
+    Seeded, not os.urandom: the bytes must be identical every run or the
+    pristine-database cache can never apply (this suite used to pay ~40s of
+    auto-analysis per run because the content, and the path, changed each time).
+    Determinism also removes a genuine flake -- whether 64KB of chance bytes
+    contains something IDA reads as a function is luck, and "and really has no
+    functions" is asserted below.
+    """
+    import random
+    data = bytearray(random.Random(0xB10BCAFE).randbytes(64 * 1024))
         # -parm puts IDA in AArch64 mode, so these are A64 encodings; the ARM32
         # spelling of a nop (0xE1A00000) is NOT decodable there and made this
         # test fail for a reason that had nothing to do with what it checks.
-        planted = 0x40                       # file offset -> ea 0x4040
-        for k, insn in enumerate((0xD503201F,   # nop
-                                  0xD503201F,   # nop
-                                  0xD65F03C0)):  # ret  <- the run must stop here
-            data[planted + k * 4:planted + k * 4 + 4] = insn.to_bytes(4, "little")
-        blob = os.path.join(tmp, "rnd.bin")
-        with open(blob, "wb") as f:
-            f.write(bytes(data))
+    for k, insn in enumerate((0xD503201F,   # nop
+                              0xD503201F,   # nop
+                              0xD65F03C0)):  # ret  <- the run must stop here
+        data[PLANTED + k * 4:PLANTED + k * 4 + 4] = insn.to_bytes(4, "little")
+    return bytes(data)
 
+
+#: -parm puts IDA in AArch64 mode (the ARM32 spelling of a nop is not decodable
+#: there); -b400 sets the image base. The cached database must be built with the
+#: SAME switches, so both go through one factory.
+BLOB_ARGS = "-parm -b400"
+
+
+def _blob_app(path):
+    return IdaTui(open_path=path, keepalive=False, load_args=BLOB_ARGS)
+
+
+def head_at(lst, ea):
+    """The listing row for ``ea`` off the LIVE model, or None.
+
+    Always re-reads ``lst.model``: an edit may rebuild the model, and holding
+    the old object shows pre-edit rows -- which looks exactly like the edit
+    silently failing.
+    """
+    m = lst.model
+    if m is None:
+        return None
+    i = m.index_of_ea(ea)
+    return m.get(i) if i is not None and i >= 0 else None
+
+
+async def run() -> int:
+    blob_src = synthetic("rnd.bin", _blob_bytes)
+    # staged() analyses once ever and copies the result in on later runs.
+    async with staged(blob_src, _blob_app) as blob:
         # Skip the dialog by answering up front; this test is about what
         # happens AFTER a described blob turns out to contain nothing.
-        app = IdaTui(open_path=blob, keepalive=False, load_args="-parm -b400")
+        app = _blob_app(blob)
         async with app.run_test(size=(140, 44)) as pilot:
             ok = await wait(lambda: app._func_index is not None
                             and app._func_index.complete, pilot)
@@ -126,7 +164,7 @@ async def run() -> int:
                   i >= 0 and m.get(i).ea == 0x4021,
                   f"row={i} ea={m.get(i).ea if i >= 0 else None}")
 
-            target = 0x4000 + planted        # a NOP we put there ourselves
+            target = 0x4000 + PLANTED        # a NOP we put there ourselves
             lst.cursor = m.index_of_ea(target)
             lst._scroll_cursor_into_view()
             await pilot.pause(0.1)
@@ -134,12 +172,18 @@ async def run() -> int:
                   lst._cursor_ea() == target,
                   f"{lst._cursor_ea():#x} want {target:#x}")
             await pilot.press("c")
-            await pilot.pause(2.0)
-            # Defining an item REBUILDS the listing model, so re-read it from the
-            # view: holding the old object shows the pre-edit rows and looks
-            # exactly like the edit silently failing.
+            # settle(), not a fixed sleep AND not a bare predicate: an edit can
+            # look done for a moment and then be replaced when a queued listing
+            # rebuild lands, so the gate has to be "the row is code AND the app
+            # has stopped working". settle() is the same helper the app's own
+            # RPC layer uses, so tests and driver agree on what "done" means.
+            await settle(app, lambda: (lambda h: h is not None and h.kind == "code")(
+                head_at(lst, target)), timeout=30)
+            # Re-read the model: defining an item rebuilds it, and holding the
+            # old object shows pre-edit rows -- which looks exactly like the
+            # edit silently failing.
             m = lst.model
-            h = m.get(m.index_of_ea(target))
+            h = head_at(lst, target)
             check("`c` on a chosen byte carves an instruction there",
                   h is not None and h.kind == "code",
                   f"kind={h.kind if h else None} text={h.text if h else None!r}")
@@ -184,9 +228,17 @@ async def run() -> int:
             for ch in "note":
                 await pilot.press(ch)
             await pilot.press("enter")
-            await wait(lambda: lst.model is not old and lst.model is not None,
-                       pilot, 30)
-            await pilot.pause(0.4)
+            # Wait for the COMMENT ITSELF to show up, not for the model object to
+            # be replaced: a comment now re-renders the listing in place (the
+            # walk is kept), so `model is not old` never becomes true and this
+            # burned its full 30s timeout on every run -- after which the check
+            # below passed vacuously, because nothing had happened at all.
+            # The prompt closing plus quiescence is the real end of the edit.
+            # (The listing re-renders its text lazily, so the comment is not
+            # necessarily visible in model rows the moment the worker returns --
+            # which is why this waits for the app, not for the text.)
+            await settle(app, lambda: not app.query_one("#comment", Input).display,
+                         timeout=30)
             check("commenting leaves the view where it was",
                   lst.model.get(round(lst.scroll_offset.y)).ea == ctop
                   and lst._cursor_ea() == ccur,
@@ -208,7 +260,12 @@ async def run() -> int:
             check("scrolled somewhere with rows above us",
                   round(lst.scroll_offset.y) > 0, f"top={lst.scroll_offset.y}")
             await pilot.press("c")
-            await pilot.pause(2.5)
+            # No predicate here on purpose: this spot is random data, so the
+            # carve may legitimately produce nothing and "the row became code"
+            # would never hold (it timed out for 30s and then passed anyway).
+            # What is being checked is that the VIEW did not move, so the gate
+            # is simply "the app has finished reacting".
+            await settle(app, timeout=30)
             m2 = lst.model
             top_after = m2.get(round(lst.scroll_offset.y)).ea
             check("carving leaves the scroll position where it was",
