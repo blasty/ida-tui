@@ -6,7 +6,10 @@ verbs type into the real prompts character by character -- which is the whole
 point for a recording: it looks like someone using it, because it is the app
 being used.
 
-    # simplest: it spawns its own pane on a scratch copy and cleans up after
+    # render the TUI in THIS terminal and drive it (best for a single-pane capture)
+    python tools/demo.py --here
+
+    # or give it its own pane in tmux/zellij
     python tools/demo.py --spawn
 
     # or record a session you set up yourself (your pane, your size, your zoom)
@@ -50,6 +53,7 @@ class Demo:
         self.c = client
         self.speed = speed
         self.quiet = quiet
+        self.log: list[str] = []
         self.undo: list[tuple[str, dict]] = []
 
     # -- pacing ------------------------------------------------------------ #
@@ -58,6 +62,7 @@ class Demo:
         time.sleep(max(0.0, seconds * self.speed))
 
     def say(self, text: str) -> None:
+        self.log.append(text)
         if not self.quiet:
             print(f"  \033[36m{text}\033[0m", flush=True)
 
@@ -252,13 +257,48 @@ def spawn_pane(target: str) -> tuple[str, str, str]:
     return row["sock"], row.get("pane", ""), tmp
 
 
+def run_here(target: str) -> tuple[subprocess.Popen, str, str]:
+    """Launch the TUI in THIS terminal and return (proc, sock, tmpdir).
+
+    stdio is inherited, so the app draws on the terminal that ran the demo --
+    which is what you want when the capture is one pane. It goes through the
+    ./ida-tui launcher rather than re-deriving the interpreter, so the
+    $IDATUI_PYTHON rules stay in exactly one place.
+    """
+    tmp = tempfile.mkdtemp(prefix="idatui-demo-")
+    copy = os.path.join(tmp, os.path.basename(target))
+    shutil.copy2(target, copy)
+    if os.path.exists(target + ".i64"):
+        shutil.copy2(target + ".i64", copy + ".i64")
+    sockdir = os.environ.get("XDG_RUNTIME_DIR") or "/tmp"
+    sock = os.path.join(sockdir, f"idatui-demo-{os.getpid()}.sock")
+    proc = subprocess.Popen([os.path.join(REPO, "ida-tui"), copy, "--rpc", sock],
+                            cwd=REPO)          # stdio inherited on purpose
+    return proc, sock, tmp
+
+
+def wait_for_socket(proc: subprocess.Popen, sock: str, timeout: float = 600.0) -> bool:
+    """Poll for the RPC socket, failing fast if the TUI exits first."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if os.path.exists(sock):
+            return True
+        if proc.poll() is not None:            # died before it ever listened
+            return False
+        time.sleep(0.1)
+    return False
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--sock", help="RPC socket of a running TUI (see --rpc)")
     ap.add_argument("--spawn", action="store_true",
                     help="spawn a pane on a scratch copy, then tear it down")
-    ap.add_argument("--target", default=DEFAULT_TARGET, help="binary for --spawn")
+    ap.add_argument("--here", "--inline", dest="here", action="store_true",
+                    help="run the TUI in THIS terminal (single-pane recording)")
+    ap.add_argument("--target", default=DEFAULT_TARGET,
+                    help="binary for --here/--spawn")
     ap.add_argument("--speed", type=float, default=1.0,
                     help="pause multiplier; 0.5 = twice as fast (default 1.0)")
     ap.add_argument("--only", help="comma-separated scene names")
@@ -273,16 +313,30 @@ def main(argv=None) -> int:
             print(f"  {name:12s} {(fn.__doc__ or '').splitlines()[0]}")
         return 0
 
-    sock, pane, tmp = args.sock, "", ""
+    sock, pane, tmp, proc = args.sock, "", "", None
+    if args.here and args.spawn:
+        ap.error("--here and --spawn are mutually exclusive")
+    if (args.here or args.spawn) and not os.path.isfile(args.target):
+        print(f"no such binary: {args.target}", file=sys.stderr)
+        return 2
     if args.spawn:
-        if not os.path.isfile(args.target):
-            print(f"no such binary: {args.target}", file=sys.stderr)
-            return 2
         print(f"spawning a pane on a copy of {os.path.basename(args.target)}…")
         sock, pane, tmp = spawn_pane(args.target)
         print(f"  sock={sock} pane={pane}")
+    elif args.here:
+        proc, sock, tmp = run_here(args.target)
+        if not wait_for_socket(proc, sock):
+            print("the TUI exited before it was drivable", file=sys.stderr)
+            shutil.rmtree(tmp, ignore_errors=True)
+            return 1
     if not sock:
-        ap.error("pass --sock <path> or --spawn")
+        ap.error("pass --sock <path>, --here, or --spawn")
+
+    # Inline mode shares the screen with the app, so narration is collected and
+    # replayed once the alternate screen is gone rather than drawn over it.
+    transcript: list[str] = []
+    if args.here:
+        args.quiet = True
 
     wanted = set(args.only.split(",")) if args.only else None
     scenes = [(n, f) for n, f in SCENES if wanted is None or n in wanted]
@@ -298,14 +352,22 @@ def main(argv=None) -> int:
                         break
                     time.sleep(0.5)
             demo = Demo(client, speed=args.speed, quiet=args.quiet)
-            print(f"\n\033[1m-- ida-tui demo, {len(scenes)} scenes --\033[0m\n")
+            if not args.quiet:
+                print(f"\n\033[1m-- ida-tui demo, {len(scenes)} scenes --\033[0m\n")
             for name, fn in scenes:
-                print(f"\033[1m[{name}]\033[0m", flush=True)
+                if not args.quiet:
+                    print(f"\033[1m[{name}]\033[0m", flush=True)
+                demo.log.append(f"[{name}]")
                 fn(demo)
             if not args.no_revert:
-                print("\033[1m[revert]\033[0m", flush=True)
+                if not args.quiet:
+                    print("\033[1m[revert]\033[0m", flush=True)
                 demo.revert()
-            print("\ndone.")
+            transcript = demo.log
+            if args.here:
+                demo.do("quit")
+            if not args.quiet:
+                print("\ndone.")
     except KeyboardInterrupt:
         print("\ninterrupted", file=sys.stderr)
         rc = 130
@@ -316,8 +378,22 @@ def main(argv=None) -> int:
         if args.spawn and sock:
             subprocess.run([sys.executable, "-m", "idatui.pane", "stop",
                             "--sock", sock], cwd=REPO, capture_output=True)
-            if tmp:
-                shutil.rmtree(tmp, ignore_errors=True)
+        if proc is not None:
+            try:
+                proc.wait(timeout=30)
+            except subprocess.TimeoutExpired:
+                proc.terminate()
+                try:
+                    proc.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+        if tmp:
+            shutil.rmtree(tmp, ignore_errors=True)
+        if args.here and transcript:      # the alt screen is gone: safe to print
+            print("\n\033[1m-- ida-tui demo --\033[0m")
+            for line in transcript:
+                print(f"  {line}" if not line.startswith("[") else f"\033[1m{line}\033[0m")
+            print("done.")
     return rc
 
 
