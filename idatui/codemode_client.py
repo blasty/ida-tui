@@ -15,11 +15,13 @@ IDAPython modules that Code Mode deliberately makes importable.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shlex
 import threading
 import time
+from pathlib import Path
 from textwrap import dedent
 from typing import Any
 
@@ -167,180 +169,6 @@ def _script(args: dict[str, Any], body: str) -> str:
     """Bind JSON arguments without interpolating user text into Python code."""
     encoded = json.dumps(args, ensure_ascii=False, separators=(",", ":"))
     return f"import json\na = json.loads({encoded!r})\n{dedent(body).strip()}\n"
-
-
-# Rich flat-listing generation is the largest ida-domain gap in this port.
-# ida-domain can enumerate heads and render plain disassembly, but it does not
-# expose undefined runs, IDA colour spans, function banners, or expanded UDT
-# members. Keep that IDAPython-only logic isolated in this one operation.
-_HEADS = r'''
-import ida_bytes, ida_funcs, ida_idaapi, ida_lines, ida_name, ida_nalt, ida_segment, ida_typeinf
-start = int(str(a["addr"]), 16)
-count = max(1, min(int(a.get("count", 200)), 2000))
-offset = max(0, int(a.get("offset", 0)))
-annotate = bool(a.get("annotate", False))
-seg = db.segments.get_at(start)
-if seg is None:
-    result = {"addr": a["addr"], "error": "no segment", "heads": [], "cursor": {"done": True}}
-else:
-    lo, hi = int(seg.start_ea), int(seg.end_ea)
-    if a.get("end"):
-        hi = min(hi, int(str(a["end"]), 16))
-
-    span_names = {
-        "insn": ("SCOLOR_INSN", "SCOLOR_KEYWORD", "SCOLOR_ASMDIR", "SCOLOR_MACRO"),
-        "reg": ("SCOLOR_REG",),
-        "num": ("SCOLOR_NUMBER", "SCOLOR_CHAR", "SCOLOR_BINPREF"),
-        "str": ("SCOLOR_STRING",),
-        "name": ("SCOLOR_DATNAME", "SCOLOR_CODNAME", "SCOLOR_LOCNAME", "SCOLOR_IMPNAME",
-                 "SCOLOR_DEMNAME", "SCOLOR_LIBNAME", "SCOLOR_CNAME", "SCOLOR_DNAME",
-                 "SCOLOR_CREF", "SCOLOR_DREF", "SCOLOR_CREFTAIL", "SCOLOR_DREFTAIL"),
-        "seg": ("SCOLOR_SEGNAME",),
-        "cmt": ("SCOLOR_AUTOCMT", "SCOLOR_REGCMT", "SCOLOR_RPTCMT", "SCOLOR_VOIDOP"),
-        "punct": ("SCOLOR_SYMBOL", "SCOLOR_ALTOP", "SCOLOR_HIDNAME"),
-        "err": ("SCOLOR_ERROR",),
-    }
-    tag_kinds = {}
-    for kind, names in span_names.items():
-        for name in names:
-            value = getattr(ida_lines, name, None)
-            if isinstance(value, str) and value:
-                tag_kinds[value[0]] = kind
-            elif isinstance(value, int):
-                tag_kinds[chr(value)] = kind
-
-    def spans(tagged):
-        on, off, esc = "\x01", "\x02", "\x03"
-        addr_tag = chr(getattr(ida_lines, "COLOR_ADDR", 0x28))
-        addr_len = int(getattr(ida_lines, "COLOR_ADDR_SIZE", 16))
-        out, stack, buf = [], [], []
-        def flush():
-            if buf:
-                out.append([stack[-1] if stack else "text", "".join(buf)])
-                buf.clear()
-        i = 0
-        while i < len(tagged):
-            ch = tagged[i]
-            if ch == on and i + 1 < len(tagged):
-                tag = tagged[i + 1]
-                if tag == addr_tag:
-                    i += 2 + addr_len
-                    continue
-                flush(); stack.append(tag_kinds.get(tag, "text")); i += 2; continue
-            if ch == off and i + 1 < len(tagged):
-                flush()
-                if stack: stack.pop()
-                i += 2; continue
-            if ch == esc and i + 1 < len(tagged):
-                buf.append(tagged[i + 1]); i += 2; continue
-            buf.append(ch); i += 1
-        flush()
-        collapsed, previous_space = [], False
-        for kind, text in out:
-            acc = []
-            for ch in text:
-                if ch.isspace():
-                    if previous_space: continue
-                    acc.append(" "); previous_space = True
-                else:
-                    acc.append(ch); previous_space = False
-            if acc: collapsed.append([kind, "".join(acc)])
-        if collapsed:
-            collapsed[0][1] = collapsed[0][1].lstrip()
-            collapsed[-1][1] = collapsed[-1][1].rstrip()
-        return [[kind, text] for kind, text in collapsed if text]
-
-    def row(ea):
-        flags = ida_bytes.get_flags(ea)
-        kind = "code" if ida_bytes.is_code(flags) else ("data" if ida_bytes.is_data(flags) else "unknown")
-        tagged = ida_lines.generate_disasm_line(ea, 0) or ""
-        text = " ".join(ida_lines.tag_remove(tagged).split()) if tagged else ""
-        item = {"ea": hex(ea), "kind": kind, "size": int(ida_bytes.get_item_size(ea)), "text": text}
-        if tagged:
-            rich = spans(tagged)
-            if " ".join("".join(x[1] for x in rich).split()) == text:
-                item["spans"] = rich
-        name = ida_name.get_ea_name(ea)
-        if name: item["name"] = name
-        return item
-
-    def unknown_row(ea, size):
-        if size <= 1: return row(ea)
-        item = {"ea": hex(ea), "kind": "unknown", "size": int(size), "text": f"db {size} dup(?)"}
-        name = ida_name.get_ea_name(ea)
-        if name: item["name"] = name
-        return item
-
-    def members(ea):
-        tif = db.types.get_at(ea)
-        if tif is None or not tif.is_udt(): return []
-        answer = []
-        for member in db.types.get_udt_members(tif):
-            type_text = member.type.dstr() or ""
-            text = f"+{member.offset:X} {member.name}" + (f" {type_text}" if type_text else "")
-            answer.append({"ea": hex(ea + member.offset), "kind": "member",
-                           "size": int(member.size), "text": text})
-        return answer
-
-    def is_unknown(ea):
-        flags = ida_bytes.get_flags(ea)
-        return not (ida_bytes.is_code(flags) or ida_bytes.is_data(flags))
-    def run_end(ea):
-        nxt = ida_bytes.next_head(ea, hi)
-        return nxt if nxt != ida_idaapi.BADADDR and ea < nxt <= hi else hi
-    def advance(ea):
-        if is_unknown(ea): return run_end(ea)
-        nxt = ida_bytes.get_item_end(ea)
-        return nxt if nxt > ea else ea + 1
-    def rows_for(ea):
-        if is_unknown(ea): return [unknown_row(ea, run_end(ea) - ea)]
-        fn = db.functions.get_at(ea) if annotate else None
-        at_start = fn is not None and int(fn.start_ea) == ea
-        answer = []
-        if at_start:
-            name = db.functions.get_name(fn) or f"sub_{ea:X}"
-            answer += [
-                {"ea": hex(ea), "kind": "sep", "size": 0, "text": ""},
-                {"ea": hex(ea), "kind": "sep", "size": 0,
-                 "text": "; " + "=" * 15 + " S U B R O U T I N E " + "=" * 15},
-                {"ea": hex(ea), "kind": "funchdr", "size": 0,
-                 "text": name + " proc", "name": name},
-            ]
-        item = row(ea)
-        if at_start:
-            item["name"] = None
-        elif annotate and item["kind"] == "code" and item.get("name"):
-            name = item["name"]
-            answer.append({"ea": hex(ea), "kind": "label", "size": 0,
-                           "text": name + ":", "name": name})
-            item["name"] = None
-        answer.append(item)
-        if item["kind"] == "data": answer += members(ea)
-        if fn is not None and ida_bytes.get_item_end(ea) >= int(fn.end_ea):
-            name = db.functions.get_name(fn) or f"sub_{int(fn.start_ea):X}"
-            answer += [
-                {"ea": hex(ea), "kind": "funchdr", "size": 0,
-                 "text": name + " endp", "name": name},
-                {"ea": hex(ea), "kind": "sep", "size": 0, "text": "; " + "-" * 60},
-            ]
-        return answer
-
-    ea = ida_bytes.get_item_head(start)
-    if ea == ida_idaapi.BADADDR: ea = start
-    for _ in range(offset):
-        if ea >= hi: break
-        ea = advance(ea)
-    rows = []
-    more = False
-    while ea != ida_idaapi.BADADDR and ea < hi:
-        if len(rows) >= count:
-            more = True; break
-        rows += rows_for(ea)
-        ea = advance(ea)
-    result = {"addr": a["addr"], "heads": rows,
-              "cursor": {"next": hex(ea)} if more else {"done": True}}
-result
-'''
 
 
 _DECOMP_MAP_HELPER = r'''
@@ -1046,6 +874,72 @@ else:
 result
 '''
 
+# `heads` and the operand-format tools are the port's IDAPython island: the
+# continuous listing's presentation model (undefined runs, colour spans, operand
+# extents, banners, struct members, the digest protocol) and IDA/Hex-Rays number
+# formats have no ida-domain surface. Rather than paraphrase ~1100 lines of
+# performance-tuned, behaviour-sensitive code into string literals, they stay
+# real, diffable source in idatui/remote_tools.py and are shipped to the database
+# process as text. Read once at import; the file ships beside this module.
+_REMOTE_LIB = (Path(__file__).with_name("remote_tools.py")).read_text(encoding="utf-8")
+
+#: Versioned by content, so editing remote_tools.py re-installs it instead of
+#: silently running the copy a long-lived worker already has.
+_REMOTE_MODULE = "_idatui_remote_" + hashlib.sha1(
+    _REMOTE_LIB.encode("utf-8")).hexdigest()[:12]
+
+#: Sent back when the database process has not got the library yet; the client
+#: installs it and retries once. Amortised, a worker receives it exactly once.
+_NEED_LIB = "__idatui_needs_remote_lib__"
+
+#: Installs the library as a real module in the database process. Persisting it
+#: in sys.modules is what makes the module-level caches (the tag maps, and the
+#: line-render lru_cache the listing's throughput depends on) survive between
+#: calls -- execute_python builds a fresh namespace every time, so a library
+#: exec'd inline is rebuilt, and its caches thrown away, on every single call.
+_INSTALL_LIB = f'''
+import sys, types
+_m = types.ModuleType({_REMOTE_MODULE!r})
+exec(compile(a["source"], {_REMOTE_MODULE!r}, "exec"), _m.__dict__)
+sys.modules[{_REMOTE_MODULE!r}] = _m
+result = True
+result
+'''
+
+
+def _remote_op(call: str) -> str:
+    """A snippet that calls one of the carried-over tools by its real signature.
+
+    Costs one short request: the library is imported from the database process's
+    own sys.modules, not shipped again.
+    """
+    return (f"import sys\n"
+            f"_m = sys.modules.get({_REMOTE_MODULE!r})\n"
+            f"result = {{{_NEED_LIB!r}: True}} if _m is None else _m.{call}\n"
+            f"result\n")
+
+
+_OPERATIONS["op_format"] = _remote_op(
+    'op_format(addr=a["addr"], mode=a.get("mode", "cycle"),'
+    ' col=int(a.get("col", -1)), n=int(a.get("n", -1)))')
+_OPERATIONS["pc_nums"] = _remote_op('pc_nums(addr=a["addr"])')
+_OPERATIONS["pc_num_format"] = _remote_op(
+    'pc_num_format(addr=a["addr"], mode=a.get("mode", "cycle"),'
+    ' line=int(a.get("line", -1)), col=int(a.get("col", -1)),'
+    ' ea=a.get("ea", ""), opnum=int(a.get("opnum", -1)))')
+
+# The listing walker itself. Replaces the port's re-implementation, which
+# rendered no per-operand extents (so no keypress could say which literal it
+# would reformat) and had no digest/expect support (so every page was re-sent
+# after any edit), and whose span walk was the per-character loop our own
+# version had already been rewritten to avoid.
+_HEADS = _remote_op(
+    'heads(addr=a["addr"], count=int(a.get("count", 200)),'
+    ' offset=int(a.get("offset", 0)), end=a.get("end", ""),'
+    ' back=bool(a.get("back", False)), annotate=bool(a.get("annotate", False)),'
+    ' expect=a.get("expect", ""))')
+
+
 # The graph view's only backend call. Blocks are address RANGES, never text:
 # the client re-renders them with `heads`, so boxes reuse the exact listing rows
 # (colours, operand marks, trail painting) instead of growing a second renderer.
@@ -1232,7 +1126,13 @@ class CodeModeClient:
         if body is None:
             raise IDAToolError(operation, f"unknown ida-tui Code Mode operation: {operation}")
         try:
-            return self.execute_python(_script(args, body), timeout=timeout)
+            answer = self.execute_python(_script(args, body), timeout=timeout)
+            if isinstance(answer, dict) and answer.get(_NEED_LIB):
+                # First call against this database process (or a restarted one).
+                self.execute_python(_script({"source": _REMOTE_LIB}, _INSTALL_LIB),
+                                    timeout=timeout)
+                answer = self.execute_python(_script(args, body), timeout=timeout)
+            return answer
         except IDAToolError as exc:
             if exc.tool == "execute_python":
                 raise IDAToolError(operation, exc.message) from exc
