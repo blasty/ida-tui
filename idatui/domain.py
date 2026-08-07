@@ -1759,10 +1759,13 @@ class Program:
             return None
         f = payload.get("func") or {}
         lo = min(b.start for b in blocks)
-        hi = max(b.end for b in blocks)
-        rows = self._heads_between(lo, hi)
+        rows = self._block_rows(blocks)
+        eas = [h.ea for h in rows]
         for b in blocks:
-            b.rows = [h for h in rows if b.start <= h.ea < b.end]
+            # bisect, not a scan per block: a 400-block function against a few
+            # thousand rows is a million comparisons done for nothing.
+            b.rows = rows[bisect.bisect_left(eas, b.start):
+                          bisect.bisect_left(eas, b.end)]
         fcv = Flowchart(
             func_ea=_as_int(f.get("addr", lo)),
             name=str(f.get("name") or f"sub_{lo:X}"),
@@ -1772,6 +1775,32 @@ class Program:
         with self._lock:
             self._flowcharts[key] = (fcv, gen)
         return fcv
+
+    #: Bytes of padding between two blocks that are still worth fetching in one
+    #: call. Alignment gaps are a few bytes; a function chunk is far away.
+    _BLOCK_GAP = 256
+
+    def _block_rows(self, blocks: list[BasicBlock]) -> list[Head]:
+        """Listing rows covering ``blocks``, address-ordered.
+
+        Fetches the blocks' merged extents, NOT their convex hull. IDA puts a
+        function's cold/tail chunks a long way from its entry, so the hull of a
+        1.4 KB function can be 680 KB wide: walking it fetched 128 000 listing
+        rows and took three seconds to draw a graph, all but 300 of them thrown
+        away immediately. Adjacent blocks coalesce, so an ordinary contiguous
+        function is still exactly one call.
+        """
+        spans: list[list[int]] = []
+        for start, end in sorted((b.start, b.end) for b in blocks):
+            if spans and start <= spans[-1][1] + self._BLOCK_GAP:
+                if end > spans[-1][1]:
+                    spans[-1][1] = end
+            else:
+                spans.append([start, end])
+        out: list[Head] = []
+        for start, end in spans:
+            out.extend(self._heads_between(start, end))
+        return out
 
     def _heads_between(self, lo: int, hi: int) -> list[Head]:
         """Listing rows for [lo, hi), paged. Same tool and same ``Head`` shape
