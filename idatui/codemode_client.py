@@ -719,16 +719,60 @@ for query in queries:
 result = {"result": all_results}
 result
 ''',
+    # A comment must land in BOTH views, and the pseudocode half is not a
+    # simple set: db.comments.set_at() alone leaves the pseudocode unchanged.
+    # Hex-Rays comments are anchored to a ctree location (treeloc_t), and an
+    # anchor the ctree does not actually own is dropped as an "orphan" -- so the
+    # itp slot has to be searched until one sticks, exactly as IDA's own UI does.
+    # Without it a comment silently never appears in the decompilation.
     "set_comments": r'''
+import idaapi, idc, ida_hexrays
 rows = []
 for item in a.get("items", []):
-    ea, text = int(str(item["addr"]), 16), str(item.get("comment") or "")
+    addr_s = str(item.get("addr", ""))
+    text = str(item.get("comment") or "")
     try:
-        if text: ok = bool(db.comments.set_at(ea, text))
-        else: db.comments.delete_at(ea); ok = True
-        rows.append({"addr": hex(ea), "ok": ok})
+        ea = int(addr_s, 16)
+        if not idaapi.set_cmt(ea, text, False):
+            rows.append({"addr": addr_s,
+                         "error": f"Failed to set disassembly comment at {hex(ea)}"})
+            continue
+        if not ida_hexrays.init_hexrays_plugin():
+            rows.append({"addr": addr_s}); continue
+        try:
+            cfunc = ida_hexrays.decompile(ea)
+        except Exception:
+            cfunc = None
+        if cfunc is None:
+            rows.append({"addr": addr_s}); continue
+        if ea == cfunc.entry_ea:
+            # The signature line carries no ctree item: it is a function comment.
+            idc.set_func_cmt(ea, text, True)
+            cfunc.refresh_func_ctext()
+            rows.append({"addr": addr_s}); continue
+        eamap = cfunc.get_eamap()
+        if ea not in eamap:
+            rows.append({"addr": addr_s,
+                         "error": f"Failed to set decompiler comment at {hex(ea)}"})
+            continue
+        nearest_ea = eamap[ea][0].ea
+        if cfunc.has_orphan_cmts():
+            cfunc.del_orphan_cmts(); cfunc.save_user_cmts()
+        tl = idaapi.treeloc_t(); tl.ea = nearest_ea
+        placed = False
+        for itp in range(idaapi.ITP_SEMI, idaapi.ITP_COLON):
+            tl.itp = itp
+            cfunc.set_user_cmt(tl, text)
+            cfunc.save_user_cmts()
+            cfunc.refresh_func_ctext()
+            if not cfunc.has_orphan_cmts():
+                placed = True; break
+            cfunc.del_orphan_cmts(); cfunc.save_user_cmts()
+        rows.append({"addr": addr_s} if placed else
+                    {"addr": addr_s,
+                     "error": f"Failed to set decompiler comment at {hex(ea)}"})
     except Exception as exc:
-        rows.append({"addr": hex(ea), "ok": False, "error": str(exc)})
+        rows.append({"addr": addr_s, "error": str(exc)})
 result = {"result": rows}
 result
 ''',
@@ -920,6 +964,54 @@ else:
             result.update({"reason": failure.desc() or f"error {failure.code}",
                            "code": int(failure.code), "errea": hex(int(failure.errea))})
     except Exception as exc: result["reason"] = f"{type(exc).__name__}: {exc}"
+result
+'''
+
+# The graph view's only backend call. Blocks are address RANGES, never text:
+# the client re-renders them with `heads`, so boxes reuse the exact listing rows
+# (colours, operand marks, trail painting) instead of growing a second renderer.
+#
+# ida-domain exposes no basic-block/edge-kind surface, so this stays on ida_gdl.
+_OPERATIONS["flowchart"] = r'''
+import ida_funcs, ida_gdl
+ea = int(str(a["addr"]), 16)
+fn = ida_funcs.get_func(ea)
+if fn is None:
+    result = {"addr": hex(ea), "error": "no function at that address", "blocks": []}
+else:
+    fc = ida_gdl.FlowChart(fn, flags=ida_gdl.FC_PREDS)
+    index, order = {}, []
+    for bb in fc:
+        index[bb.start_ea] = len(order)
+        order.append(bb)
+    blocks = []
+    for bb in order:
+        sl = [s for s in bb.succs() if s.start_ea in index]
+        succs = []
+        for s in sl:
+            # Edge kind is what the graph view colours by: an n-way dispatch is
+            # "switch", a successor that is literally the next address falls
+            # through, anything else is a taken branch.
+            if len(sl) > 2: kind = "switch"
+            elif s.start_ea == bb.end_ea: kind = "fall"
+            else: kind = "jump"
+            succs.append([index[s.start_ea], kind])
+        blocks.append({"id": index[bb.start_ea], "start": hex(int(bb.start_ea)),
+                       "end": hex(int(bb.end_ea)), "succs": succs})
+    result = {"addr": hex(ea),
+              "func": {"addr": hex(int(fn.start_ea)), "end": hex(int(fn.end_ea)),
+                       "name": ida_funcs.get_func_name(fn.start_ea) or ""},
+              "entry": index.get(fn.start_ea, 0), "blocks": blocks}
+result
+'''
+
+# Only ever reached as domain.py's fallback when file_regions yields nothing.
+_OPERATIONS["survey_binary"] = r'''
+segments = []
+for seg in db.segments.get_all():
+    segments.append({"start": hex(int(seg.start_ea)), "end": hex(int(seg.end_ea)),
+                     "name": db.segments.get_name(seg) or ""})
+result = {"segments": segments}
 result
 '''
 
