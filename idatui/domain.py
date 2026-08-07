@@ -906,6 +906,51 @@ class ListingModel:
     def __len__(self) -> int:
         return self.loaded()
 
+    def truncate_from(self, ea: int) -> bool:
+        """Drop the walk from the page an edit at ``ea`` could have moved.
+
+        An item edit changes structure, but only *locally*: every head before it
+        keeps its address and its row number. Throwing the whole model away made
+        the reload re-walk the segment -- 4.9 seconds on bash to make one byte
+        into data, for an edit the user made at the row they were looking at.
+
+        Two pages are dropped rather than one, because undefining can coalesce
+        backwards into the run in front of it. Beyond that the caller marks the
+        kept prefix text-stale, so every kept page is digest-checked on the next
+        read and a page that really did move fails its sequence check and forces
+        a rebuild. Safe by construction, not by argument.
+
+        Returns False if nothing worth keeping is left.
+        """
+        with self._lock:
+            if not (self.seg_start <= ea < self.seg_end):
+                return True                 # another segment; nothing moved here
+            if len(self._page_head) < 3:
+                return False                # barely walked; a rebuild is cheaper
+            p = bisect.bisect_right(self._page_addr, ea) - 1
+            p = max(p - 1, 0)
+            if p <= 0:
+                return False                # the edit is in the first pages
+            keep = self._page_head[p]
+            if keep <= 0:
+                return False
+            for h in self._heads[keep:]:
+                self._by_ea.pop(h.ea, None)
+            del self._heads[keep:]
+            del self._head_eas[keep:]
+            del self._head_gen[keep:]
+            del self._row_at[keep:]
+            del self._page_head[p:]
+            self._next = self._page_addr[p]
+            del self._page_addr[p:]
+            del self._page_digest[p:]
+            del self._page_rows[p:]
+            last = self._heads[-1]
+            self._rows = self._row_at[-1] + self._span(last)
+            self._done = False
+            self._ubytes.clear()   # undefined-run bytes behind the drop point
+            return True
+
     def invalidate_text(self) -> None:
         """A rename changed how rows READ, not which rows exist.
 
@@ -1589,22 +1634,41 @@ class Program:
         for lm in listings:
             lm.invalidate_text()
 
-    def bump_items(self) -> None:
+    def bump_items(self, ea: int | None = None) -> None:
         """Signal that item/function STRUCTURE changed (define code/data/func,
         undefine). Unlike a rename this can move instruction boundaries and
-        change function membership anywhere, so drop the disasm block caches,
-        the decompilation cache and the cached function indices outright, and
-        bump the name generation too (labels/names may appear or vanish)."""
+        change function membership, so drop the disasm block caches, the
+        decompilation cache and the cached function indices outright, and bump
+        the name generation too (labels/names may appear or vanish).
+
+        Given the address that was edited, the segment listing keeps the walk in
+        front of it instead of being thrown away: the rows before an edit keep
+        their addresses and their row numbers. Without ``ea`` this falls back to
+        discarding the listings, as it always did.
+        """
         with self._lock:
             self._name_gen += 1
             self._indices.clear()
             self._decomp.clear()
-            self._listings.clear()
             self._pc_nums.clear()
             models = list(self._disasm.values())
             self._disasm.clear()
+            listings = list(self._listings.items())
+            if ea is None:
+                self._listings.clear()
         for m in models:
             m.invalidate()
+        if ea is None:
+            return
+        for start, lm in listings:
+            if lm.truncate_from(ea):
+                # Names can move too; the kept prefix is re-rendered on demand,
+                # and that is also what catches a page the edit really did move.
+                lm.invalidate_text()
+            else:
+                with self._lock:
+                    if self._listings.get(start) is lm:
+                        del self._listings[start]
 
     # -- item / function structure edits (IDA c/d/u/p) --------------------- #
     @staticmethod

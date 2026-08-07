@@ -288,7 +288,7 @@ class EditController:
             app.call_from_thread(app._status, err)
             return
         # The label shows in the listing's head rows -> invalidate + reopen.
-        app.program.bump_items()
+        app.program.bump_items(addr)
         # Naming the address *of a function start* is a function rename by any
         # other name. Without this the cached index kept the old name, so
         # `functions`/`names`/resolve/the palette all reported the rename had
@@ -510,7 +510,7 @@ class EditController:
             diag.note(f"make_data({ea:#x}, {type_decl!r})", e)
             app.call_from_thread(app._status, f"make data: {e}")
             return
-        app.program.bump_items()
+        app.program.bump_items(ea)
         anchor = anchor or _M().ViewAnchor()
         anchor.flash = f"data ({type_decl}) @ {ea:#x}   (Ctrl+S to save)"
         name = app.program.region_label(ea)
@@ -707,8 +707,10 @@ class EditController:
             diag.note(f"edit_item({kind}, {ea:#x})", e)
             app.call_from_thread(app._status, f"{kind}: {e}")
             return
-        # Structure changed everywhere: drop all item/function/decomp caches.
-        app.program.bump_items()
+        # Structure changed: drop all item/function/decomp caches. The segment
+        # listing keeps its walk in front of `ea` -- rows before an edit keep
+        # their addresses and their row numbers.
+        app.program.bump_items(ea)
         # Re-resolve: a define_func upgrades the region to a real function view;
         # anything else re-reads the (still function-less) listing in place.
         anchor = anchor or _M().ViewAnchor()
