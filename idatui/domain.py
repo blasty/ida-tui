@@ -90,10 +90,16 @@ class Line:
         )
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Head:
     """One flat-listing item (from the ``heads`` server tool): a code
-    instruction, a data item, or an undefined byte run."""
+    instruction, a data item, or an undefined byte run.
+
+    ``slots=True`` because this is the most-constructed object in the codebase:
+    a jump to an address near the end of a big binary builds one per listing row
+    it walks past, hundreds of thousands of them, and the slotted layout is ~20%
+    cheaper to build (and smaller to hold).
+    """
 
     ea: int
     kind: str            # 'code' | 'data' | 'unknown' | 'member'

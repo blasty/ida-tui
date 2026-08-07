@@ -391,6 +391,10 @@ def _idatui_tag_map():
 _IDATUI_TAGS = None
 _IDATUI_OPND_TAGS = None
 _IDATUI_CTL = None   # re: a tag = one of three control chars plus its argument
+#: {tag character: (kind, operand index or None)} -- the two maps above merged,
+#: because the span walker wants both for the same tag and a dict lookup per
+#: tag per line is one of the few things it does often enough to matter.
+_IDATUI_TAGINFO = None
 
 
 def _idatui_opnd_tag_map():
@@ -420,7 +424,7 @@ def _idatui_spans(line):
     Unknown tags become 'text' rather than being dropped: a processor module can
     emit a colour we don't classify, and losing the characters would corrupt the
     line."""
-    global _IDATUI_TAGS, _IDATUI_OPND_TAGS, _IDATUI_CTL
+    global _IDATUI_TAGS, _IDATUI_OPND_TAGS, _IDATUI_CTL, _IDATUI_TAGINFO
     import ida_lines
     if _IDATUI_TAGS is None:
         _IDATUI_TAGS = _idatui_tag_map()
@@ -434,7 +438,12 @@ def _idatui_spans(line):
         # characters but only ~13 tags -- everything between two tags is already
         # exactly one span's worth of text.
         _IDATUI_CTL = _re.compile("([\\x01\\x02\\x03](?s:.))")
-    tags, opnds = _IDATUI_TAGS, _IDATUI_OPND_TAGS
+    if _IDATUI_TAGINFO is None:
+        _IDATUI_TAGINFO = {
+            tag: (_IDATUI_TAGS.get(tag, "text"), _IDATUI_OPND_TAGS.get(tag))
+            for tag in set(_IDATUI_TAGS) | set(_IDATUI_OPND_TAGS)}
+    taginfo = _IDATUI_TAGINFO
+    plain_tag = ("text", None)
     on, off, esc = "\x01", "\x02", "\x03"
     addr_tag = chr(getattr(ida_lines, "COLOR_ADDR", 0x28))
     addr_len = int(getattr(ida_lines, "COLOR_ADDR_SIZE", 16))
@@ -478,8 +487,7 @@ def _idatui_spans(line):
             pend = ""
         if ch == on:
             stack.append((kind, opnd))
-            kind = tags.get(tag, "text")
-            o = opnds.get(tag)
+            kind, o = taginfo.get(tag, plain_tag)
             if o is not None:
                 opnd = o     # operands nest: an inner colour keeps the operand
         elif stack:
@@ -497,6 +505,12 @@ def _idatui_spans(line):
     out, prev_space = [], False
     for kind, txt, opnd in spans:
         core = " ".join(txt.split())
+        if core == txt:
+            # Nothing to collapse and no edge whitespace -- which is the common
+            # case ("mov", "rax", ", ") and skips both isspace() probes below.
+            prev_space = False
+            out.append([kind, txt, opnd])
+            continue
         if not core:                 # the span is nothing but padding
             if not prev_space:
                 prev_space = True
