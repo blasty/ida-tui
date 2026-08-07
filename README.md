@@ -100,6 +100,13 @@ a 400 MB binary scrolls like a text file.
 **Decompiler** — Hex-Rays pseudocode with syntax highlighting, per-line address
 anchors, and rename/retype/comment that write back.
 
+**Search** (`ctrl+f`) — the whole database, two ways: **text** through the
+rendered disassembly (`call cs:`, `xor eax, eax`) and **bytes** with IDA's
+pattern language, wildcards included (`48 8b ?? c3`, nibbles like `8?`, quoted
+literals). Which one you meant is guessed from the query — a hex-looking *word*
+like `dead` stays a text search — and `hex:`/`text:` or F2 override the guess.
+Enter searches, then Enter opens the hit.
+
 **Findings export** (`ctrl+e`) — the session as a markdown writeup: your
 comments grouped by function, the names and prototypes you set, the types you
 declared. A `.i64` does not record *who* wrote a comment — IDA's own analyzer

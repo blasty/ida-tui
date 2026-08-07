@@ -34,8 +34,9 @@ from _fixtures import fast_keys, staged  # noqa: E402
 fast_keys()   # ~85ms -> ~2ms per keypress; see _fixtures.fast_keys
 from idatui.app import (  # noqa: E402
     ConfirmScreen, DecompView, FunctionsPanel, GraphView, HexView, IdaTui,
-    HelpScreen, ListingView, QuitScreen, StringsPalette, StructEditor,
-    SymbolPalette, XrefsScreen, _HELP, _str_display, _word_occurrences,
+    HelpScreen, ListingView, QuitScreen, SearchPalette, StringsPalette,
+    StructEditor, SymbolPalette, XrefsScreen, _HELP, _str_display,
+    _word_occurrences,
 )
 from idatui.errors import IDAToolError  # noqa: E402
 from textual.widgets import (  # noqa: E402
@@ -1091,6 +1092,89 @@ async def s_structs(c: Ctx):
     await c.press("escape")
     await c.wait(lambda: not isinstance(app.screen, StructEditor), 10)
     c.check("Esc closes the struct editor", not isinstance(app.screen, StructEditor))
+
+
+@scenario("db_search")
+async def s_db_search(c: Ctx):
+    """Ctrl+F: search the whole database, by disassembly text or by bytes."""
+    app = c.app
+    await c.open("main", "listing")
+    await c.press("ctrl+f")
+    opened = await c.wait(lambda: isinstance(app.screen, SearchPalette), 10)
+    c.check("Ctrl+F opens the search palette", opened,
+            f"screen={type(app.screen).__name__}")
+    if not opened:
+        return
+    pal = app.screen
+    inp = pal.query_one("#pal-input", Input)
+
+    # -- text: a mnemonic every x86-64 function starts with ------------------ #
+    inp.value = "endbr64"
+    await c.press("enter")
+    await c.wait(lambda: bool(pal._hits), 30)
+    c.check("a text search finds instructions", len(pal._hits) > 1,
+            f"n={len(pal._hits)}")
+    c.check("and it was classified as text",
+            pal._searched and pal._searched[0] == "text", f"{pal._searched}")
+    c.check("hits carry the line they matched",
+            all("endbr64" in h.line for h in pal._hits[:5]),
+            [h.line for h in pal._hits[:3]])
+
+    # -- text with padding: match what is SEEN, not IDA's column spacing ----- #
+    inp.value = "call cs:"
+    await c.press("enter")
+    found = await c.wait(lambda: pal._searched == ("text", "call cs:"), 30)
+    c.check("a query spanning IDA's column padding still matches",
+            found and len(pal._hits) > 0, f"n={len(pal._hits)}")
+
+    # -- bytes: the same endbr64, as a pattern ------------------------------- #
+    inp.value = "f3 0f 1e fa"
+    await c.press("enter")
+    await c.wait(lambda: pal._searched and pal._searched[0] == "bytes", 30)
+    c.check("a hex query is classified as bytes",
+            pal._searched and pal._searched[0] == "bytes", f"{pal._searched}")
+    c.check("and finds the same instruction", len(pal._hits) > 1,
+            f"n={len(pal._hits)}")
+
+    # -- wildcards ----------------------------------------------------------- #
+    inp.value = "f3 0f ?? fa"
+    await c.press("enter")
+    await c.wait(lambda: pal._searched == ("bytes", "f3 0f ?? fa"), 30)
+    c.check("a wildcard byte matches", len(pal._hits) > 1, f"n={len(pal._hits)}")
+
+    # -- a bad pattern must SAY so, not answer "no matches" ------------------ #
+    inp.value = "48 zz c3"
+    await c.press("enter")
+    await c.pause(0.1)
+    title = str(app.screen.query_one("#pal-box").border_title)
+    c.check("a malformed byte pattern is refused with a reason",
+            "not a byte" in title, f"title={title!r}")
+
+    # -- F2 pins the mode against the guess ---------------------------------- #
+    inp.value = "dead"
+    await c.pause(0.05)
+    c.check("a hex-looking WORD still searches text",
+            pal._mode_query()[0] == "text", f"{pal._mode_query()}")
+    await c.press("f2")
+    c.check("F2 forces it to bytes", pal._mode_query()[0] == "bytes",
+            f"{pal._mode_query()}")
+
+    # -- Enter on a result navigates ----------------------------------------- #
+    inp.value = "endbr64"
+    await c.press("f2")            # back to text
+    await c.press("enter")
+    await c.wait(lambda: bool(pal._hits) and pal._searched
+                 and pal._searched[0] == "text", 30)
+    target = pal._hits[1] if len(pal._hits) > 1 else pal._hits[0]
+    pal.query_one(OptionList).highlighted = 1 if len(pal._hits) > 1 else 0
+    await c.press("enter")
+    closed = await c.wait(lambda: not isinstance(app.screen, SearchPalette), 10)
+    c.check("Enter on a hit closes the palette", closed,
+            f"screen={type(app.screen).__name__}")
+    landed = await c.wait(
+        lambda: app._cur is not None and c.lst._cursor_ea() == target.head, 30)
+    c.check("and lands the cursor on it", landed,
+            f"cursor={c.lst._cursor_ea()} want={target.head:#x}")
 
 
 @scenario("export_findings")

@@ -50,7 +50,7 @@ from . import kittygfx
 from .edit_ctl import EditController
 from .prompt import PromptBar
 from .trace_ctl import TraceController
-from . import findings
+from . import findings, search
 from .highlight import CTextArea, highlight_c
 from .journal import Journal
 
@@ -3293,6 +3293,182 @@ def _str_display(text: str, limit: int = 200) -> str:
     return out[:limit] + ("\u2026" if len(out) > limit else "")
 
 
+class SearchPalette(ModalScreen):
+    """Ctrl+F: search the whole database, by text or by bytes.
+
+    Unlike every other palette here this does NOT filter as you type: each
+    search walks the image or the listing in the database process, so it runs
+    on Enter. That gives Enter two jobs, which is fine as long as it is never
+    ambiguous: while the query differs from what was last searched, Enter
+    searches; once the results on screen belong to the query in the box, Enter
+    opens the highlighted one. The title says which it will do.
+
+    Mode is guessed from the query (idatui/search.py) because asking first is a
+    tax on every search; F2 overrides the guess and a `hex:`/`text:` prefix
+    settles it outright.
+    """
+
+    BINDINGS = [
+        Binding("escape", "close", "Close"),
+        Binding("down,ctrl+n", "cursor_down", show=False),
+        Binding("up,ctrl+p", "cursor_up", show=False),
+        Binding("f2", "mode", "Text / bytes", show=False),
+    ]
+    LIMIT = 500
+
+    def __init__(self, program, initial: str = "") -> None:
+        super().__init__()
+        self._program = program
+        self._initial = initial
+        self._forced: str | None = None   # F2: pin the mode
+        self._hits: list = []
+        self._searched: tuple[str, str] | None = None  # (mode, query) on screen
+        self._busy = False
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="pal-box") as box:
+            box.border_title = Text("search")
+            yield Input(placeholder="text, or bytes like 48 8b ?? c3  \u00b7  "
+                                    "Enter search \u00b7 F2 mode \u00b7 Esc close",
+                        id="pal-input")
+            yield OptionList(id="pal-list")
+
+    def on_mount(self) -> None:
+        inp = self.query_one("#pal-input", Input)
+        inp.value = self._initial
+        inp.focus()
+        self._retitle()
+        if self._initial:
+            self._run()
+
+    # -- mode / title ------------------------------------------------------- #
+    def _query(self) -> str:
+        return self.query_one("#pal-input", Input).value.strip()
+
+    def _mode_query(self) -> tuple[str, str]:
+        return search.classify(self._query(), self._forced)
+
+    def _retitle(self, note: str = "") -> None:
+        mode, q = self._mode_query()
+        pinned = "" if self._forced is None else "*"
+        state = note
+        if not state:
+            if self._busy:
+                state = "searching\u2026"
+            elif self._searched == (mode, q) and q:
+                n = len(self._hits)
+                state = f"{n} hit{'' if n == 1 else 's'} \u2014 Enter opens"
+            elif q:
+                state = "Enter searches"
+        self.query_one("#pal-box").border_title = Text(
+            f"search [{mode}{pinned}]" + (f": {state}" if state else ""))
+
+    def action_mode(self) -> None:
+        mode, _ = self._mode_query()
+        self._forced = search.TEXT if mode == search.BYTES else search.BYTES
+        self._searched = None      # the results on screen are for the old mode
+        self._retitle()
+
+    def on_input_changed(self, event: Input.Changed) -> None:
+        event.stop()   # modal inputs bubble to the app's own #search handler
+        self._retitle()
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        event.stop()
+        mode, q = self._mode_query()
+        if self._searched == (mode, q) and self._hits:
+            self.action_choose()
+        else:
+            self._run()
+
+    # -- searching ---------------------------------------------------------- #
+    def _run(self) -> None:
+        mode, q = self._mode_query()
+        if not q:
+            return
+        if mode == search.BYTES:
+            problem = search.pattern_problem(q)
+            if problem:
+                # Refuse here rather than round-tripping: IDA's own message for
+                # a bad pattern is empty about half the time.
+                self._hits, self._searched = [], None
+                self.query_one(OptionList).clear_options()
+                self._retitle(problem)
+                return
+            q = search.normalise_pattern(q)
+        self._busy = True
+        self._retitle()
+        self._search(mode, q)
+
+    @work(thread=True, exclusive=True, group="dbsearch")
+    def _search(self, mode: str, query: str) -> None:
+        try:
+            hits, err, truncated = self._program.search(query, mode,
+                                                        limit=self.LIMIT)
+        except Exception as e:  # noqa: BLE001 -- a search must not kill the app
+            hits, err, truncated = [], str(e), False
+        self.app.call_from_thread(self._present, mode, query, hits, err, truncated)
+
+    def _present(self, mode: str, query: str, hits: list, err: str | None,
+                 truncated: bool) -> None:
+        self._busy = False
+        self._hits = hits
+        # Remember what these results ARE, not what the box says now: the user
+        # may have typed on while the search ran, and then Enter must search
+        # again rather than open a hit from the previous query.
+        self._searched = (mode, query) if err is None else None
+        ol = self.query_one(OptionList)
+        ol.clear_options()
+        opts = []
+        for h in hits:
+            label = Text()
+            label.append(f"{h.addr:08X}  ", _S_ADDR)
+            label.append(f"{(h.func or h.seg or ''):<22.22} ", _S_DIM)
+            body = Text(h.line or "")
+            if mode == search.TEXT and query:
+                low, ql = (h.line or "").lower(), query.lower()
+                at = low.find(ql)
+                if at >= 0:
+                    body.stylize(_S_NAME_MATCH, at, at + len(query))
+            label.append_text(body)
+            opts.append(Option(label))
+        ol.add_options(opts)
+        if hits:
+            ol.highlighted = 0
+        if err:
+            self._retitle(err)
+        elif not hits:
+            self._retitle("no match")
+        else:
+            n = len(hits)
+            self._retitle(f"{n}{'+' if truncated else ''} "
+                          f"hit{'' if n == 1 else 's'} \u2014 Enter opens")
+
+    # -- moving / choosing --------------------------------------------------- #
+    def action_cursor_down(self) -> None:
+        ol = self.query_one(OptionList)
+        if ol.option_count:
+            ol.highlighted = min((ol.highlighted or 0) + 1, ol.option_count - 1)
+
+    def action_cursor_up(self) -> None:
+        ol = self.query_one(OptionList)
+        if ol.option_count:
+            ol.highlighted = max((ol.highlighted or 0) - 1, 0)
+
+    def action_choose(self) -> None:
+        ol = self.query_one(OptionList)
+        i = ol.highlighted
+        if i is not None and 0 <= i < len(self._hits):
+            self.dismiss(self._hits[i])
+
+    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+        if 0 <= event.option_index < len(self._hits):
+            self.dismiss(self._hits[event.option_index])
+
+    def action_close(self) -> None:
+        self.dismiss(None)
+
+
 class StringsPalette(ModalScreen):
     """Every string in the binary (IDA's Shift+F12), filterable; Enter jumps to
     it in the unified listing."""
@@ -3446,6 +3622,7 @@ _HELP = (
         ("B", "cycle the opcode-bytes column"),
         ("Ctrl+B", "show/hide the names pane"),
         ("Ctrl+T", "structs / types editor"),
+        ("Ctrl+F", "search the database: text or bytes"),
         ("Ctrl+E", "export findings as markdown"),
         ("Ctrl+P", "command palette"),
     )),
@@ -4670,6 +4847,8 @@ class IdaCommands(Provider):
              app.action_strings),
             ("Switch binary…", "another binary in the project (Ctrl+O)",
              app.action_switch_binary),
+            ("Search database…", "disassembly text or a byte pattern with "
+             "wildcards (Ctrl+F)", app.action_find),
             ("Export findings…", "your comments, names and types as markdown "
              "(Ctrl+E)", app.action_export),
             ("Keyboard shortcuts", "the key cheatsheet (F1 or H)",
@@ -4894,6 +5073,7 @@ class IdaTui(App):
         Binding("q", "quit", "Quit"),
         Binding("ctrl+n", "symbols", "Symbols"),
         Binding("ctrl+t", "structs", "Structs"),
+        Binding("ctrl+f", "find", "Find"),
         Binding("ctrl+e", "export", "Export", show=False),
         Binding("backslash", "hex", "Hex"),
         Binding("s", "toggle_split", "Split", show=False),
@@ -6008,6 +6188,35 @@ class IdaTui(App):
         self.push_screen(StringsPalette(items, index=self._index,
                                         binary=self._binary),
                          self._on_string_chosen)
+
+    def action_find(self) -> None:
+        """Ctrl+F: search the whole database — disassembly text, or bytes."""
+        if self.program is None:
+            self._status("not connected yet")
+            return
+        if self._prompt_active():
+            return
+        # Seed it with the word under the cursor: the search you want is
+        # usually about the thing you are looking at.
+        seed = ""
+        view = self._active_code_view()
+        if view is not None:
+            try:
+                seed = view.word_under_cursor() or ""
+            except Exception:  # noqa: BLE001 -- a seed is a nicety, never a
+                seed = ""       # reason not to open the search
+        self.push_screen(SearchPalette(self.program, seed), self._on_hit_chosen)
+
+    def _on_hit_chosen(self, hit) -> None:  # type: ignore[no-untyped-def]
+        if hit is None:
+            return
+        # Navigate to the ITEM, not the matched byte: a pattern can start in
+        # the middle of an instruction, and there is nothing to put a cursor on
+        # there. The status names the exact address so it isn't lost.
+        self._goto_ea(hit.head, push=True)
+        if hit.addr != hit.head:
+            self._status(f"match at {hit.addr:#x} (inside {hit.head:#x})",
+                         priority=True)
 
     def _on_string_chosen(self, choice) -> None:  # type: ignore[no-untyped-def]
         if choice is None:

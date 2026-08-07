@@ -602,6 +602,93 @@ n.setblob(payload, 0, "I")
 result = {"ok": True, "bytes": len(payload)}
 result
 ''',
+    # Database-wide search (Ctrl+F), two kinds.
+    #
+    # BYTES uses IDA's own `find_bytes`, which already understands the pattern
+    # language people expect -- "B8 ? ? ? ? 90", nibble wildcards ("48 8? ??")
+    # and quoted literals -- so we neither parse nor match anything ourselves.
+    # Iterating is match+1, per its documented contract.
+    "search_bytes": r'''
+import ida_bytes, ida_funcs, ida_idaapi, ida_lines, ida_segment
+pat = str(a.get("pattern", "")).strip()
+limit = max(1, int(a.get("limit", 500)))
+lo = int(a.get("start", 0))
+hi = int(a.get("end", 0)) or ida_idaapi.BADADDR
+flags = ida_bytes.BIN_SEARCH_FORWARD | ida_bytes.BIN_SEARCH_NOSHOW
+if a.get("case"):
+    flags |= ida_bytes.BIN_SEARCH_CASE
+rows, err, ea = [], None, lo
+while len(rows) < limit:
+    try:
+        hit = ida_bytes.find_bytes(pat, range_start=ea, range_end=hi, flags=flags)
+    except Exception as exc:
+        err = str(exc) or exc.__class__.__name__
+        break
+    if hit is None or hit == ida_idaapi.BADADDR:
+        break
+    head = ida_bytes.get_item_head(hit)
+    fn = ida_funcs.get_func(hit)
+    seg = ida_segment.getseg(hit)
+    try:
+        line = ida_lines.generate_disasm_line(head, ida_lines.GENDSM_REMOVE_TAGS) or ""
+    except Exception:
+        line = ""
+    rows.append({"addr": hex(int(hit)), "head": hex(int(head)),
+                 "line": " ".join(line.split()),
+                 "func": (ida_funcs.get_func_name(fn.start_ea) if fn else None),
+                 "func_addr": (hex(int(fn.start_ea)) if fn else None),
+                 "seg": (ida_segment.get_segm_name(seg) if seg else "")})
+    ea = int(hit) + 1
+result = {"hits": rows, "error": err, "truncated": len(rows) >= limit}
+result
+''',
+    # TEXT walks the listing the way a person reads it: every head's rendered
+    # disassembly line, which is why it finds "call cs:__isoc99_scanf" and
+    # "0deadbeefh" alike. Bounded by max_scan, so a 400MB image reports partial
+    # results instead of stalling.
+    "search_text": r'''
+import ida_lines, ida_funcs, ida_segment, idautils
+import re as _re
+q = str(a.get("query", ""))
+limit = max(1, int(a.get("limit", 500)))
+max_scan = max(1000, int(a.get("max_scan", 3000000)))
+ci = (not a.get("case")) and q.islower()   # smartcase, like the in-view search
+rx, err = None, None
+if a.get("regex"):
+    try:
+        rx = _re.compile(q, _re.I if ci else 0)
+    except Exception as exc:
+        err = "bad regex: " + str(exc)
+needle = q.lower() if ci else q
+rows, scanned = [], 0
+if err is None and q:
+    for i in range(ida_segment.get_segm_qty()):
+        seg = ida_segment.getnseg(i)
+        if seg is None or len(rows) >= limit or scanned >= max_scan:
+            continue
+        for ea in idautils.Heads(seg.start_ea, seg.end_ea):
+            scanned += 1
+            if len(rows) >= limit or scanned >= max_scan:
+                break
+            try:
+                line = ida_lines.generate_disasm_line(ea, ida_lines.GENDSM_REMOVE_TAGS) or ""
+            except Exception:
+                continue
+            # Match what the user SEES, not IDA's column padding: nobody types
+            # "call" + four spaces + "cs:getenv_ptr".
+            line = " ".join(line.split())
+            hay = line.lower() if ci else line
+            if (rx.search(line) if rx is not None else (needle in hay)):
+                fn = ida_funcs.get_func(ea)
+                rows.append({"addr": hex(int(ea)), "head": hex(int(ea)),
+                             "line": line,
+                             "func": (ida_funcs.get_func_name(fn.start_ea) if fn else None),
+                             "func_addr": (hex(int(fn.start_ea)) if fn else None),
+                             "seg": ida_segment.get_segm_name(seg)})
+result = {"hits": rows, "error": err, "scanned": scanned,
+          "truncated": len(rows) >= limit or scanned >= max_scan}
+result
+''',
     "list_linkage": r'''
 imports = [{"addr": hex(int(item.address)), "name": item.name, "module": item.module_name}
            for item in db.imports.get_all_imports() if item.name]

@@ -39,7 +39,7 @@ _PROGRAM_METHODS = {
     "goto", "open", "rename", "comment", "retype", "follow", "xrefs", "symbols",
     "structs", "search", "select", "save", "hex", "toggle_view",
     "pseudocode", "disassembly", "xrefs_to", "xrefs_from", "resolve",
-    "define", "rename_many", "opfmt", "graph", "export",
+    "define", "rename_many", "opfmt", "graph", "export", "find",
 }
 
 # Self-documenting method table (returned by the 'methods' verb).
@@ -77,6 +77,9 @@ METHODS = {
     "structs": "open the struct editor",
     "export": "{path?,types?=true} write the session's comments/names/types as "
               "a markdown report -> {path,comments,names,types}",
+    "find": "{query,mode?=auto|text|bytes,limit?=500,regex?,case?} search the "
+            "WHOLE database: disassembly text, or a byte pattern with "
+            "wildcards (48 8b ?? c3) -> {mode,hits:[{addr,head,line,func}]}",
     "search": "{term,direction?=1} incremental search in the code view",
     "select": "{index?} choose the highlighted/nth item in the open modal",
     "save": "persist the .i64 (Ctrl+S)",
@@ -1175,6 +1178,27 @@ class RpcServer:
             return await self._press(
                 ["ctrl+t"], lambda: type(app.screen).__name__ == "StructEditor",
                 timeout, "structs")
+        if method == "find":
+            from . import search as _search
+            q = str(params.get("query", ""))
+            forced = params.get("mode")
+            forced = None if forced in (None, "auto") else str(forced)
+            mode, cleaned = _search.classify(q, forced)
+            if mode == _search.BYTES:
+                problem = _search.pattern_problem(cleaned)
+                if problem:
+                    raise ValueError(f"find: {problem}")
+                cleaned = _search.normalise_pattern(cleaned)
+            hits, err, truncated = await asyncio.to_thread(
+                app.program.search, cleaned, mode,
+                limit=int(params.get("limit", 500)),
+                regex=bool(params.get("regex")), case=bool(params.get("case")))
+            if err:
+                raise ValueError(f"find: {err}")
+            return {"mode": mode, "query": cleaned, "truncated": truncated,
+                    "hits": [{"addr": hex(h.addr), "head": hex(h.head),
+                              "line": h.line, "func": h.func,
+                              "seg": h.seg} for h in hits]}
         if method == "export":
             # Deliberately NOT driven through the prompt: this is the one verb
             # whose whole point is the file it leaves behind, and a driver needs

@@ -252,6 +252,22 @@ def link_name(raw: str) -> str:
 
 
 @dataclass(frozen=True)
+class SearchHit:
+    """One database-wide search result (Ctrl+F).
+
+    ``addr`` is where the match starts -- for a byte pattern that can be inside
+    an instruction, so ``head`` is the item to navigate to and ``line`` is what
+    that item renders as.
+    """
+    addr: int
+    head: int
+    line: str = ""
+    func: str | None = None
+    func_addr: int | None = None
+    seg: str = ""
+
+
+@dataclass(frozen=True)
 class Comment:
     """One comment somebody wrote into the database.
 
@@ -1963,6 +1979,46 @@ class Program:
             for r in payload.get("names", []) if isinstance(r, dict) and r.get("name")]
         return (comments, names)
 
+
+    def search(self, query: str, mode: str = "text", *, limit: int = 500,
+               regex: bool = False, case: bool = False,
+               ) -> tuple[list["SearchHit"], str | None, bool]:
+        """Search the whole database. Returns ``(hits, error, truncated)``.
+
+        A failed search is DATA (a message to show), not an exception: a bad
+        regex or an unparsable byte pattern is something the user typed, and
+        the palette wants to say so without unwinding.
+        """
+        op = "search_bytes" if mode == "bytes" else "search_text"
+        args: dict = {"limit": int(limit), "case": bool(case)}
+        if mode == "bytes":
+            # Validate HERE, not just in the UI: IDA's find_bytes answers a
+            # malformed pattern with zero hits and no error, which reads as
+            # "not present" -- the most misleading answer a search can give.
+            from .search import normalise_pattern, pattern_problem
+            problem = pattern_problem(query)
+            if problem:
+                return ([], problem, False)
+            args["pattern"] = normalise_pattern(query)
+        else:
+            args["query"] = query
+            args["regex"] = bool(regex)
+        try:
+            payload = self.client.invoke(op, **args)
+        except IDAToolError as e:
+            return ([], str(e), False)
+        if not isinstance(payload, dict):
+            return ([], "the backend returned nothing searchable", False)
+        hits = [
+            SearchHit(addr=_as_int(r.get("addr", 0)),
+                      head=_as_int(r.get("head", r.get("addr", 0))),
+                      line=str(r.get("line", "") or ""),
+                      func=(r.get("func") or None),
+                      func_addr=(_as_int(r["func_addr"]) if r.get("func_addr")
+                                 else None),
+                      seg=str(r.get("seg", "") or ""))
+            for r in payload.get("hits", []) if isinstance(r, dict)]
+        return (hits, payload.get("error") or None, bool(payload.get("truncated")))
 
     def journal_get(self) -> str:
         """The findings journal blob stored in this database ('' if none)."""

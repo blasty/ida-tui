@@ -296,6 +296,21 @@ def cmd_save(c, args):
     return "  saved"
 
 
+def cmd_find(c, args):
+    """find <query...> -- search the database; bytes if it looks like bytes."""
+    if not args:
+        raise SystemExit("usage: find <text | 48 8b ?? c3 | hex:...>")
+    r = c.call("find", query=" ".join(args))
+    hits = r.get("hits", [])
+    out = [f"  [{r.get('mode')}] {len(hits)}{'+' if r.get('truncated') else ''} hits"]
+    for h in hits[:40]:
+        out.append(f"    {h['addr']}  {(h.get('func') or h.get('seg') or ''):<20.20} "
+                   f"{h.get('line', '')}")
+    if len(hits) > 40:
+        out.append(f"    … {len(hits) - 40} more")
+    return "\n".join(out)
+
+
 def cmd_export(c, args):
     """export [path] -- write the session's findings as markdown."""
     r = c.call("export", **({"path": args[0]} if args else {}))
@@ -324,6 +339,7 @@ COMMANDS = {
     "rename": cmd_rename, "mv": cmd_mv, "note": cmd_note, "retype": cmd_retype,
     "save": cmd_save, "screen": cmd_screen, "raw": cmd_raw, "define": cmd_define,
     "syms": cmd_syms, "fmt": cmd_fmt, "export": cmd_export,
+    "find": cmd_find,
     "binaries": cmd_binaries, "switch": cmd_switch,
 }
 

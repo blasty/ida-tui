@@ -102,6 +102,7 @@ predicate so the returned state is final.
 | `xrefs` | — | `x`: open the xref picker. |
 | `symbols` | `query?` | Ctrl+N palette, optionally pre-typed. |
 | `structs` | — | Ctrl+T struct editor. |
+| `find` | `query`, `mode?=auto\|text\|bytes`, `limit?=500`, `regex?`, `case?` | search the **whole database** and return `{mode, query, truncated, hits:[{addr, head, line, func, seg}]}`. `mode=auto` (the default) guesses from the query. A byte pattern that does not parse is an error naming the bad token, never an empty result. |
 | `export` | `path?`, `types?=true` | write the session's findings as **markdown** and return `{path, comments, names, types, functions, bytes}`. Not typed through a prompt: the point of this verb is the file it leaves behind, so a driver gets the path back rather than a screenshot. Defaults to `<binary>.findings.md`. See *Findings export* below. |
 | `search` | `term`, `direction?=1` | `/` (or `?`) incremental search in the active code view. |
 | `select` | `index?` | in an open modal list (xrefs/symbols) choose the highlighted (or nth) item and activate it. |
@@ -131,6 +132,33 @@ apply the whole symbol file with `rename_many`. Do **not** loop `rename` over a
 symbol file: each one costs a navigation (listing page + decompile) plus two
 prompt round-trips, i.e. tens of minutes for a few hundred symbols, where
 `rename_many` is one call and a few seconds.
+
+### Database-wide search
+
+`find` is Ctrl+F: two searches over the whole binary, not the current view.
+
+* **text** matches the rendered disassembly line, whitespace-normalised — so
+  `call cs:` matches `call    cs:getenv_ptr`. `regex=true` switches to a Python
+  regex. Smartcase: an all-lowercase query is case-insensitive.
+* **bytes** is IDA's own pattern language via `find_bytes`: hex pairs, `?`
+  wildcards (whole byte *or* one nibble, `48 8? ?? 24`), and quoted literals
+  (`"Hello", 0`). Commas, no separators at all (`488B05C3`) and mixed spacing
+  all normalise to the same pattern.
+
+Mode is guessed unless you say otherwise, and the guess is deliberately biased:
+a hex-looking word (`dead`, `add`, `cafe`) is a *text* search, because those are
+words. A query whose tokens are all byte-sized but one is malformed (`48 zz c3`)
+is treated as bytes and **refused by name** — answering "no match" there would
+be indistinguishable from "not present".
+
+`head` is the item to navigate to (a byte match can land mid-instruction);
+`addr` is the exact match.
+
+```sh
+python -m idatui.drive find 'call cs:'
+python -m idatui.drive find '48 8b ?? c3'
+python -m idatui.drive raw find query='mov e?x' regex=true limit=20
+```
 
 ### Findings export
 
