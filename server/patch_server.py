@@ -282,14 +282,19 @@ def read_raw(
     return {"addr": addr, "hex": bytes(ba).hex(), "n": len(ba)}
 
 
-def _idatui_head_row(ea):
+def _idatui_head_row(ea, flags=None):
     """One flat-listing row for the head at ``ea``: kind (code/data/unknown),
-    byte size, rendered text, and any symbol name."""
+    byte size, rendered text, and any symbol name.
+
+    ``flags`` lets a caller that already asked for them say so -- the walk in
+    ``heads`` used to fetch them three times per head (here, in _is_unknown from
+    _advance, and again from _rows_for).
+    """
     import ida_bytes
     import ida_lines
     import ida_name
 
-    f = ida_bytes.get_flags(ea)
+    f = ida_bytes.get_flags(ea) if flags is None else flags
     if ida_bytes.is_code(f):
         kind = "code"
     elif ida_bytes.is_data(f):
@@ -590,11 +595,23 @@ def _idatui_rows_digest(rows):
     hashes to that. One worker, one process, one hash seed.
     """
     acc = 0
+    # The per-line render is memoised, so one spans list is shared by every row
+    # that says the same thing -- about 45% of them within a page. Hash each
+    # distinct list once and key that by identity, rather than rebuilding a
+    # tuple of tuples per row (which is the exact cost that was measured and
+    # removed from the client side for the same reason).
+    seen = {}
     for r in rows:
         sp = r.get("spans")
+        if sp is None:
+            sh = None
+        else:
+            key = id(sp)
+            sh = seen.get(key)
+            if sh is None:
+                sh = seen[key] = hash(tuple(map(tuple, sp)))
         acc = hash((acc, r.get("ea"), r.get("kind"), r.get("size"),
-                    r.get("text"), r.get("name"),
-                    tuple(map(tuple, sp)) if sp else None))
+                    r.get("text"), r.get("name"), sh))
     return acc
 
 
@@ -735,8 +752,7 @@ def heads(
     # by get_item_end; a run of undefined bytes is COLLAPSED into one row (its
     # end found in O(1) via next_head, which skips undefined) so a large .bss or
     # gap doesn't explode into millions of one-byte rows.
-    def _is_unknown(e):
-        f = ida_bytes.get_flags(e)
+    def _is_unknown_f(f):
         return not (ida_bytes.is_code(f) or ida_bytes.is_data(f))
 
     def _run_end(e):
@@ -744,21 +760,37 @@ def heads(
         nh = ida_bytes.next_head(e, hi)
         return nh if (nh != idaapi.BADADDR and e < nh <= hi) else hi
 
-    def _advance(e):
-        if _is_unknown(e):
+    def _advance(e, f):
+        if _is_unknown_f(f):
             return _run_end(e)
         nxt = ida_bytes.get_item_end(e)
         return nxt if nxt > e else e + 1
 
-    def _rows_for(e):
-        if _is_unknown(e):
+    # The function the walk is currently inside, reused while it stays inside.
+    # get_func is ~0.5us and the walk asks per head; a head is nearly always in
+    # the same function as the one before it. Only ever consulted when ``e``
+    # falls in [start_ea, end_ea), so a tail chunk elsewhere cannot be
+    # misattributed -- checked against get_func over 437k heads of
+    # bash/ls_ttl/echo with zero disagreements.
+    fn_cache = [None]
+
+    def _func_at(e):
+        cur = fn_cache[0]
+        if cur is not None and cur.start_ea <= e < cur.end_ea:
+            return cur
+        cur = idaapi.get_func(e)
+        fn_cache[0] = cur
+        return cur
+
+    def _rows_for(e, f):
+        if _is_unknown_f(f):
             return [_idatui_unknown_row(e, _run_end(e) - e)]
-        func = idaapi.get_func(e) if annotate else None
+        func = _func_at(e) if annotate else None
         at_start = func is not None and func.start_ea == e
         out = []
         if at_start:
             out.extend(_idatui_func_header_rows(e))
-        row = _idatui_head_row(e)
+        row = _idatui_head_row(e, f)
         if at_start:
             row = dict(row)
             row["name"] = None  # the name is shown on the proc header line
@@ -778,17 +810,19 @@ def heads(
         return out
 
     ea = ida_bytes.get_item_head(start)
+    get_flags = ida_bytes.get_flags
     for _ in range(offset):
         if ea >= hi or ea == idaapi.BADADDR:
             break
-        ea = _advance(ea)
+        ea = _advance(ea, get_flags(ea))
     more = False
     while ea != idaapi.BADADDR and ea < hi:
         if len(rows) >= count:
             more = True
             break
-        rows.extend(_rows_for(ea))  # a struct head expands into member rows
-        ea = _advance(ea)
+        f = get_flags(ea)            # once per head, not once per consumer
+        rows.extend(_rows_for(ea, f))  # a struct head expands into member rows
+        ea = _advance(ea, f)
     cursor = {"next": hex(ea)} if more else {"done": True}
     out = {"addr": str(addr), "cursor": cursor,
            "digest": _idatui_rows_digest(rows), "count": len(rows)}
