@@ -1,19 +1,15 @@
-"""Domain / paging layer: address-centric models over the raw MCP client.
+"""Domain / paging layer: address-centric models over IDA Code Mode.
 
 This is where the "millions of lines" problem is solved, so the TUI widgets only
 ever see a viewport-sized slice. Every hard-won constraint from
 ``docs/PAGING_FINDINGS.md`` is encoded here:
 
-* Per-call caps are silent (over the cap the server returns 10, not a clamp), so
-  we clamp page sizes ourselves: ``LIST_PAGE`` / ``DISASM_BLOCK`` <= the caps.
-* ``next_offset`` is unreliable; we paginate by advancing ``len(data)``.
-* ``disasm offset=N`` is O(N) with no resumable cursor, so windowed disassembly
-  is **block-cached** (revisits are free) and **prefetches** the next block on a
-  background thread (the client is concurrency-safe).
-* ``include_total`` scans the whole function (~200ms on monsters); totals are
-  fetched once and cached.
-* ``decompile`` can hard-fail on huge functions as a *soft* error (``code`` is
-  null); that is surfaced as data, not an exception.
+* Page sizes remain bounded so remote execution returns viewport-scale JSON.
+* Pagination advances by the number of rows actually returned.
+* Deep head walks are block-cached (revisits are free) and neighboring blocks
+  prefetch through the thread-safe Code Mode client.
+* Expensive function totals are fetched once and cached.
+* Decompilation failures are surfaced as data, not application crashes.
 
 Everything here is synchronous and thread-safe. The TUI runs these calls from
 Textual worker threads; the internal prefetch pool is separate and small.
@@ -22,10 +18,8 @@ Textual worker threads; the internal prefetch pool is separate and small.
 from __future__ import annotations
 
 import bisect
-import json
 import re
 import threading
-import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
@@ -36,7 +30,7 @@ from . import diag
 from .errors import IDAToolError
 
 if TYPE_CHECKING:  # type hint only
-    from .worker_client import WorkerClient  # noqa: F401
+    from .codemode_client import CodeModeClient
 
 # Clamps derived from measured caps (list ~700, disasm ~500). Margin included.
 LIST_PAGE = 500
@@ -66,7 +60,7 @@ class Func:
     def from_raw(cls, d: dict) -> "Func":
         addr = _as_int(d["addr"])
         name = d.get("name")
-        # An unnamed function (server returns null/empty) must still have a
+        # An unnamed function must still have a
         # usable string name — synthesize IDA's sub_ADDR so every consumer
         # (palette, sort, rename prefill) can treat name as a str.
         if not name:
@@ -93,7 +87,7 @@ class Line:
 
 
 class Head(NamedTuple):
-    """One flat-listing item (from the ``heads`` server tool): a code
+    """One flat-listing item (from the Code Mode ``heads`` operation): a code
     instruction, a data item, or an undefined byte run.
 
     A ``NamedTuple`` rather than a dataclass because this is by far the
@@ -114,7 +108,7 @@ class Head(NamedTuple):
     name: str | None = None
     raw: bytes | None = None  # opcode/item bytes (filled in for code by the model)
     #: [(kind, text)] from IDA's own colour tags — mnem/reg/num/name/str/punct/…
-    #: None when the worker didn't provide them (older worker, or the spans
+    #: None when Code Mode didn't provide them (or the spans
     #: disagreed with the plain text, in which case the text wins).
     #:
     #: Held exactly as it came off the wire, and **read-only**. The worker
@@ -301,7 +295,7 @@ class FunctionIndex:
     """A lazily-paginated, cached view of the function list.
 
     Loads pages of ``LIST_PAGE`` on demand, advancing by ``len(data)`` (never by
-    ``next_offset``). A single index instance corresponds to one server-side
+    ``next_offset``). A single index instance corresponds to one remote
     ``filter`` glob (``None`` = all functions).
     """
 
@@ -321,7 +315,7 @@ class FunctionIndex:
         query: dict = {"offset": offset, "count": LIST_PAGE}
         if self.filter:
             query["filter"] = self.filter
-        data = _query_data(self._prog.client.call("list_funcs", queries=[query]))
+        data = _query_data(self._prog.client.invoke("list_funcs", queries=[query]))
         added = 0
         with self._lock:
             for d in data:
@@ -431,7 +425,7 @@ class DisasmModel:
         code function this equals the heads row count that backs the lines."""
         if self._total is not None:
             return self._total
-        payload = self._prog.client.call(
+        payload = self._prog.client.invoke(
             "disasm", addr=hex(self.ea), max_instructions=1, include_total=True
         )
         total = payload.get("total_instructions")
@@ -492,7 +486,7 @@ class DisasmModel:
         # The function disasm view is a listing filtered to the function: fetch a
         # block of heads (one per instruction for code). Over-fetch one row so
         # the block knows where its last instruction ends (opcode-byte sizing).
-        payload = self._prog.client.call(
+        payload = self._prog.client.invoke(
             "heads", addr=hex(self.ea), offset=b * self.BLOCK,
             count=self.BLOCK + 1, **self._end_kw(),
         )
@@ -633,15 +627,15 @@ class ListingModel:
     """A flat, IDA-style disassembly *listing* over one segment: code, data and
     undefined heads interleaved, unlike ``DisasmModel`` (one function, code only).
 
-    Backed by the injected ``heads`` server tool, which walks item heads and
-    renders each via ``generate_disasm_line``. The segment is walked lazily in
+    Backed by the Code Mode adapter's ``heads`` operation, which walks item heads
+    and renders each via ``generate_disasm_line``. The segment is walked lazily in
     forward pages (``FunctionIndex`` style); line index == position in the walked
     head list. Random access to an address is O(distance-from-seg-start) the
     first time (then cached) — the same tradeoff as ``disasm offset=N``. Grows
     on demand as the viewport scrolls. Synchronous + thread-safe.
     """
 
-    PAGE = 500  # heads per server call (well under the tool's 2000 cap)
+    PAGE = 500  # viewport-scale heads per Code Mode execution
 
     def __init__(self, program: "Program", seg_start: int, seg_end: int,
                  name: str | None = None):
@@ -754,7 +748,7 @@ class ListingModel:
             if self._done or self._next is None:
                 return 0
             frm = self._next
-        payload = self._prog.client.call(
+        payload = self._prog.client.invoke(
             "heads", addr=hex(frm), count=self.PAGE, annotate=True)
         rows = payload.get("heads", []) if isinstance(payload, dict) else []
         cur = payload.get("cursor", {}) if isinstance(payload, dict) else {}
@@ -1019,7 +1013,7 @@ class ListingModel:
         # the expectation rather than asking first means a page that HAS changed
         # still costs one round trip.
         try:
-            payload = self._prog.client.call(
+            payload = self._prog.client.invoke(
                 "heads", addr=hex(addr), count=self.PAGE, annotate=True,
                 expect="" if want_digest is None else str(want_digest))
         except Exception:  # noqa: BLE001 -- keep the old text rather than blank
@@ -1233,7 +1227,7 @@ class HexModel:
 class Program:
     """The bound analysis session: models, caches, and a small prefetch pool."""
 
-    def __init__(self, client: "WorkerClient", prefetch_workers: int = 2):
+    def __init__(self, client: "CodeModeClient", prefetch_workers: int = 2):
         self.client = client
         self._pool = ThreadPoolExecutor(
             max_workers=prefetch_workers, thread_name_prefix="idatui-prefetch"
@@ -1257,7 +1251,7 @@ class Program:
         self._sections: list[tuple[int, int, str]] | None = None
         self._fileregions: list[tuple[int, int, int]] | None = None
         self._hexmodel: "HexModel | None" = None
-        self._no_read_raw = False  # set if the server lacks the read_raw tool
+        self._no_read_raw = False  # compatibility fallback for alternate clients
         self._lock = threading.Lock()
 
     # -- prefetch plumbing ------------------------------------------------- #
@@ -1284,17 +1278,14 @@ class Program:
         """Sorted raw segment map [(start, end, file_off, name)] — the single
         source for sections()/file_regions()/image_range. Cached.
 
-        Uses the injected ``file_regions`` tool (a plain segment walk, ~ms).
-        This deliberately AVOIDS ``survey_binary``, which also computes function
-        counts / strings / stats and takes *seconds* on a large IDB (it was the
-        cause of the multi-second hex-pane open). Falls back to survey_binary
-        only if the injected tool is missing.
+        Uses the Code Mode adapter's ``file_regions`` operation (a plain segment
+        walk, ~ms), avoiding broad binary surveys on the hex-pane open path.
         """
         if self._segments_cache is not None:
             return self._segments_cache
         segs: list[tuple[int, int, int, str]] = []
         try:
-            r = self.client.call("file_regions")
+            r = self.client.invoke("file_regions")
             for d in (r.get("regions", []) if isinstance(r, dict) else []):
                 if isinstance(d, dict) and "start" in d:
                     segs.append((_as_int(d["start"]), _as_int(d["end"]),
@@ -1303,7 +1294,7 @@ class Program:
             segs = []
         if not segs:  # older server without file_regions -> survey_binary (slow)
             try:
-                sb = self.client.call("survey_binary")
+                sb = self.client.invoke("survey_binary")
                 for s in (sb.get("segments", []) if isinstance(sb, dict) else []):
                     try:
                         segs.append((_as_int(s["start"]), _as_int(s["end"]), -1,
@@ -1345,8 +1336,7 @@ class Program:
 
     def file_regions(self) -> list[tuple[int, int, int]]:
         """Sorted [(start, end, file_off)] mapping loaded segments to raw file
-        offsets (file_off == -1 for non-file-backed, e.g. .bss). Cached; needs
-        the injected ``file_regions`` server tool."""
+        offsets (file_off == -1 for non-file-backed, e.g. .bss). Cached."""
         if self._fileregions is not None:
             return self._fileregions
         regions = [(s, e, fo) for s, e, fo, _nm in self._segments()]
@@ -1364,15 +1354,14 @@ class Program:
     def read_bytes(self, ea: int, n: int) -> bytes:
         """Raw bytes [ea, ea+n) from IDA (gaps read as zero).
 
-        Fast path: the injected ``read_raw`` tool returns one contiguous hex
-        string (C-speed both ends). Falls back to the stock ``get_bytes`` (a
-        per-byte '0x..'-with-spaces string) on an older server without it.
+        The Code Mode adapter returns one contiguous hex string (C-speed in IDA).
+        A legacy ``get_bytes`` decoding fallback remains for alternate clients.
         """
         if n <= 0:
             return b""
         if not self._no_read_raw:
             try:
-                r = self.client.call("read_raw", addr=hex(ea), size=int(n))
+                r = self.client.invoke("read_raw", addr=hex(ea), size=int(n))
                 h = r.get("hex") if isinstance(r, dict) else None
                 if isinstance(h, str):
                     out = bytes.fromhex(h)
@@ -1386,7 +1375,7 @@ class Program:
             except (ValueError, KeyError):
                 pass  # malformed hex -> fall through to the legacy decoder
         try:
-            r = self.client.call("get_bytes", regions=[{"addr": hex(ea), "size": int(n)}])
+            r = self.client.invoke("get_bytes", regions=[{"addr": hex(ea), "size": int(n)}])
         except IDAToolError:
             return b"\x00" * n
         res = r.get("result", []) if isinstance(r, dict) else []
@@ -1437,7 +1426,7 @@ class Program:
     def list_structs(self, filter: str = "") -> list[Struct]:
         """All local structs/unions (optionally name-substring filtered), sorted
         by name."""
-        payload = self.client.call("search_structs", filter=filter)
+        payload = self.client.invoke("search_structs", filter=filter)
         res = payload.get("result", []) if isinstance(payload, dict) else []
         out = [Struct.from_raw(d) for d in res
                if isinstance(d, dict) and d.get("name")
@@ -1447,9 +1436,9 @@ class Program:
 
     def struct_source(self, name: str) -> str:
         """A C definition for ``name`` reconstructed from its member layout
-        (the server exposes members, not printable source). Faithful to IDA's
+        (the remote operation exposes members, not printable source). Faithful to IDA's
         field names/types; array dims are moved after the field name."""
-        payload = self.client.call(
+        payload = self.client.invoke(
             "type_inspect", queries=[{"name": name, "include_members": True}])
         res = payload.get("result", []) if isinstance(payload, dict) else []
         info = res[0] if res and isinstance(res[0], dict) else {}
@@ -1472,7 +1461,7 @@ class Program:
     def declare_type(self, decl: str) -> str | None:
         """Create or update a C type. Returns None on success, else the parse
         error. (Re-declaring a name updates it in place.)"""
-        payload = self.client.call("declare_type", decls=decl)
+        payload = self.client.invoke("declare_type", decls=decl)
         res = payload.get("result", []) if isinstance(payload, dict) else []
         if res and isinstance(res[0], dict):
             return res[0].get("error")
@@ -1481,10 +1470,9 @@ class Program:
     # -- function / variable types ---------------------------------------- #
     def func_types(self, ea: int) -> FuncTypes | None:
         """Structured decompiler types for the function at ``ea`` (prototype +
-        local variables). None if ``ea`` isn't a decompilable function. Requires
-        the injected ``func_types`` server tool."""
+        local variables). None if ``ea`` isn't a decompilable function."""
         try:
-            r = self.client.call("func_types", addr=hex(ea))
+            r = self.client.invoke("func_types", addr=hex(ea))
         except IDAToolError:
             return None
         if not isinstance(r, dict) or r.get("error"):
@@ -1497,7 +1485,7 @@ class Program:
 
     def set_function_type(self, ea: int, signature: str) -> str | None:
         """Set a function's prototype. None on success, else an error string."""
-        r = self.client.call("set_type", edits=[{"addr": hex(ea), "signature": signature}])
+        r = self.client.invoke("set_type", edits=[{"addr": hex(ea), "signature": signature}])
         res = r.get("result", []) if isinstance(r, dict) else []
         row = res[0] if res and isinstance(res[0], dict) else {}
         if row.get("ok"):
@@ -1506,9 +1494,9 @@ class Program:
 
     def data_type(self, ea: int) -> dict | None:
         """Current type info for a data item/global: {addr,name,type,size,is_func}.
-        None if the tool is unavailable or the address isn't mapped."""
+        None if the operation fails or the address isn't mapped."""
         try:
-            r = self.client.call("data_type", addr=hex(ea))
+            r = self.client.invoke("data_type", addr=hex(ea))
         except IDAToolError:
             return None
         if not isinstance(r, dict) or r.get("error"):
@@ -1517,7 +1505,7 @@ class Program:
 
     def set_data_type(self, ea: int, decl: str) -> str | None:
         """Set a global/data item's type. None on success, else an error string."""
-        r = self.client.call(
+        r = self.client.invoke(
             "set_type", edits=[{"kind": "global", "addr": hex(ea), "type": decl}])
         res = r.get("result", []) if isinstance(r, dict) else []
         row = res[0] if res and isinstance(res[0], dict) else {}
@@ -1526,9 +1514,9 @@ class Program:
         return row.get("error") or "failed to set the type"
 
     def set_lvar_type(self, fn_ea: int, var: str, ty: str) -> str | None:
-        """Set a decompiler local variable's type (via the injected server tool).
+        """Set a decompiler local variable's type through ida-domain pseudocode.
         None on success, else an error string."""
-        r = self.client.call("set_lvar_type", addr=hex(fn_ea), variable=var, type=ty)
+        r = self.client.invoke("set_lvar_type", addr=hex(fn_ea), variable=var, type=ty)
         if isinstance(r, dict) and r.get("error"):
             return r["error"]
         if isinstance(r, dict) and not r.get("ok"):
@@ -1537,15 +1525,14 @@ class Program:
 
     def delete_type(self, name: str) -> str | None:
         """Delete a named type. Returns None on success, else an error string.
-        Requires a server-side ``del_type`` tool; if absent, a clear message is
-        returned instead of raising."""
+        Returns a clear error instead of raising when the runtime cannot do it."""
         try:
-            self.client.call("del_type", name=name)
+            self.client.invoke("del_type", name=name)
             return None
         except IDAToolError as e:
             msg = e.message
             if "not found" in msg.lower() and "del_type" in msg:
-                return "delete needs a 'del_type' tool on the ida-pro-mcp server"
+                return "the connected Code Mode runtime cannot delete local types"
             return msg
 
     # -- disassembly ------------------------------------------------------- #
@@ -1559,13 +1546,7 @@ class Program:
 
     # -- decompilation ----------------------------------------------------- #
     def decompile(self, ea: int, refresh: bool = False) -> Decompilation:
-        """Full pseudocode for a function.
-
-        The server truncates responses over 50KB (strings clipped to 1000
-        chars) but caches the full output and exposes it at
-        ``_meta.ida_mcp.download_url``. We transparently fetch that so the view
-        always gets the complete body, not a 1KB stub.
-        """
+        """Full pseudocode for a function, returned directly by Code Mode."""
         if not refresh:
             with self._lock:
                 hit = self._decomp.get(ea)
@@ -1574,10 +1555,10 @@ class Program:
                 dec, hit_gen = hit
                 if hit_gen == gen:
                     return dec
-                # Cached before a rename: names may be stale. Drop the server's
-                # Hex-Rays cache so the refetch reflects the new names.
+                # Cached before a rename: names may be stale. Drop Hex-Rays'
+                # cache so the refetch reflects the new names.
                 try:
-                    self.client.call("force_recompile", items=[{"addr": hex(ea)}])
+                    self.client.invoke("force_recompile", items=[{"addr": hex(ea)}])
                 except Exception:  # noqa: BLE001
                     pass
         # Bound the decompile: a function Hex-Rays can't handle tends to stall
@@ -1587,7 +1568,10 @@ class Program:
         # rpcclient socket timeout, and cache the failure below so a re-request
         # returns instantly instead of re-grinding.
         try:
-            envelope = self.client.call_envelope(
+            # Code Mode returns the complete JSON result directly; unlike the
+            # old MCP tool transport there is no structured-content envelope or
+            # out-of-band download URL to unwrap.
+            payload = self.client.invoke(
                 "decompile", addr=hex(ea), timeout=DECOMPILE_TIMEOUT
             )
         except Exception as e:  # noqa: BLE001 -- surface as a failed decompile
@@ -1595,15 +1579,6 @@ class Program:
             with self._lock:
                 self._decomp[ea] = (dec, self._name_gen)
             return dec
-        result = envelope.get("result", {})
-        payload = result.get("structuredContent")
-        if payload is None:  # fall back to text content
-            payload = self.client._extract_payload("decompile", result)
-        meta = (result.get("_meta") or {}).get("ida_mcp")
-        if isinstance(meta, dict) and meta.get("download_url"):
-            full = self._fetch_output(meta["download_url"])
-            if isinstance(full, dict) and full.get("code"):
-                payload = full
         dec = _parse_decompilation(ea, payload)
         with self._lock:
             self._decomp[ea] = (dec, self._name_gen)
@@ -1681,18 +1656,18 @@ class Program:
         Undefine first so it works even when the bytes are currently part of a
         data/align item — ``create_insn`` refuses to carve into a live item."""
         try:
-            self.client.call("undefine", items=[{"addr": hex(ea)}])
+            self.client.invoke("undefine", items=[{"addr": hex(ea)}])
         except IDAToolError:
             pass  # nothing defined here yet -> just try to create the insn
         res = self._first_result(
-            self.client.call("define_code", items=[{"addr": hex(ea)}]))
+            self.client.invoke("define_code", items=[{"addr": hex(ea)}]))
         if res.get("error"):
             raise IDAToolError("define_code", f"@ {ea:#x}: {res['error']}")
 
     def decomp_error(self, ea: int) -> str:
         """Hex-Rays' own reason for refusing ``ea``, or "" if it won't say."""
         try:
-            r = self.client.call("decomp_error", addr=hex(ea))
+            r = self.client.invoke("decomp_error", addr=hex(ea))
         except IDAToolError:
             return ""
         if not isinstance(r, dict):
@@ -1711,7 +1686,7 @@ class Program:
 
     def thumb_scan(self, start: int, end: int, apply: bool = True) -> dict:
         """Find Thumb entry points from odd pointers in ``[start, end)``."""
-        r = self.client.call("thumb_scan", start=hex(start), end=hex(end),
+        r = self.client.invoke("thumb_scan", start=hex(start), end=hex(end),
                              apply=bool(apply))
         if not isinstance(r, dict) or r.get("error"):
             raise IDAToolError("thumb_scan",
@@ -1720,7 +1695,7 @@ class Program:
 
     def set_thumb(self, ea: int, mode: str = "toggle") -> dict:
         """Switch ARM/Thumb decoding at ``ea``. Returns the resulting state."""
-        r = self.client.call("set_thumb", addr=hex(ea), mode=mode)
+        r = self.client.invoke("set_thumb", addr=hex(ea), mode=mode)
         if not isinstance(r, dict) or r.get("error"):
             raise IDAToolError("set_thumb",
                                f"@ {ea:#x}: {(r or {}).get('error', 'failed')}")
@@ -1729,11 +1704,11 @@ class Program:
     def define_code_run(self, ea: int, limit: int = 20000) -> dict:
         """Disassemble consecutively from ``ea`` until something stops it.
 
-        Falls back to a single instruction when the worker predates the tool, so
-        an old worker degrades to the previous behaviour instead of failing.
+        Falls back to a single instruction for alternate clients that do not
+        provide the run operation.
         """
         try:
-            r = self.client.call("define_code_run", addr=hex(ea), limit=int(limit))
+            r = self.client.invoke("define_code_run", addr=hex(ea), limit=int(limit))
         except IDAToolError:
             self.define_code(ea)
             return {"count": 1, "stopped": "single", "end": hex(ea)}
@@ -1745,14 +1720,14 @@ class Program:
     def define_func(self, ea: int) -> dict:
         """Create a function starting at ``ea`` (IDA's 'p').
 
-        Prefers the injected tool, which works out the end when IDA can't;
-        falls back to the plain one for an older worker.
+        Prefers the Code Mode operation, which works out the end when IDA can't;
+        falls back to a plain create for alternate clients.
         """
         try:
-            r = self.client.call("define_func_run", addr=hex(ea))
+            r = self.client.invoke("define_func_run", addr=hex(ea))
         except IDAToolError:
             res = self._first_result(
-                self.client.call("define_func", items=[{"addr": hex(ea)}]))
+                self.client.invoke("define_func", items=[{"addr": hex(ea)}]))
             if res.get("error"):
                 raise IDAToolError("define_func", f"@ {ea:#x}: {res['error']}")
             return {"ok": True, "how": "legacy"}
@@ -1766,7 +1741,7 @@ class Program:
         item: dict = {"addr": hex(ea)}
         if size:
             item["size"] = int(size)
-        res = self._first_result(self.client.call("undefine", items=[item]))
+        res = self._first_result(self.client.invoke("undefine", items=[item]))
         if res.get("error"):
             raise IDAToolError("undefine", f"@ {ea:#x}: {res['error']}")
 
@@ -1776,7 +1751,7 @@ class Program:
         item: dict = {"addr": hex(ea), "type": type_decl}
         if name:
             item["name"] = name
-        res = self._first_result(self.client.call("make_data", items=[item]))
+        res = self._first_result(self.client.invoke("make_data", items=[item]))
         if res.get("ok") is False or res.get("error"):
             raise IDAToolError(
                 "make_data", f"@ {ea:#x}: {res.get('error') or 'rejected'}")
@@ -1784,7 +1759,7 @@ class Program:
     def make_string(self, ea: int, length: int = 0, kind: str = "c") -> str:
         """Create a string literal at ``ea`` (IDA's 'A'); auto-length when 0.
         Returns the decoded contents."""
-        r = self.client.call("make_string", addr=hex(ea), length=int(length), kind=kind)
+        r = self.client.invoke("make_string", addr=hex(ea), length=int(length), kind=kind)
         res = r if isinstance(r, dict) else {}
         if not res.get("ok"):
             raise IDAToolError(
@@ -1801,7 +1776,7 @@ class Program:
         ``cycle``/``back`` (step the stops that make sense for this value) or a
         format by name. ``show`` reports without changing anything.
         """
-        r = self.client.call("op_format", addr=hex(ea), mode=str(mode),
+        r = self.client.invoke("op_format", addr=hex(ea), mode=str(mode),
                              col=int(col), n=int(n))
         res = r if isinstance(r, dict) else {}
         if res.get("error"):
@@ -1825,7 +1800,7 @@ class Program:
         if hit is not None and hit[1] == gen:
             return hit[0]
         try:
-            r = self.client.call("pc_nums", addr=hex(fn_ea))
+            r = self.client.invoke("pc_nums", addr=hex(fn_ea))
         except Exception:  # noqa: BLE001 -- an older worker hasn't got the tool
             r = {}
         out: dict[int, list[tuple[int, int, str, int, int]]] = {}
@@ -1848,7 +1823,7 @@ class Program:
         listing's format doesn't reach the pseudocode and vice versa, so this is
         a separate call rather than a flag on ``op_format``.
         """
-        r = self.client.call("pc_num_format", addr=hex(fn_ea), mode=str(mode),
+        r = self.client.invoke("pc_num_format", addr=hex(fn_ea), mode=str(mode),
                              line=int(line), col=int(col))
         res = r if isinstance(r, dict) else {}
         if res.get("error"):
@@ -1865,18 +1840,6 @@ class Program:
             sec = None
         return f"{sec} @ {ea:#x}" if sec else f"<no function> @ {ea:#x}"
 
-    @staticmethod
-    def _fetch_output(url: str, timeout: float = 15.0):
-        """GET the server's cached full-output blob (plain HTTP, not MCP)."""
-        try:
-            with urllib.request.urlopen(url, timeout=timeout) as r:
-                return json.loads(r.read().decode("utf-8", "replace"))
-        except Exception as e:  # noqa: BLE001 -- fall back to the truncated preview
-            # The user gets CLIPPED pseudocode with no indication that a fetch
-            # failed rather than the function genuinely being that short.
-            diag.note(f"decompile: full-body fetch {url}", e)
-            return None
-
     def strings(self, min_len: int = 4, refresh: bool = False) -> list[StrLit]:
         """Every string literal in the binary (IDA's Shift+F12 list), paged in
         full and cached. ``[]`` if the tool is unavailable."""
@@ -1889,7 +1852,7 @@ class Program:
         offset, page = 0, 2000
         while True:
             try:
-                payload = self.client.call(
+                payload = self.client.invoke(
                     "list_strings", offset=offset, count=page, min_len=min_len,
                     refresh=(refresh and offset == 0))
             except IDAToolError:
@@ -1914,13 +1877,13 @@ class Program:
 
     def linkage(self) -> tuple[list[Linkage], list[Linkage]]:
         """``(imports, exports)`` for this binary, cached. ``([], [])`` if the
-        tool is unavailable — an old worker must not break the caller."""
+        operation is unavailable — an alternate client must not break the caller."""
         with self._lock:
             hit = self._linkage
         if hit is not None:
             return hit
         try:
-            payload = self.client.call("list_linkage", kind="both")
+            payload = self.client.invoke("list_linkage", kind="both")
         except IDAToolError:
             return ([], [])
         if not isinstance(payload, dict):
@@ -1951,7 +1914,7 @@ class Program:
         if hit is not None and hit[1] == gen:
             return hit[0]
         try:
-            payload = self.client.call("decomp_map", addr=hex(ea))
+            payload = self.client.invoke("decomp_map", addr=hex(ea))
         except IDAToolError:
             return []
         lines = payload.get("lines", []) if isinstance(payload, dict) else []
@@ -1981,7 +1944,7 @@ class Program:
         if hit is not None and hit[1] == gen:
             return hit[0]
         try:
-            payload = self.client.call("flowchart", addr=hex(ea))
+            payload = self.client.invoke("flowchart", addr=hex(ea))
         except IDAToolError:
             return None
         if not isinstance(payload, dict) or payload.get("error"):
@@ -2054,7 +2017,7 @@ class Program:
         for _ in range(64):                      # bounded: ~128k heads
             if addr >= hi:
                 break
-            payload = self.client.call("heads", addr=hex(addr), end=hex(hi),
+            payload = self.client.invoke("heads", addr=hex(addr), end=hex(hi),
                                        count=2000)
             rows = payload.get("heads", []) if isinstance(payload, dict) else []
             if not rows:
@@ -2083,13 +2046,13 @@ class Program:
     # -- cross-references & containing function --------------------------- #
     def function_of(self, ea: int) -> Func | None:
         """Return the function containing ``ea`` (resolves mid-function addrs)."""
-        payload = self.client.call("lookup_funcs", queries=[hex(ea)])
+        payload = self.client.invoke("lookup_funcs", queries=[hex(ea)])
         res = payload.get("result", []) if isinstance(payload, dict) else []
         fn = res[0].get("fn") if res and isinstance(res[0], dict) else None
         return Func.from_raw(fn) if fn else None
 
     def xrefs_from(self, ea: int) -> list[Xref]:
-        payload = self.client.call(
+        payload = self.client.invoke(
             "xref_query",
             queries=[{"addr": hex(ea), "direction": "from", "include_fn": True}],
         )
@@ -2101,9 +2064,9 @@ class Program:
         try:
             # xref_types adds a fine-grained `kind` (call/read/write/...) for the
             # xref dialog; fall back to xref_query (code/data only) if absent.
-            payload = self.client.call("xref_types", queries=q)
+            payload = self.client.invoke("xref_types", queries=q)
         except IDAToolError:
-            payload = self.client.call("xref_query", queries=q)
+            payload = self.client.invoke("xref_query", queries=q)
         return _parse_xrefs(payload)
 
     # -- address resolution ------------------------------------------------ #
@@ -2121,17 +2084,17 @@ class Program:
         # (loc_/locret_): lookup_funcs would map a label to its *containing*
         # function's entry, so double-clicking a label jumped to the wrong place.
         try:
-            payload = self.client.call("resolve_names", queries=[s])
+            payload = self.client.invoke("resolve_names", queries=[s])
             res = payload.get("result", []) if isinstance(payload, dict) else []
             ea = res[0].get("ea") if res and isinstance(res[0], dict) else None
             if ea:
                 return _as_int(ea)
         except IDAToolError:
-            pass  # older server without resolve_names -> fall back below
+            pass  # alternate client without resolve_names -> fall back below
         # Fall back to function-name resolution (also drives the 'did you mean'
         # suggestion when the name is unknown).
         try:
-            payload = self.client.call("lookup_funcs", queries=[s])
+            payload = self.client.invoke("lookup_funcs", queries=[s])
         except IDAToolError as e:
             raise KeyError(f"cannot resolve {target!r}: {e}") from e
         res = payload.get("result", []) if isinstance(payload, dict) else []
@@ -2169,7 +2132,7 @@ class Program:
         """Set (empty text clears) the comment at ``ea``; affects both the disasm
         and decompiler views. Returns the raw payload so the caller can surface a
         soft per-item error. The caller must invalidate/recompile to see it."""
-        return self.client.call("set_comments", items=[{"addr": hex(ea), "comment": text}])
+        return self.client.invoke("set_comments", items=[{"addr": hex(ea), "comment": text}])
 
     # -- invalidation (after edits) --------------------------------------- #
     def invalidate(self, ea: int) -> None:

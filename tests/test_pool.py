@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
-"""Unit tests for idatui.pool (worker residency: LRU + memory budget).
+"""Unit tests for idatui.pool (Code Mode lease residency and LRU budget).
 
-Pure stdlib with a fake client injected, so the eviction policy is testable
-without spawning real idalib workers.
+A fake client keeps the policy testable without IDA or Textual.
 
     python tests/test_pool.py
 """
@@ -15,7 +14,7 @@ import sys
 import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from idatui.pool import WorkerPool  # noqa: E402
+from idatui.pool import DatabasePool  # noqa: E402
 from idatui.project import Project  # noqa: E402
 
 PASS = FAIL = 0
@@ -32,11 +31,12 @@ def check(name, cond, detail=""):
 
 
 class FakeClient:
-    """Stands in for a WorkerClient: records saves/closes, reports fixed memory."""
+    """Stands in for a CodeModeClient lease and records saves/closes."""
 
-    def __init__(self, ref, mem=100):
+    def __init__(self, ref, mem=100, backend="idalib"):
         self.ref = ref
         self.mem = mem
+        self.backend = backend
         self.saved = 0
         self.closed = False
         self.connected = False
@@ -45,10 +45,9 @@ class FakeClient:
         self.connected = True
         return self
 
-    def call(self, tool, **kw):
-        if tool == "idb_save":
-            self.saved += 1
-        return {}
+    def save_database(self):
+        self.saved += 1
+        return {"saved": True}
 
     def close(self, grace=None):
         self.closed = True
@@ -76,15 +75,15 @@ def main() -> int:
             made[ref.label] = c
             return c
 
-        pool = WorkerPool(proj, budget_mb=350, spawn=spawn,
+        pool = DatabasePool(proj, budget_mb=350, spawn=spawn,
                           mem_fn=lambda c: c.mem)
 
         # -- lazy spawn + reuse -------------------------------------------- #
         a = pool.get("bin0")
-        check("get() spawns a worker on first use", a is made["bin0"] and a.connected)
+        check("get() spawns a database lease on first use", a is made["bin0"] and a.connected)
         check("get() stages the binary first",
               os.path.isfile(proj.by_label("bin0").staged))
-        check("get() reuses the resident worker", pool.get("bin0") is a)
+        check("get() reuses the resident lease", pool.get("bin0") is a)
         check("resident() reports it", pool.resident() == ["bin0"], pool.resident())
 
         # -- LRU ordering ---------------------------------------------------- #
@@ -100,9 +99,9 @@ def main() -> int:
         check("exceeding the budget evicts the least-recently-used",
               pool.evicted == ["bin1"] and not pool.is_resident("bin1"),
               f"evicted={pool.evicted} resident={pool.resident()}")
-        check("the just-spawned worker is never the victim", pool.is_resident("bin3"))
+        check("the just-attached lease is never the victim", pool.is_resident("bin3"))
         check("eviction saves the database first", made["bin1"].saved == 1)
-        check("eviction closes the worker", made["bin1"].closed)
+        check("eviction closes the lease", made["bin1"].closed)
         check("pool is back within budget", pool.memory_mb() <= pool.budget_mb,
               f"{pool.memory_mb()}/{pool.budget_mb}")
 
@@ -116,7 +115,7 @@ def main() -> int:
 
         # -- pinning ---------------------------------------------------------- #
         pool.close_all()
-        pool2 = WorkerPool(proj, budget_mb=250, spawn=spawn, mem_fn=lambda c: c.mem)
+        pool2 = DatabasePool(proj, budget_mb=250, spawn=spawn, mem_fn=lambda c: c.mem)
         pool2.get("bin0")
         pool2.pin("bin0")
         pool2.get("bin1")
@@ -143,7 +142,7 @@ def main() -> int:
 
         # -- teardown ----------------------------------------------------------- #
         pool2.close_all()
-        check("close_all() closes every worker",
+        check("close_all() closes every lease",
               not pool2.resident() and all(c.closed for c in made.values()))
         check("close_all() clears the active binary", pool2.active is None)
 
@@ -155,8 +154,8 @@ def main() -> int:
             check("an unknown label raises KeyError", True)
 
         # -- default budget comes from the project's memory_pct ------------------- #
-        pool3 = WorkerPool(proj, spawn=spawn, mem_fn=lambda c: c.mem)
-        check("default budget is derived, not a fixed worker count",
+        pool3 = DatabasePool(proj, spawn=spawn, mem_fn=lambda c: c.mem)
+        check("default budget is derived, not a fixed lease count",
               pool3.budget_mb >= 256, pool3.budget_mb)
 
     # -- prewarm: speculative, and never at the cost of a real binary ------ #
@@ -169,7 +168,7 @@ def main() -> int:
             made2[ref.label] = c
             return c
 
-        pool = WorkerPool(proj, budget_mb=250, spawn=spawn2,
+        pool = DatabasePool(proj, budget_mb=250, spawn=spawn2,
                           mem_fn=lambda c: c.mem)
         labels = [r.label for r in proj.refs]
         a, b, c_ = labels[0], labels[1], labels[2]
@@ -187,6 +186,28 @@ def main() -> int:
               set(pool.resident()) == {a, b}, f"{pool.resident()}")
         check("prewarm ignores a label outside the project",
               pool.prewarm("nope") is False)
+
+    # Budget eviction releases GUI leases but must not save somebody's open IDA
+    # implicitly. An explicit save-and-close remains authoritative.
+    with tempfile.TemporaryDirectory() as tmp:
+        proj = _mkproject(tmp, n=1)
+        made_gui = []
+
+        def spawn_gui(ref, ttl):
+            client = FakeClient(ref, backend="gui")
+            made_gui.append(client)
+            return client
+
+        pool = DatabasePool(proj, spawn=spawn_gui, mem_fn=lambda c: c.mem)
+        label = proj.refs[0].label
+        pool.get(label)
+        pool.evict(label)
+        check("LRU release does not implicitly save a GUI database",
+              made_gui[-1].saved == 0)
+        pool.get(label)
+        pool.close_all(save=True)
+        check("explicit close_all(save=True) does save a GUI database",
+              made_gui[-1].saved == 1)
 
     print(f"\n{PASS} passed, {FAIL} failed")
     return 1 if FAIL else 0

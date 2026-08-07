@@ -121,7 +121,8 @@ def cmd_pc(c, args):
     lines = d["code"].splitlines()
     if needle:
         nlow = needle.lower()
-        lines = [f"{i:4} {l}" for i, l in enumerate(lines) if nlow in l.lower()]
+        lines = [f"{i:4} {line}" for i, line in enumerate(lines)
+                 if nlow in line.lower()]
         return "\n".join(lines) or f"(no line matches {needle!r})"
     return d["code"]
 

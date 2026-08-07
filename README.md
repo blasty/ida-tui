@@ -1,13 +1,13 @@
 # ida-tui
 
 A minimal, keyboard-first (mouse-capable) **TUI frontend for IDA Pro**, built with
-[Textual](https://textual.textualize.io/) and driving **idalib** (IDA headless).
+[Textual](https://textual.textualize.io/) and using
+[ida-codemode-mcp](../ida-codemode-mcp) as a Python library.
 
-Opening a binary spawns our own **idalib worker** — a private subprocess talking a
-unix socket (`idatui/worker.py` + `WorkerClient`), ~50–100× cheaper per call than
-an HTTP transport. It reuses [ida-pro-mcp](https://github.com/mrexodia/ida-pro-mcp)'s
-tool implementations in-process; the old ida-pro-mcp HTTP server/supervisor path
-has been **removed**.
+ida-tui attaches to databases through `ida_codemode.client.DatabaseHandle`. A
+matching database already open in the IDA GUI is reused; otherwise Code Mode
+reuses or starts a shared managed idalib worker. The TUI owns only a client lease,
+never the GUI or worker process.
 
 ## ⚠️ Status: not ready for public consumption
 
@@ -31,7 +31,7 @@ don't file expectations. **Use at your own risk.**
 - A unified **IDA-style listing** (continuous disassembly interleaved with data /
   undefined heads) as the default code view; `F5`/`Tab` drops into the
   **decompiler (pseudocode)** for the function under the cursor. Both are
-  line-virtualized and page lazily over the worker.
+  line-virtualized and page lazily over the Code Mode database.
 - The startup splash draws the **real logo image** on terminals that speak the
   kitty graphics protocol (~10× the resolution of the block art), and falls back
   to `logo.ans` everywhere else. Support is detected by *asking the terminal*,
@@ -77,46 +77,58 @@ don't file expectations. **Use at your own risk.**
 
 ## Architecture (three layers, kept separate)
 
-- **`idatui/worker.py` + `idatui/worker_client.py`** — the backend. `worker.py`
-  opens one DB with idalib (on its main thread) and serves ida-pro-mcp's tool
-  functions over a unix socket; `WorkerClient` spawns it and is a stdlib-only
-  drop-in client (length-prefixed pickle, calls serialized under a lock). Shared
-  error types + the `Session` model live in `idatui/errors.py`.
-- **`idatui/domain.py`** — paging/caching over the worker client (`FunctionIndex`,
-  `DisasmModel`, `ListingModel`, `decompile`, xrefs, resolve). Synchronous,
-  thread-safe. Tools ida-pro-mcp lacks (`heads`, `read_raw`, `resolve_names`,
-  `xref_types`, …) are injected by `server/patch_server.py`, which the worker
-  runs itself on startup.
+- **`idatui/codemode_client.py`** — lifecycle and execution adapter. It leases a
+  registered GUI/idalib instance with `DatabaseHandle`, waits for autoanalysis,
+  normalizes errors, saves, and releases the lease. Address-centric operations
+  are sent through Code Mode's `execute_python` surface and use its preloaded
+  `ida-domain` `db` object.
+- **`idatui/domain.py`** — synchronous, thread-safe paging/caching
+  (`FunctionIndex`, `DisasmModel`, `ListingModel`, decompile, xrefs, resolve).
+  It has no process/database ownership logic.
 - **`idatui/app.py`** — the Textual app (virtualized `ScrollView`s, shared cursor/
   search/nav mixins, modals).
 
-The domain + worker-client layers are intentionally **stdlib-only** (the worker
-process links idalib); only the TUI layer pulls in Textual + Pygments.
+`idatui/pool.py` retains LRU project leases. Releasing an entry never kills a GUI
+or another client's worker. See `docs/CODEMODE_PORT.md` for what maps to public
+ida-domain APIs and which remaining features require IDAPython inside the Code
+Mode execution sandbox.
 
 ## Requirements
 
 - Python ≥ 3.11
-- A working **IDA Pro** with **idalib** and **ida-pro-mcp** installed (the worker
-  reuses ida-pro-mcp's tool implementations in-process — no server runs).
-- Textual ≥ 8 and Pygments ≥ 2 for the TUI (`pip install -e '.[tui]'`).
+- IDA Pro 9.4+ with idalib configured
+- `ida-codemode-mcp` installed in the TUI environment (this checkout uses the
+  editable sibling path `../ida-codemode-mcp`)
+- The ida-codemode IDA plugin installed so GUI databases register themselves
+- Textual ≥ 8 and Pygments ≥ 2 (`uv sync` installs both)
 
-Two python environments are expected: one with **textual + idapro** for the TUI
-(`~/ida-venv`, override `$IDATUI_PYTHON`) and one with **idapro + ida_pro_mcp**
-for the worker (auto-detected, override `$IDATUI_WORKER_PYTHON`).
+Code Mode's own worker launcher carries the correct Python environment; ida-tui
+no longer searches for a second Python or imports `ida_pro_mcp`.
 
 ## Running
 
-One command — it spawns a private idalib worker for the binary (which opens +
-auto-analyzes it in its own process over a unix socket) and drops you into the
-TUI behind a loading overlay:
+Install the project and its TUI dependencies:
 
 ```sh
-./ida-tui /path/to/binary        # open a binary and drive it — that's it
+uv sync
 ```
 
-It uses `~/ida-venv/bin/python` for the TUI (override with `$IDATUI_PYTHON`) and
-resolves binary paths against your real cwd. The binary's directory must be
-writable (idalib writes a `.i64` there).
+Pass an executable/IDB path. If the plugin has registered a matching GUI session,
+ida-tui attaches to it; otherwise Code Mode opens a managed idalib database:
+
+```sh
+./ida-tui /path/to/binary
+```
+
+With exactly one registered database, the path may be omitted:
+
+```sh
+./ida-tui
+```
+
+When several databases are registered, the launcher lists their paths and asks
+for one explicitly. A newly managed single-binary database still needs a writable
+output location; projects stage binaries and IDBs in their sidecar directory.
 
 Headerless blobs need to be told what they are — a raw firmware dump has no
 format to detect, and IDA falls back to x86 at address 0, which analyses to
@@ -130,15 +142,16 @@ ARM images that use Thumb need one more thing: press `t` on the listing to switc
 ARM/Thumb decoding at the cursor (it sets IDA's `T` register, and the segment to
 32-bit, since Thumb doesn't exist in AArch64).
 
-`--base` is a real address (IDA's own `-b` is in paragraphs; the conversion is
-done for you). In a project the options are recorded per binary, which is what a
-multi-image firmware wants. They apply to the first open only — after that the
-`.i64` records how the image was loaded. See `docs/PROJECTS.md`.
+`--base` is a real address (Code Mode's typed loading address is also natural,
+so no paragraph conversion crosses the dependency boundary). In a project the
+options are recorded per binary. They apply only when Code Mode must create the
+first database; a registered or existing IDB already records them. Arbitrary
+`--ida-args` are rejected because `DatabaseHandle.open()` has no equivalent;
+processor, base, and loader/file type are the supported import surface.
 
-> Recovering a wedged database: if a worker was hard-killed it leaves unpacked
-> `foo.id0/.id1/.id2/.nam/.til` next to `foo.i64`, and the `.i64` then refuses to
-> reopen. Delete those stale files (never the `.i64`) and retry — `ida-tui` does
-> this automatically.
+ida-tui never deletes unpacked IDA scratch files during discovery: those files
+may belong to a registered GUI or another Code Mode client. Registry locks and
+health probes are the ownership authority.
 
 ## Execution traces
 
@@ -195,7 +208,9 @@ See `docs/RPC.md` for the full protocol.
 
 ## Tests
 
-`tests/run.py` is the front door — it runs every suite and prints one table:
+`tests/run.py` is the front door — it runs every suite and prints one table.
+The live suites attach through Code Mode (a registered GUI database, or a managed
+idalib worker started on demand) for the given binary:
 
 ```sh
 python3 tests/run.py --fast     # 257 checks, ~0.5s, any python3 — between edits
@@ -227,6 +242,7 @@ The individual suites still run standalone, which is how you iterate on one:
 ## Docs
 
 - `docs/RPC.md` — the RPC protocol
-- `docs/PAGING_FINDINGS.md` — idalib tool paging/scale quirks
+- `docs/CODEMODE_PORT.md` — port coverage, API gaps, and lifecycle semantics
+- `docs/PAGING_FINDINGS.md` — historical paging/scale findings
 - `docs/TEXTUAL_NOTES.md` — Textual pitfalls encountered
 - `docs/TUI_DRIVING_BLUEPRINT.md` — generalizing the driving layer

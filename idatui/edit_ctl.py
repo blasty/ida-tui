@@ -242,7 +242,7 @@ class EditController:
                 kind = "stack"
                 batch = {"stack": {"func_addr": hex(cur.ea), "old": old, "new": new}}
         try:
-            res = prog.client.call("rename", batch=batch)
+            res = prog.client.invoke("rename", batch=batch)
         except IDAToolError as e:
             app.call_from_thread(app._status, f"rename failed: {e.message}")
             return
@@ -274,7 +274,7 @@ class EditController:
         app = self.app
         assert app.program is not None
         try:
-            res = app.program.client.call(
+            res = app.program.client.invoke(
                 "rename", batch={"data": {"addr": hex(addr), "new": name}})
         except IDAToolError as e:
             app.call_from_thread(app._status, f"name failed: {e.message}")

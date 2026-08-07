@@ -23,9 +23,9 @@ per pane in the registry, so stop/list/capture/keys keep working across both
     python -m idatui.pane capture --pane <pane>
     python -m idatui.pane keys --pane <pane> Escape
 
-Requires: running inside tmux or zellij. Each pane spawns its own private idalib
-worker (no shared supervisor). Uses ~/ida-venv/bin/python for the TUI (needs
-textual) unless --python / IDATUI_PYTHON says otherwise.
+Requires: running inside tmux or zellij. Each pane leases a registered GUI or
+shared managed idalib database through Code Mode. Uses ~/ida-venv/bin/python for
+the TUI (needs textual) unless --python / IDATUI_PYTHON says otherwise.
 """
 from __future__ import annotations
 
@@ -33,7 +33,6 @@ import argparse
 import json
 import os
 import secrets
-import signal
 import subprocess
 import sys
 import time
@@ -251,35 +250,9 @@ def _pane_keys(pane: str, keys: list[str], mux: str | None = None) -> None:
         subprocess.run(["tmux", "send-keys", "-t", pane, *keys], check=True)
 
 
-# --------------------------------------------------------------------------- #
-# idalib worker reaping
-#
-# ``pane stop`` kills the TUI pane, but a hard-killed pane can leave its private
-# idalib worker (idatui/worker.py) running. A worker is only *safe* to reap when
-# no idatui pane is live (then every worker is orphaned), which avoids killing an
-# in-use analyser.
-# --------------------------------------------------------------------------- #
-_WORKER_PATTERN = r"idatui/worker\.py"
-
-
-def _worker_pids() -> list[int]:
-    """PIDs of our private per-pane idalib worker processes (idatui/worker.py),
-    never our own PID."""
-    try:
-        out = subprocess.run(["pgrep", "-f", _WORKER_PATTERN],
-                             capture_output=True, text=True)
-    except OSError:
-        return []
-    me = os.getpid()
-    pids: list[int] = []
-    for tok in out.stdout.split():
-        try:
-            pid = int(tok)
-        except ValueError:
-            continue
-        if pid != me:
-            pids.append(pid)
-    return pids
+# Code Mode owns database process lifetime: a closed pane drops its lease at the
+# socket/kernel boundary and Code Mode decides whether a managed worker still
+# has clients. There is nothing for the pane layer to reap.
 
 
 def _count_live_panes() -> int:
@@ -288,20 +261,9 @@ def _count_live_panes() -> int:
 
 
 def _reap_orphan_workers(force: bool = False) -> int:
-    """Kill leaked idalib workers when it is safe (no live pane) or ``force``.
-
-    Returns the number of workers signalled. Best-effort; never raises.
-    """
-    if not force and _count_live_panes() > 0:
-        return 0
-    reaped = 0
-    for pid in _worker_pids():
-        try:
-            os.kill(pid, signal.SIGKILL)
-            reaped += 1
-        except OSError:
-            pass
-    return reaped
+    """Compatibility no-op: Code Mode workers are shared and lease-managed."""
+    del force
+    return 0
 
 
 # --------------------------------------------------------------------------- #
@@ -332,16 +294,8 @@ def spawn(args) -> int:
         print(f"error: no such project: {project}", file=sys.stderr)
         return 2
 
-    # Reap workers leaked by previously-stopped/crashed panes so we don't spawn
-    # into a full IDA_MCP_MAX_WORKERS (which makes the new TUI hang forever,
-    # never reaching ready). No-op while any pane is live.
-    reaped = _reap_orphan_workers()
-    if reaped:
-        print(f"reaped {reaped} orphaned idalib worker(s) before spawn",
-              file=sys.stderr)
-
-    # the command the pane runs: the launcher spawns a private idalib worker for
-    # this binary and becomes the TUI, so kill-pane tears the whole thing down.
+    # The pane owns only the TUI. Code Mode's lease cleanup handles crashes;
+    # kill-pane must never reap a shared GUI/idalib database.
     if project is not None:
         # launch takes: --project FILE [binaries...]; extra binaries are added to
         # the project (and a missing project file is created from them).
@@ -393,9 +347,8 @@ def _wait_ready(sock: str, timeout: float, pane: str,
                 stuck_after: float = 45.0, mux: str | None = None) -> dict[str, Any]:
     """Poll the socket + ping until the TUI reports ready (or timeout).
 
-    Emits a one-time hint to stderr if it's still not ready after ``stuck_after``
-    seconds, so a wedged idalib worker / full worker pool surfaces a diagnostic
-    instead of an unexplained silent hang.
+    Emits a one-time hint if Code Mode discovery/opening is still not ready after
+    ``stuck_after`` seconds.
     """
     start = time.time()
     deadline = start + timeout
@@ -416,9 +369,8 @@ def _wait_ready(sock: str, timeout: float, pane: str,
             warned = True
             why = ("RPC socket not created yet" if not os.path.exists(sock)
                    else "TUI up but analysis not ready")
-            print(f"still waiting ({int(time.time() - start)}s): {why}. If this "
-                  f"hangs, the idalib worker may be stuck — try "
-                  f"`python -m idatui.pane reap`.", file=sys.stderr)
+            print(f"still waiting ({int(time.time() - start)}s): {why}. "
+                  f"Check Code Mode registrations and worker logs.", file=sys.stderr)
         time.sleep(0.4)
     last = dict(last)
     last["ready"] = False
@@ -515,13 +467,9 @@ def list_panes(args) -> int:
 
 
 def reap(args) -> int:
-    """Kill leaked idalib workers (safe when no pane is live; --force overrides)."""
-    live = _count_live_panes()
-    n = _reap_orphan_workers(force=args.force)
-    print(json.dumps({"reaped_workers": n, "live_panes": live, "forced": args.force}))
-    if n == 0 and not args.force and live > 0:
-        print(f"note: {live} live pane(s) — not reaping in-use workers; pass "
-              f"--force to reap anyway", file=sys.stderr)
+    """Deprecated no-op; shared Code Mode workers are managed by leases."""
+    print(json.dumps({"reaped_workers": 0, "live_panes": _count_live_panes(),
+                      "forced": args.force, "deprecated": True}))
     return 0
 
 
@@ -624,9 +572,8 @@ def main(argv: list[str]) -> int:
     ls.add_argument("--prune", action="store_true", help="drop dead panes (and their sockets)")
     ls.set_defaults(fn=list_panes)
 
-    rp = sub.add_parser("reap", help="kill leaked idalib workers (frees worker slots)")
-    rp.add_argument("--force", action="store_true",
-                    help="reap even while panes are live (may kill an in-use analyser)")
+    rp = sub.add_parser("reap", help="deprecated no-op (Code Mode uses shared leases)")
+    rp.add_argument("--force", action="store_true", help=argparse.SUPPRESS)
     rp.set_defaults(fn=reap)
 
     cp = sub.add_parser("capture", help="print a pane's visible screen")

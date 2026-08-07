@@ -12,26 +12,68 @@ wheels = [
 ]
 
 [[package]]
+name = "ida-codemode-mcp"
+version = "0.2.0"
+source = { editable = "../ida-codemode-mcp" }
+dependencies = [
+    { name = "ida-domain" },
+    { name = "zeromcp" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "ida-domain", git = "https://github.com/HexRaysSA/ida-domain?branch=main" },
+    { name = "zeromcp", specifier = ">=1.5.0" },
+]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "pytest", specifier = ">=9.0.3" },
+    { name = "ruff", specifier = ">=0.12.0" },
+]
+
+[[package]]
+name = "ida-domain"
+version = "0.5.1.dev1"
+source = { git = "https://github.com/HexRaysSA/ida-domain?branch=main#8f36bbce94f0dd55e4ad5f7c8b5f0ef59b9c557a" }
+dependencies = [
+    { name = "idapro" },
+    { name = "packaging" },
+    { name = "typing-extensions" },
+]
+
+[[package]]
+name = "idapro"
+version = "0.0.10"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/f8/75/249c605cc144a6b3778c48381d31ff9242f3e0b7ae23a9ca9c27224e641a/idapro-0.0.10.tar.gz", hash = "sha256:417c03c4605d18417e470f6a748e397b39d6d5829ebd3bbdedd92ff5b9092d11", size = 1060989, upload-time = "2026-07-15T12:55:22.313Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/e8/83/7b02832cc8b057f686cccdb771fe80282f801a9b798961f8070bb468c73c/idapro-0.0.10-py3-none-any.whl", hash = "sha256:43f227953a0e348ced21c050d277b7ce34103e2ce05fc739b7d8c186ef0e1542", size = 2194897, upload-time = "2026-07-15T12:55:20.88Z" },
+]
+
+[[package]]
 name = "idatui"
 version = "0.0.1"
 source = { editable = "." }
+dependencies = [
+    { name = "ida-codemode-mcp" },
+    { name = "pygments" },
+    { name = "textual" },
+]
 
 [package.optional-dependencies]
 dev = [
     { name = "pytest" },
 ]
-tui = [
-    { name = "pygments" },
-    { name = "textual" },
-]
 
 [package.metadata]
 requires-dist = [
-    { name = "pygments", marker = "extra == 'tui'", specifier = ">=2" },
+    { name = "ida-codemode-mcp", editable = "../ida-codemode-mcp" },
+    { name = "pygments", specifier = ">=2" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8" },
-    { name = "textual", marker = "extra == 'tui'", specifier = ">=8" },
+    { name = "textual", specifier = ">=8" },
 ]
-provides-extras = ["tui", "dev"]
+provides-extras = ["dev"]
 
 [[package]]
 name = "iniconfig"
@@ -190,4 +232,13 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/78/67/9a363818028526e2d4579334460df777115bdec1bb77c08f9db88f6389f2/uc_micro_py-2.0.0.tar.gz", hash = "sha256:c53691e495c8db60e16ffc4861a35469b0ba0821fe409a8a7a0a71864d33a811", size = 6611, upload-time = "2026-03-01T06:31:27.526Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/61/73/d21edf5b204d1467e06500080a50f79d49ef2b997c79123a536d4a17d97c/uc_micro_py-2.0.0-py3-none-any.whl", hash = "sha256:3603a3859af53e5a39bc7677713c78ea6589ff188d70f4fee165db88e22b242c", size = 6383, upload-time = "2026-03-01T06:31:26.257Z" },
+]
+
+[[package]]
+name = "zeromcp"
+version = "1.5.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/95/10/0c5018221766413c808b62f229a3b6b2cd0e4b10bc9ac25fee6152c22938/zeromcp-1.5.0.tar.gz", hash = "sha256:ef4e590ddb20a30a2ceaee86dbf893c9edb5d3e583c22a0ea7025e94763e59d2", size = 95257, upload-time = "2026-07-22T13:39:29.535Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/8c/46/aa0e0941b511969a3eb70ea19add43b22c7336a4bf65a4fe4ea2176faf25/zeromcp-1.5.0-py3-none-any.whl", hash = "sha256:ca3b67687850ed463a255c180a286901ea69343612dc84ef279ec75b460f77ee", size = 21875, upload-time = "2026-07-22T13:39:28.44Z" },
 ]

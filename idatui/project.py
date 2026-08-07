@@ -23,7 +23,8 @@ firmware image, a cleaned build tree).
 A source whose size/mtime no longer matches the staged copy is re-staged, and its
 now-stale database is dropped (the DB describes the old bytes).
 
-stdlib-only, like the domain/worker layers — the TUI is the only Textual consumer.
+The model has no IDA imports. Staging consults ida_codemode's registry before
+replacing files so it never mutates a database owned by a GUI/shared worker.
 """
 from __future__ import annotations
 
@@ -56,7 +57,7 @@ class BinaryRef:
     #: it is, a raw firmware image doesn't, and IDA defaults to metapc at 0.
     processor: str = ""   # IDA processor name: arm, armb, mipsb, metapc, …
     base: int = 0         # load address (natural, e.g. 0x8000000)
-    ida_args: str = ""    # escape hatch: extra IDA command-line switches
+    ida_args: str = ""    # legacy -p/-b/-T switches accepted by Code Mode adapter
 
     @property
     def db(self) -> str:
@@ -310,13 +311,25 @@ class Project:
         """Ensure ``ref`` is staged in the sidecar; returns the staged path.
 
         Re-staging a changed source drops its database: the DB describes the old
-        bytes, so keeping it would silently mismatch the disassembly (any renames
-        in it are lost, which is why callers should say so out loud).
+        bytes. Refuse while Code Mode reports a GUI/idalib owner; replacing a
+        staged executable or IDB underneath a shared live instance is corruption.
         """
         if not os.path.isfile(ref.source):
             raise ProjectError(f"no such binary: {ref.source}")
         if not self.is_stale(ref):
             return ref.staged
+        try:
+            from .codemode_client import database_owner
+            owner = database_owner(ref.db, ref.staged)
+        except Exception as exc:
+            raise ProjectError(
+                f"cannot verify Code Mode ownership before staging {ref.label}: {exc}"
+            ) from exc
+        if owner is not None:
+            raise ProjectError(
+                f"cannot restage {ref.label}: Code Mode instance {owner.record_id} "
+                f"still owns {owner.idb_path}; close/release it first"
+            )
         os.makedirs(self.bin_dir, exist_ok=True)
         tmp = ref.staged + ".staging"
         _unlink(tmp)
@@ -338,10 +351,11 @@ class Project:
         return out
 
     def sweep_scratch(self, ref: BinaryRef) -> int:
-        """Delete IDA's unpacked working files (never the ``.i64``) for ``ref``.
+        """Delete unpacked working files (never the ``.i64``) for maintenance.
 
-        A hard-killed worker leaves them behind and the database then refuses to
-        reopen. Only safe when no worker holds it.
+        Runtime paths no longer call this: Code Mode instances are shared, so a
+        registry owner may still be using these files. Callers must independently
+        prove that no GUI/idalib instance owns the database.
         """
         return sum(1 for suf in SCRATCH_SUFFIXES if _unlink(ref.staged + suf))
 

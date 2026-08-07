@@ -757,7 +757,7 @@ class RpcServer:
         batch = {"func": ops, "allow_overwrite": bool(overwrite)}
         # The worker is blocking and single-threaded; off the event loop it goes,
         # or the TUI freezes for the length of the batch.
-        res = await asyncio.to_thread(app.program.client.call, "rename", batch=batch)
+        res = await asyncio.to_thread(app.program.client.invoke, "rename", batch=batch)
         summary = res.get("summary", {}) if isinstance(res, dict) else {}
         failed = [r for r in (res.get("func") or []) if isinstance(r, dict)
                   and r.get("error")] if isinstance(res, dict) else []
@@ -768,7 +768,7 @@ class RpcServer:
         # this a batch import leaves pseudocode calling sub_98C0 forever while
         # the listing (and every readback) says memset.
         try:
-            await asyncio.to_thread(app.program.client.call, "force_recompile")
+            await asyncio.to_thread(app.program.client.invoke, "force_recompile")
         except Exception:  # noqa: BLE001 -- older worker without the tool
             pass
         app.program.bump_names()

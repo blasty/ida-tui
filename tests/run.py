@@ -51,8 +51,8 @@ import time
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 TESTS = os.path.join(ROOT, "tests")
 
-#: The IDA-capable interpreter. The pilot tests need textual AND idapro in one
-#: python; the worker python is auto-detected separately by WorkerClient.
+#: The IDA-capable interpreter. The pilot tests need textual AND the Code Mode
+#: library in one python; the database process is Code Mode's to place.
 DEFAULT_PY = os.path.expanduser("~/ida-venv/bin/python")
 
 #: Both shapes the suites print: "N passed, M failed" and "N checks, M failed".

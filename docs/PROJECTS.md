@@ -7,9 +7,11 @@ search across all of them, and (later) follow calls from one into another.
 
 ## The constraint that shapes everything
 
-`idatui/worker.py` is `serve(sock, binpath)` — **one worker process holds exactly
-one database** (idalib is main-thread-only and single-DB). So N binaries = N
-worker processes, each with the analyzed DB resident.
+IDA still exposes one active database per GUI/idalib process. Code Mode makes
+those instances discoverable and shareable: each project entry retains one
+`DatabaseHandle` lease, which may target a registered GUI or a managed idalib
+worker. N resident project databases can therefore mean up to N processes, but
+ida-tui no longer owns or terminates them.
 
 Measured cost (this box, `targets/`):
 
@@ -30,13 +32,13 @@ crypto library.
 
 Two capabilities that feel like one, but aren't:
 
-1. **Switching** to a binary needs a *live worker*.
+1. **Switching** to a binary needs a *live Code Mode lease*.
 2. **Searching across** binaries does *not* — if a per-binary index (functions,
    strings, imports/exports) is cached on disk.
 
 That split is the unlock: project-wide search stays instant across every binary,
 including ones never opened this session, and only *jumping* to a hit costs a
-worker spawn.
+Code Mode attach/open.
 
 ## Layout
 
@@ -83,17 +85,16 @@ basename and must be unique (it names the staged file).
 
 ## Runtime
 
-- **`WorkerPool`** — one `WorkerClient` per binary, spawned lazily on first
-  switch, kept resident until the memory budget is exceeded, then LRU-evicted.
-  Eviction **saves the DB first**, so returning to a binary is a DB load, not a
-  re-analysis. Binaries can be pinned to stay resident.
+- **`DatabasePool`** — one `CodeModeClient` lease per resident binary, attached
+  lazily on first switch and LRU-released when the advisory memory budget is
+  exceeded. Eviction explicitly saves managed IDBs but never implicitly saves a
+  GUI. Closing a lease never kills a GUI or another client's managed worker;
+  Code Mode owns final worker shutdown.
 - **`BinaryState`** — per binary: `client, program, nav, cur, func_index,
   pref/active/split, filter`. Switching snapshots the current state and restores
-  the target's. `_after_reconnect` already does exactly this swap (client +
-  program, reload the index, re-open the entry) — switching reuses that seam.
-- **Clean shutdown** — the worker currently does `close_database(save=False)` and
-  is hard-killed on exit, which is why wedge files accumulate. Projects need
-  save-on-evict and an orderly close anyway, so that gets fixed here.
+  the target's. `_after_reconnect` provides the client/program swap seam.
+- **Clean shutdown** — release all leases. Managed idalib workers save/close on
+  their own main thread after the final lease; GUI sessions remain open.
 
 ## UI
 
@@ -109,8 +110,8 @@ basename and must be unique (it names the staged file).
 ## Phases
 
 **Phase 1 — project model + switching. DONE.** Project file + staging
-(`idatui/project.py`), `WorkerPool` with budget eviction / save-on-evict /
-clean shutdown (`idatui/pool.py`), `BinaryState` snapshot+restore and the switch
+(`idatui/project.py`), `DatabasePool` with budgeted lease release and
+save-on-evict (`idatui/pool.py`), `BinaryState` snapshot+restore and the switch
 itself, the `Ctrl+O` switcher palette, the active binary in the status line, and
 `--project` (which creates the project when given binaries). One active binary;
 no cross-binary search yet.
@@ -118,9 +119,9 @@ no cross-binary search yet.
 Project mode is **additive**: with no `--project` the app is byte-for-byte the
 single-binary tool it was, which is what keeps the 167-check pilot honest.
 Switching reuses the `_after_reconnect` shape — swap client+program, rebuild the
-index, reopen the entry. A binary whose worker is still resident restores
-instantly (its `Program` and index are still in memory); an evicted one comes
-back with a fresh worker but keeps its nav history, since that is just addresses.
+index, reopen the entry. A binary whose lease is still resident restores
+instantly (its `Program` and index are still in memory); an evicted one attaches
+again but keeps its nav history, since that is just addresses.
 
 **Phase 2 — index cache + project-wide search. (symbols done)**
 `idatui/index.py` keeps one **SQLite FTS5 trigram** index at
@@ -222,7 +223,7 @@ records nothing — that's not navigation.
 *Pre-warm follows the linkage graph, not list order.* When a binary finishes
 indexing, `_prewarm_provider` warms the binary that provides the most of its
 imports — where a follow is most likely to take you, so its startup is paid
-before you ask. `WorkerPool.prewarm()` refuses rather than evicting: spending a
+before you ask. `DatabasePool.prewarm()` refuses rather than evicting: spending a
 binary you visited on one you haven't is a straight downgrade, and it would throw
 away that binary's caches too. At a tight budget pre-warm simply does nothing. It
 estimates the cost of a not-yet-spawned worker from the largest resident one,

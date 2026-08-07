@@ -1,5 +1,4 @@
-"""idatui — a minimal keyboard-first TUI for IDA Pro, driving idalib via a
-private unix-socket worker (idatui.worker / WorkerClient)."""
+"""idatui — a keyboard-first TUI using shared IDA Code Mode databases."""
 
 from .errors import (
     IDAError,
@@ -11,6 +10,7 @@ from .errors import (
     IDASessionError,
     Session,
 )
+from .codemode_client import CodeModeClient
 from .domain import (
     Program,
     FunctionIndex,
@@ -25,6 +25,7 @@ from .domain import (
 )
 
 __all__ = [
+    "CodeModeClient",
     "Program",
     "FunctionIndex",
     "DisasmModel",

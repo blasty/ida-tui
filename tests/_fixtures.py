@@ -50,7 +50,13 @@ async def build_pristine(binary: str, cache: str, app_factory) -> None:
             await pilot.pause(0.05)
             if app._func_index is not None and app._func_index.complete:
                 break
-        app.program.client.call("idb_save", timeout=600.0)
+        app.program.client.save_database()
+    # Textual's headless run_test context does not reliably emit App.Unmount on
+    # every platform/version; release the Code Mode lease explicitly.
+    if app.program is not None:
+        app.program.close()
+    if app.client is not None:
+        app.client.close()
     db = binary + ".i64"
     if os.path.exists(db):
         shutil.copy2(db, cache)

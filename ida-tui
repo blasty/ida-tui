@@ -3,10 +3,9 @@
 #
 #     ./ida-tui foo.elf        # open a binary and drive it — that's it
 #
-# Opening a binary spins up our own idalib worker (a unix-socket subprocess;
-# no HTTP, no supervisor). Uses the venv python that has textual (override with
-# $IDATUI_PYTHON); the worker auto-picks the python that has ida_pro_mcp
-# (override with $IDATUI_WORKER_PYTHON).
+# The launcher leases a registered IDA GUI or shared managed idalib worker
+# through ida_codemode. The selected Python must have ida-tui's dependencies;
+# override it with $IDATUI_PYTHON.
 set -eu
 
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
