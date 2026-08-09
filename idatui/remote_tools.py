@@ -510,10 +510,127 @@ def _idatui_func_footer_rows(ea, func):
     ]
 
 
+#: Row kinds, as small ints, for the packed detail index. Order is frozen: the
+#: client decodes by position.
+_IDATUI_KINDS = ("code", "data", "unknown", "sep", "funchdr", "label", "member")
+_IDATUI_KIND_ID = {k: i for i, k in enumerate(_IDATUI_KINDS)}
+
+
+def _idatui_segment_detail(addr, end, page_rows):
+    """Every listing ROW of a segment as packed arrays, with no text.
+
+    ``{eas, kinds, sizes}`` are raw buffers -- uint64, uint8, uint32, one entry
+    per row in listing order -- so the client can build its whole row index
+    (addresses, spans, ea->row map) from ONE call instead of 458 pages.
+
+    This re-implements the row sequence that ``_rows_for`` emits rather than
+    calling it, because building the dicts is most of what a page costs and
+    skipping them is the entire point. That duplication is the risk, so it is
+    covered by a test that walks a whole segment and compares this against the
+    real ``heads()`` output row for row -- if the two ever drift, that fails.
+    """
+    import array
+    import ida_segment
+
+    start = parse_address(addr)
+    seg = ida_segment.getseg(start)
+    if not seg:
+        return {"addr": str(addr), "error": "no segment", "rows": 0, "anchors": []}
+    lo, hi = seg.start_ea, seg.end_ea
+    if end:
+        try:
+            hi = min(hi, parse_address(end))
+        except Exception:
+            pass
+
+    K_CODE = _IDATUI_KIND_ID["code"]; K_DATA = _IDATUI_KIND_ID["data"]
+    K_UNK = _IDATUI_KIND_ID["unknown"]; K_SEP = _IDATUI_KIND_ID["sep"]
+    K_FUNC = _IDATUI_KIND_ID["funchdr"]; K_LABEL = _IDATUI_KIND_ID["label"]
+    K_MEMBER = _IDATUI_KIND_ID["member"]
+
+    eas = array.array("Q")
+    kinds = array.array("B")
+    sizes = array.array("I")
+    ea_ap, kind_ap, size_ap = eas.append, kinds.append, sizes.append
+
+    get_flags = ida_bytes.get_flags
+    get_item_end = ida_bytes.get_item_end
+    get_item_size = ida_bytes.get_item_size
+    next_head = ida_bytes.next_head
+    get_ea_name = ida_name.get_ea_name
+    get_func = idaapi.get_func
+    BAD = idaapi.BADADDR
+
+    # Anchors mark where heads(addr=..., count=page_rows) would START each page,
+    # so a client can refetch exactly one page. heads() stops once it has
+    # emitted >= count PHYSICAL rows, checked before the next head -- so a
+    # boundary is the first head at which the running physical count reached the
+    # limit. Anchoring every N LOGICAL rows instead looks equivalent (the two
+    # are the same number until a segment contains an undefined run) and then
+    # silently yields pages that do not line up with a refetch.
+    anchors = []
+    page_phys = 0          # physical rows emitted into the page being filled
+    rows = 0               # logical rows so far (what the scrollbar counts)
+    fn = None
+    ea = ida_bytes.get_item_head(lo)
+    while ea != BAD and ea < hi:
+        if not anchors or page_phys >= page_rows:
+            anchors.append([rows, hex(ea), len(eas)])
+            page_phys = 0
+        before = len(eas)
+        f = get_flags(ea)
+        cls = f & _MS_CLS
+        if cls != _FF_CODE and cls != _FF_DATA:
+            nh = next_head(ea, hi)
+            stop = nh if (nh != BAD and ea < nh <= hi) else hi
+            run = stop - ea
+            ea_ap(ea); kind_ap(K_UNK); size_ap(run)
+            rows += run if run > 1 else 1
+            page_phys += len(eas) - before
+            ea = stop
+            continue
+        if fn is None or not (fn.start_ea <= ea < fn.end_ea):
+            fn = get_func(ea)
+        at_start = fn is not None and fn.start_ea == ea
+        if at_start:
+            for k in (K_SEP, K_SEP, K_FUNC):      # blank, banner, `name proc`
+                ea_ap(ea); kind_ap(k); size_ap(0)
+            rows += 3
+        elif cls == _FF_CODE and get_ea_name(ea):
+            ea_ap(ea); kind_ap(K_LABEL); size_ap(0)
+            rows += 1
+        ea_ap(ea); kind_ap(K_CODE if cls == _FF_CODE else K_DATA)
+        size_ap(int(get_item_size(ea))); rows += 1
+        if cls == _FF_DATA:
+            for m in _idatui_struct_member_rows(ea):
+                ea_ap(int(m["ea"], 16) if isinstance(m["ea"], str) else m["ea"])
+                kind_ap(_IDATUI_KIND_ID.get(m.get("kind", "member"), K_MEMBER))
+                size_ap(int(m.get("size", 0) or 0)); rows += 1
+        item_end = get_item_end(ea)
+        if fn is not None and item_end >= fn.end_ea:
+            for k in (K_FUNC, K_SEP):             # `name endp`, separator
+                ea_ap(ea); kind_ap(k); size_ap(0)
+            rows += 2
+        page_phys += len(eas) - before
+        ea = item_end if item_end > ea else ea + 1
+
+    # base64, not raw bytes: the client packs answers with json.dumps(default=str),
+    # which turns a bytes object into its repr -- 4 characters per byte and
+    # unparseable at the other end. Learned by watching 2.97MB arrive as 11.26MB.
+    import base64
+    b64 = base64.b64encode
+    return {"addr": hex(lo), "end": hex(hi), "rows": rows, "heads": len(eas),
+            "anchors": anchors, "kind_names": list(_IDATUI_KINDS),
+            "eas": b64(eas.tobytes()).decode(),
+            "kinds": b64(kinds.tobytes()).decode(),
+            "sizes": b64(sizes.tobytes()).decode()}
+
+
 def segment_index(
     addr: Annotated[str, "Any address in the segment to index"],
     end: Annotated[str, "Optional exclusive end address; default = segment end"] = "",
     page_rows: Annotated[int, "Rows between anchors (default 500)"] = 500,
+    detail: Annotated[bool, "Also return every row's ea/kind/size as packed arrays"] = False,
 ) -> dict:
     """How many listing rows a segment has, and where to seek into it.
 
@@ -542,6 +659,8 @@ def segment_index(
         start = parse_address(addr)
     except Exception as e:
         return {"addr": str(addr), "error": str(e), "rows": 0, "anchors": []}
+    if detail:
+        return _idatui_segment_detail(addr, end, count)
     import ida_segment
     seg = ida_segment.getseg(start)
     if not seg:

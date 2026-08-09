@@ -1185,11 +1185,21 @@ class ListingView(SearchMixin, NavMixin, ColumnCursor, ScrollView, can_focus=Tru
         model = self.model
         if model is None:
             return
-        # Load just enough to render the viewport around the cursor, so the
-        # listing appears immediately even on a huge segment; the rest streams
-        # in via _grow. (load_all here would blank the pane for seconds.)
+        # One call gets the WHOLE row index -- every row's address, kind and
+        # size, and the page boundaries -- so the scrollbar is right immediately
+        # and _grow has nothing left to stream. The rows arrive text-less and
+        # materialise a page at a time as they are read.
+        #
+        # It is an optimisation, not a contract: an older or unhappy backend
+        # returns nothing usable and we stream exactly as before.
         height = max(self.size.height, 1)
-        model.ensure(self.cursor + height + 2 * ListingModel.PAGE)
+        if model.build_from_index():
+            # Render the viewport HERE, on this worker thread. Reading a
+            # skeleton page fetches it, and doing that lazily from render_line
+            # would put an RPC on the UI loop for the first paint.
+            model.window(max(self.cursor - height, 0), height * 3)
+        else:
+            model.ensure(self.cursor + height + 2 * ListingModel.PAGE)
         self.app.call_from_thread(self._on_primed, len(model), model.complete)
         if not model.complete:
             self._grow()

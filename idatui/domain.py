@@ -17,9 +17,11 @@ Textual worker threads; the internal prefetch pool is separate and small.
 
 from __future__ import annotations
 
+import array
 import bisect
 import re
 import threading
+from base64 import b64decode
 from concurrent.futures import ThreadPoolExecutor
 from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
@@ -801,6 +803,82 @@ class ListingModel:
     def max_raw_len(self) -> int:
         with self._lock:
             return self._max_raw
+
+    def build_from_index(self) -> bool:
+        """Populate the whole row index from ONE call instead of streaming it.
+
+        ``segment_index(detail=True)`` walks the segment and returns every row's
+        address, kind and size as packed arrays, plus the page boundaries a
+        refetch would use. That is everything this model needs to know how many
+        rows there are and where each one lives -- all that is missing is the
+        rendered text, which is exactly what a skeleton page is missing too.
+
+        So the rows land marked ``_SKELETON_GEN`` and the FIRST read of any page
+        materialises it through the existing ``_ensure_text``/``_ensure_page``
+        path, the same one a rename uses. Measured on bash: 594ms and one call,
+        against 1827ms and 458 for streaming the same thing.
+
+        Returns False if the backend cannot supply it, in which case the caller
+        should stream as before -- this is an optimisation, not a new contract.
+        """
+        try:
+            idx = self._prog.client.invoke(
+                "segment_index", addr=hex(self.seg_start), end=hex(self.seg_end),
+                page_rows=self.PAGE, detail=True)
+        except Exception:  # noqa: BLE001 -- fall back to streaming
+            return False
+        if not isinstance(idx, dict) or idx.get("error") or "eas" not in idx:
+            return False
+        try:
+            eas = array.array("Q"); eas.frombytes(b64decode(idx["eas"]))
+            kinds = array.array("B"); kinds.frombytes(b64decode(idx["kinds"]))
+            sizes = array.array("I"); sizes.frombytes(b64decode(idx["sizes"]))
+        except Exception:  # noqa: BLE001
+            return False
+        names = idx.get("kind_names") or []
+        anchors = idx.get("anchors") or []
+        n = len(eas)
+        if not (n == len(kinds) == len(sizes)) or not anchors:
+            return False
+
+        heads: list[Head] = []
+        row_at: list[int] = []
+        by_ea: dict[int, int] = {}
+        rows = 0
+        ap = heads.append
+        rap = row_at.append
+        for i in range(n):
+            ea = eas[i]
+            kind = names[kinds[i]] if kinds[i] < len(names) else "unknown"
+            size = sizes[i]
+            ap(Head(ea, kind, size, ""))
+            rap(rows)
+            # Banner/label rows are display-only; navigation must land on the
+            # real head at that address. Same rule as the streaming loader.
+            if kind not in ("sep", "funchdr", "label"):
+                by_ea.setdefault(ea, rows)
+            rows += size if (kind == "unknown" and size > 1) else 1
+
+        with self._lock:
+            self._heads = heads
+            self._head_eas = list(eas)
+            self._head_gen = [self._SKELETON_GEN] * n
+            self._row_at = row_at
+            self._by_ea = by_ea
+            self._rows = rows
+            # Anchors are [logical_row, ea, head_index] at the exact boundaries
+            # heads(count=PAGE) pages on, so _ensure_page can refetch one page
+            # and have it line up head for head.
+            self._page_head = [a[2] for a in anchors]
+            self._page_addr = [_as_int(a[1]) for a in anchors]
+            self._page_digest = [None] * len(anchors)
+            self._page_rows = [
+                (anchors[k + 1][2] if k + 1 < len(anchors) else n) - anchors[k][2]
+                for k in range(len(anchors))]
+            self._skeleton = True
+            self._done = True
+            self._next = None
+        return True
 
     def load_next_page(self, text: bool = True) -> int:
         """Load one more page of heads; returns how many were added.

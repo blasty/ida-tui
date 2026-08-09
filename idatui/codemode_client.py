@@ -1209,7 +1209,7 @@ _OPERATIONS["pc_num_format"] = _remote_op(
 #: remote_tools.segment_index: the alternative is fetching every row.
 _OPERATIONS["segment_index"] = _remote_op(
     'segment_index(addr=a["addr"], end=a.get("end", ""),'
-    ' page_rows=int(a.get("page_rows", 500)))')
+    ' page_rows=int(a.get("page_rows", 500)), detail=bool(a.get("detail", False)))')
 
 _HEADS = _remote_op(
     'heads(addr=a["addr"], count=int(a.get("count", 200)),'

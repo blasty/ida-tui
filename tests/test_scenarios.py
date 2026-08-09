@@ -459,6 +459,38 @@ async def s_segment_index(c: Ctx):
     c.check("every anchor points at the row it claims", not bad,
             f"{len(bad)} wrong, first={bad[:2]}")
 
+    # A model built from the index must be INDISTINGUISHABLE from a streamed
+    # one. That is the invariant the whole optimisation rests on: _prime builds
+    # from the index now, and every read path -- rendering, goto, xrefs, search,
+    # rename refresh -- indexes into these arrays assuming they were produced
+    # the old way. Comparing row counts alone would miss a shifted _row_at or a
+    # _by_ea that sends a jump to the wrong line.
+    #
+    # BOTH models are built here, back to back. Comparing against the app's
+    # long-lived model instead is wrong by one row and flaky: earlier scenarios
+    # rename and define things, so that model describes the database as it was
+    # at boot, not as it is now.
+    from idatui.domain import ListingModel  # noqa: PLC0415
+    args = (app.program, model.seg_start, model.seg_end, model.name)
+    idx_model, streamed = ListingModel(*args), ListingModel(*args)
+    if not idx_model.build_from_index():
+        c.check("build_from_index works", False)
+        return
+    while not streamed.complete:
+        if streamed.load_next_page(text=False) == 0:
+            break
+    c.check("an index-built model is complete immediately", idx_model.complete)
+    c.check("index-built model has the streamed row count",
+            len(idx_model) == len(streamed), f"{len(idx_model)} vs {len(streamed)}")
+    for field in ("_row_at", "_head_eas", "_by_ea", "_page_head",
+                  "_page_addr", "_page_rows"):
+        a, b = getattr(idx_model, field), getattr(streamed, field)
+        c.check(f"index-built {field} matches streaming", a == b,
+                f"len {len(a)} vs {len(b)}")
+    c.check("index-built rows carry the same ea/kind/size",
+            [(h.ea, h.kind, h.size) for h in idx_model._heads]
+            == [(h.ea, h.kind, h.size) for h in streamed._heads])
+
 
 @scenario("skeleton_pages")
 async def s_skeleton_pages(c: Ctx):
