@@ -820,7 +820,14 @@ class ListingModel:
 
         Returns False if the backend cannot supply it, in which case the caller
         should stream as before -- this is an optimisation, not a new contract.
+
+        IDEMPOTENT, and that is load-bearing: the view re-primes on every switch
+        back to the listing, so rebuilding here unconditionally put a ~900ms
+        segment_index in front of every Tab out of the decompiler.
         """
+        with self._lock:
+            if self._done and self._heads:
+                return True          # already indexed; re-priming is a no-op
         try:
             idx = self._prog.client.invoke(
                 "segment_index", addr=hex(self.seg_start), end=hex(self.seg_end),

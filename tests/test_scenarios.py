@@ -492,6 +492,48 @@ async def s_segment_index(c: Ctx):
             == [(h.ea, h.kind, h.size) for h in streamed._heads])
 
 
+@scenario("reprime_is_free")
+async def s_reprime_is_free(c: Ctx):
+    """Switching back to the listing must not rebuild the row index.
+
+    The listing view re-primes every time it is shown, and priming builds the
+    whole index. Building it is ~600-900ms, so doing it again on each Tab out of
+    the decompiler put nearly a second in front of a keystroke -- the listing
+    was still CORRECT, which is why every other test passed, it was just slow.
+
+    Counting backend calls is the only way to see that, so this counts them.
+    """
+    app = c.app
+    await c.open_biggest("listing")
+    lv = app.query_one(ListingView)
+    if lv.model is None:
+        c.check("listing model exists", False)
+        return
+    await c.wait(lambda: lv.model.complete, 30)
+
+    client = app.program.client
+    original = type(client).invoke
+    seen: list[str] = []
+
+    def counting(self, operation, *a, **kw):
+        seen.append(operation)
+        return original(self, operation, *a, **kw)
+
+    type(client).invoke = counting
+    try:
+        for _ in range(3):                     # decomp and back, three times
+            await c.press("tab")
+            await c.pause(0.05)
+            await c.press("tab")
+            await c.pause(0.05)
+    finally:
+        type(client).invoke = original
+
+    rebuilds = seen.count("segment_index")
+    c.check("switching views never rebuilds the segment index", rebuilds == 0,
+            f"segment_index called {rebuilds}x during 3 view switches: {seen}")
+
+
 @scenario("skeleton_pages")
 async def s_skeleton_pages(c: Ctx):
     """The background grower loads text-less pages; reading one must fill it in.
