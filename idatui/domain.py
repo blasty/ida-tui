@@ -45,9 +45,12 @@ _TRUNC_RE = re.compile(r"\[(\d+) chars total\]\s*$")
 # Value models
 # --------------------------------------------------------------------------- #
 def _as_int(v) -> int:
+    # Both arms of the ternary this used to end with were `int(v, 16)`, so the
+    # isinstance+startswith test in front of them decided nothing and ran on
+    # every address the client parses -- 55k times per 60 listing pages.
     if isinstance(v, int):
         return v
-    return int(v, 16) if isinstance(v, str) and v.startswith("0x") else int(v, 16)
+    return int(v, 16)
 
 
 @dataclass(frozen=True)
@@ -140,15 +143,22 @@ class Head(NamedTuple):
         # tool emits [str, str] and [int, int, int], so re-coercing them was
         # re-proving that once per listing row -- and copying them into tuples
         # destroyed the sharing the worker's line cache had just created.
+        #
+        # Built POSITIONALLY, and with the address converted inline. This is the
+        # most-constructed object in the codebase (227k of them to stream one
+        # bash) and the two together are worth ~40%: keyword construction has to
+        # match names against the tuple's fields, and _as_int was a call per row
+        # to do one isinstance and an int().
+        v = d["ea"]
         return cls(
-            ea=_as_int(d["ea"]),
-            kind=d.get("kind", "unknown"),
-            size=int(d.get("size", 0) or 0),
-            text=d.get("text", ""),
-            name=d.get("name"),
-            raw=raw,
-            spans=d.get("spans") or None,
-            ops=d.get("ops") or None,
+            v if isinstance(v, int) else int(v, 16),
+            d.get("kind", "unknown"),
+            int(d.get("size", 0) or 0),
+            d.get("text", ""),
+            d.get("name"),
+            raw,
+            d.get("spans") or None,
+            d.get("ops") or None,
         )
 
 
