@@ -173,7 +173,7 @@ test is empty while the protocol works fine).
 ## Tests
 
 ```sh
-python3 tests/run.py --fast     # 302 checks, <1s, any python3 — between edits
+python3 tests/run.py --fast     # 380 checks, <1s, any python3 — between edits
 python3 tests/run.py --list     # what runs, and what needs IDA
 python3 tests/run.py            # 788 checks, ~2m — before a commit
 ```

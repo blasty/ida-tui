@@ -32,7 +32,7 @@ from .errors import IDAConnectionError, IDATimeoutError, IDAToolError, Session
 # The paging/graph/trace layers and their offline test suites must keep importing
 # `idatui` on a machine with no IDA and no Code Mode installed -- that is the
 # house rule the stdlib-only worker client used to satisfy for free, and
-# `tests/run.py --fast` (257 checks, any python3) depends on it. A hard top-level
+# `tests/run.py --fast` (380 checks, any python3) depends on it. A hard top-level
 # import here makes the whole package unimportable, so the failure is deferred to
 # the first operation that genuinely needs the library.
 _CODEMODE_ERROR: Exception | None = None
