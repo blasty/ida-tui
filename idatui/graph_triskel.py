@@ -271,6 +271,56 @@ def _hits(by_col, by_row, p: tuple[int, int], q: tuple[int, int]) -> list[G.Node
             if n.x < hi and lo < n.right]
 
 
+def _free_line(blocked: list[tuple[int, int]], want: int,
+               allow: tuple[int, int] | None = None) -> int | None:
+    """The coordinate nearest ``want`` that is in none of ``blocked``.
+
+    ``blocked`` is a list of inclusive intervals. Jumping to the near side of
+    the *first* box in the way is not enough in a dense layout -- that column is
+    very often inside the next box along -- so consider every box the run
+    passes and step out of each interval in turn.
+
+    ``allow`` constrains the result to an inclusive range, which is how a port
+    stays on its own box's border: everything outside becomes blocked.
+    """
+    if allow is not None:
+        lo, hi = allow
+        if lo > hi:
+            return None
+        blocked = list(blocked) + [(hi + 1, hi + 1 + 10 ** 6)]
+        if lo > 0:
+            blocked.append((0, lo - 1))
+    if not blocked:
+        return want
+    merged: list[list[int]] = []
+    for lo, hi in sorted(blocked):
+        if merged and lo <= merged[-1][1] + 1:
+            merged[-1][1] = max(merged[-1][1], hi)
+        else:
+            merged.append([lo, hi])
+
+    def inside(v: int) -> list[int] | None:
+        for iv in merged:
+            if iv[0] <= v <= iv[1]:
+                return iv
+        return None
+
+    if inside(want) is None:
+        return want
+    low = want
+    while (iv := inside(low)) is not None:
+        low = iv[0] - 1
+        if low < 0:
+            low = None
+            break
+    high = want
+    while (iv := inside(high)) is not None:
+        high = iv[1] + 1
+    if low is None:
+        return high
+    return low if want - low <= high - want else high
+
+
 def _repair_boxes(g: G._Graph, routes: list[G.Route]) -> int:
     """Detour any segment that runs through a box. Returns the number moved.
 
@@ -289,38 +339,85 @@ def _repair_boxes(g: G._Graph, routes: list[G.Route]) -> int:
     and the arrowhead, and those belong on the border.
     """
     by_col, by_row = _box_index(g)
+    real = [n for n in g.nodes.values() if not n.dummy]
     moved = 0
     for rt in routes:
-        for i in range(1, len(rt.pts) - 2):
-            p, q = rt.pts[i], rt.pts[i + 1]
-            for _ in range(4):
-                hit = _hits(by_col, by_row, p, q)
-                if not hit:
-                    break
-                n = hit[0]
+        # Moving one segment stretches the two beside it, which can push THEM
+        # into a box, so sweep until the route stops changing. Three passes is
+        # plenty in practice and bounds the work on a pathological route.
+        for _ in range(3):
+            dirty = False
+            last = len(rt.pts) - 2
+            for i in range(0, len(rt.pts) - 1):
+                p, q = rt.pts[i], rt.pts[i + 1]
+                if not _hits(by_col, by_row, p, q):
+                    continue
                 if p[1] == q[1]:                       # vertical: shift column
-                    col = p[1]
-                    out = n.x - 1                      # nearest side of the box
-                    if col - n.x > n.right - col or out < 0:
-                        out = n.right + 1              # never detour off-canvas
-                    p, q = (p[0], out), (q[0], out)
-                else:                                  # horizontal: shift row
-                    row = p[0]
-                    out = n.y - 1
-                    if row - n.y > n.bottom - row or out < 0:
-                        out = n.bottom + 1
-                    p, q = (out, p[1]), (out, q[1])
-                rt.pts[i], rt.pts[i + 1] = p, q
+                    lo, hi = sorted((p[0], q[0]))
+                    blocked = [(n.x + 1, n.right - 1) for n in real
+                               if n.y < hi and lo < n.bottom]
+                    # The first and last segments carry the port and the
+                    # arrowhead, so they may only move ALONG their own box's
+                    # border -- but move they must: triskel is happy to park a
+                    # block directly above its successor and drive the final
+                    # approach straight through it. Another port on the same
+                    # border is almost always free.
+                    allow = None
+                    if i == 0 or i == last:
+                        ends = []
+                        if i == 0:
+                            ends.append(g.nodes[rt.edge.src])
+                        if i == last:
+                            ends.append(g.nodes[rt.edge.dst])
+                        allow = (max(n.x + 1 for n in ends),
+                                 min(n.right - 1 for n in ends))
+                    col = _free_line(blocked, p[1], allow)
+                    if col is None:
+                        continue
+                    rt.pts[i], rt.pts[i + 1] = (p[0], col), (q[0], col)
+                elif i not in (0, last):               # horizontal: shift row
+                    lo, hi = sorted((p[1], q[1]))
+                    blocked = [(n.y + 1, n.bottom - 1) for n in real
+                               if n.x < hi and lo < n.right]
+                    row = _free_line(blocked, p[0])
+                    if row is None:
+                        continue
+                    rt.pts[i], rt.pts[i + 1] = (row, p[1]), (row, q[1])
+                else:
+                    continue
                 moved += 1
+                dirty = True
+            if not dirty:
+                break
     return moved
 
 
 def _verify(g: G._Graph, routes: list[G.Route]) -> None:
-    """Raise if any segment still crosses a box, so ``layout()`` falls back.
+    """Raise if the drawing breaks an invariant, so ``layout()`` falls back.
 
-    The invariant is worth more than the engine: a layout with more crossings
-    beats one that draws edges through the code.
+    The invariants are worth more than the engine: a layout with more crossings
+    beats one that draws edges through the code, or one block over another.
+
+    Overlapping boxes are triskel's, not ours -- it superimposes independently
+    laid out SESE regions, and on 2 of `ls`'s 400 functions two blocks end up a
+    couple of columns into each other in float space, before any rounding. In a
+    PNG that is a cosmetic nick on a border. Here the boxes are made of text, so
+    one block's disassembly overwrites another's.
     """
+    rows: dict[int, list[G.Node]] = {}
+    for n in g.nodes.values():
+        if n.dummy:
+            continue
+        for r in range(n.y, n.y + n.h):
+            rows.setdefault(r, []).append(n)
+    for r, boxes in rows.items():
+        boxes.sort(key=lambda n: n.x)
+        for a, b in zip(boxes, boxes[1:]):
+            if b.x <= a.right:
+                raise RuntimeError(
+                    f"blocks {a.id} and {b.id} overlap on row {r} "
+                    f"(x[{a.x},{a.right}] vs x[{b.x},{b.right}])")
+
     by_col, by_row = _box_index(g)
     for rt in routes:
         for p, q in zip(rt.pts, rt.pts[1:]):

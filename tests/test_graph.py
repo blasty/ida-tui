@@ -211,14 +211,38 @@ def t_corpus(path: str) -> None:
     print(f"\ncorpus: {len(recs)} functions from {path}")
     worst_ms = 0.0
     worst_name = ""
+    fellback: list[tuple[str, str | None]] = []
+    worst_any_ms = 0.0
+    worst_any_name = ""
     t0 = time.perf_counter()
     for rec in recs:
         blocks = [G.Block(id=b["id"], start=b["start"], end=b["end"],
                           succs=[(d, k) for d, k in b["succs"]])
                   for b in rec["blocks"]]
         lay = layout(blocks, sizer)
-        if lay.stats["ms"] > worst_ms:
+        # A SILENT fallback is the failure mode that matters here: the engine
+        # under test quietly stops being the engine under test, and every
+        # invariant below then passes for the wrong reason. `ls` main (329
+        # blocks) used to fall back on all three zoom levels because a final
+        # approach was routed through the block above its target.
+        #
+        # Falling back is legitimate -- it is how an upstream layout defect is
+        # kept off the screen -- so this asserts it is rare and explained,
+        # not that it never happens.
+        if ENGINE != "auto" and lay.stats["engine"] != ENGINE:
+            fellback.append((rec["name"], lay.stats.get("engine_error")))
+            check(bool(lay.stats.get("engine_error")),
+                  f"corpus {rec['name']}: a fallback must record its reason")
+        # Time the engine only on the functions it would actually be ASKED for.
+        # `auto` hands anything over AUTO_TRISKEL_MAX_BLOCKS to native, and the
+        # view refuses to draw past 400 blocks at all, so a forced triskel run
+        # on a 495-block monster times a call the app cannot make.
+        reachable = (ENGINE != "triskel"
+                     or len(blocks) <= G.AUTO_TRISKEL_MAX_BLOCKS)
+        if reachable and lay.stats["ms"] > worst_ms:
             worst_ms, worst_name = lay.stats["ms"], rec["name"]
+        if lay.stats["ms"] > worst_any_ms:
+            worst_any_ms, worst_any_name = lay.stats["ms"], rec["name"]
         check(no_box_overlap(lay), f"corpus {rec['name']}: boxes must not overlap")
         check(len(lay.nodes) == len(blocks),
               f"corpus {rec['name']}: every block is placed")
@@ -230,7 +254,17 @@ def t_corpus(path: str) -> None:
     total = (time.perf_counter() - t0) * 1000
     print(f"  laid out {len(recs)} functions in {total:.0f} ms "
           f"(worst {worst_ms:.0f} ms: {worst_name})")
-    check(worst_ms < 2000, f"corpus: worst layout under 2s ({worst_ms:.0f} ms)")
+    if fellback:
+        print(f"  {len(fellback)} fell back to native:")
+        for name, why in fellback:
+            print(f"    {name}: {why}")
+    check(len(fellback) <= max(2, len(recs) // 20),
+          f"corpus: {ENGINE} fell back on {len(fellback)}/{len(recs)} functions")
+    check(worst_ms < 2000, f"corpus: worst REACHABLE layout under 2s "
+          f"({worst_ms:.0f} ms: {worst_name})")
+    # Nothing may blow up quadratically even when forced past its own limits.
+    check(worst_any_ms < 5000, f"corpus: worst layout at any size under 5s "
+          f"({worst_any_ms:.0f} ms: {worst_any_name})")
 
 
 def main() -> int:

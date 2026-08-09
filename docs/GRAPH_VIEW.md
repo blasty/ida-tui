@@ -61,9 +61,13 @@ text.
 
 `graph.layout(blocks, sizer, engine=...)` takes `auto` (the default, also
 `$IDATUI_GRAPH_ENGINE`), `native` or `triskel`, and `e` cycles them in the view.
-`auto` prefers **triskel** where it is installed and the function is at most 250
+`auto` prefers **triskel** where it is installed and the function is at most 180
 blocks, and falls back to **native** otherwise — including if triskel raises,
-which is never fatal.
+which is never fatal, and the status line then says why.
+
+The 180 is an interactivity budget: layout runs on every open and every zoom
+keypress, and triskel's cost knees hard just past it (174 blocks: 66 ms;
+233 blocks: 489 ms; 329: 555 ms; 424: 1.5 s, against native's 25/72/93/144).
 
 | | native | triskel |
 |---|---|---|

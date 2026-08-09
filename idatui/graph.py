@@ -702,11 +702,18 @@ def _native_engine(g: _Graph, root: int) -> tuple[list[Route], int]:
 #: Engine names accepted by ``layout(engine=...)`` and ``IDATUI_GRAPH_ENGINE``.
 ENGINES = ("auto", "native", "triskel")
 
-#: Above this many blocks ``auto`` stays native: triskel's SESE decomposition
-#: costs ~10x at 424 blocks (1.5s vs 145ms), and a layout that blocks the UI for
-#: a second is worse than a layout with more crossings. Measured, see
-#: docs/TRISKEL_EVAL.md.
-AUTO_TRISKEL_MAX_BLOCKS = 250
+#: Above this many blocks ``auto`` stays native. Layout runs on every open and
+#: every zoom keypress, so this is an interactivity budget, not a correctness
+#: one. Triskel's cost knees hard (measured on `ls`, 400 functions):
+#:
+#:     blocks   174    233    256    329    424    495
+#:     native    25     72     23     93    144    203  ms
+#:     triskel   66    489    266    555   1501   1968  ms
+#:
+#: 180 keeps the worst auto-triskel layout in the tens of milliseconds. Raising
+#: it buys prettier pictures of graphs nobody can read anyway -- the view
+#: refuses to draw past 400 blocks at all.
+AUTO_TRISKEL_MAX_BLOCKS = 180
 
 
 def _pick_engine(engine: str | None, nblocks: int) -> str:
@@ -735,6 +742,7 @@ def layout(blocks: list[Block], sizer, entry: int | None = None,
     g, root = _build(blocks, sizer, entry)
 
     layers = 0
+    err = None
     if not g.nodes:
         routes = []
     elif name == "triskel":
@@ -744,8 +752,10 @@ def layout(blocks: list[Block], sizer, entry: int | None = None,
         except Exception as exc:                      # noqa: BLE001
             # Native code with a history of throwing on degenerate CFGs. The
             # graph view is a convenience; losing it beats losing the session.
+            # Keep the REASON: a fallback the user can see but not explain is
+            # only marginally better than a crash.
             _LOG.warning("triskel layout failed (%s), falling back", exc)
-            name = "native+triskel-failed"
+            name, err = "native (triskel failed)", f"{type(exc).__name__}: {exc}"
             g, root = _build(blocks, sizer, entry)
             routes, layers = _native_engine(g, root)
     else:
@@ -836,6 +846,7 @@ def layout(blocks: list[Block], sizer, entry: int | None = None,
         "edges": len(g.edges),
         "back": sum(1 for e in g.edges if e.back),
         "engine": name,
+        "engine_error": err,
         "ms": (time.perf_counter() - t0) * 1000,
     }
     return Layout(nodes=order, by_id={n.id: n for n in g.nodes.values()},

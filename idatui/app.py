@@ -2685,6 +2685,9 @@ class GraphView(NavMixin, ScrollView, can_focus=True):
         # installed" on its own sends people to check the wrong python.
         note = ("" if graph_triskel.available()
                 else f" (no pytriskel in {sys.executable})")
+        # A fallback with no reason is a bug report nobody can file.
+        if self.lay and self.lay.stats.get("engine_error"):
+            note = f" \u2014 {self.lay.stats['engine_error']}"
         self.app._status(f"graph: engine {self._engine} \u2192 {got}{note}")
 
     def action_center(self) -> None:
