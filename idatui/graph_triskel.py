@@ -300,16 +300,16 @@ def _repair_boxes(g: G._Graph, routes: list[G.Route]) -> int:
                 n = hit[0]
                 if p[1] == q[1]:                       # vertical: shift column
                     col = p[1]
-                    near, far = n.x - 1, n.right + 1
-                    if col - n.x > n.right - col or near < 0:
-                        near, far = far, near          # never detour off-canvas
-                    p, q = (p[0], near), (q[0], near)
+                    out = n.x - 1                      # nearest side of the box
+                    if col - n.x > n.right - col or out < 0:
+                        out = n.right + 1              # never detour off-canvas
+                    p, q = (p[0], out), (q[0], out)
                 else:                                  # horizontal: shift row
                     row = p[0]
-                    near, far = n.y - 1, n.bottom + 1
-                    if row - n.y > n.bottom - row or near < 0:
-                        near, far = far, near
-                    p, q = (near, p[1]), (near, q[1])
+                    out = n.y - 1
+                    if row - n.y > n.bottom - row or out < 0:
+                        out = n.bottom + 1
+                    p, q = (out, p[1]), (out, q[1])
                 rt.pts[i], rt.pts[i + 1] = p, q
                 moved += 1
     return moved
