@@ -100,7 +100,7 @@ anchors. Renames, retypes and comments write back.
 
 **Graph** (`space`) — basic blocks laid out with a real layered (Sugiyama) algorithm
 and routed, colour-coded edges. The boxes hold the *same rows* as the listing, so
-renames and xrefs work inside them. → [`docs/GRAPH_VIEW.md`](docs/GRAPH_VIEW.md)
+renames and xrefs work inside them.
 
 **Split view** (`s`) — listing and pseudocode side by side, cursor-synced. The
 focused pane drives; the other highlights the instructions the current C line owns.
@@ -135,8 +135,7 @@ python -m idatui.drive pc main               # pseudocode of main
 python -m idatui.drive rename sub_5BE0 foo   # goto + rename
 ```
 
-→ [`docs/RPC.md`](docs/RPC.md) · scripted feature tour for screen recordings:
-`python tools/demo.py --spawn`
+Scripted feature tour, for screen recordings: `python tools/demo.py --spawn`
 
 **Also** — hex view (`\`), strings (`"`), symbol and command palettes
 (`ctrl+n`/`ctrl+p`), multi-binary projects, and a splash that renders as a real
@@ -162,18 +161,7 @@ Before optimising or debugging a slow run, read
 [`.fastfeedback/SPEED.md`](.fastfeedback/SPEED.md) — per-suite timings, the known
 flake, and the four ways a test here wastes minutes.
 
-## Docs
-
-- [`docs/RPC.md`](docs/RPC.md) — the RPC protocol, verb by verb
-- [`docs/GRAPH_VIEW.md`](docs/GRAPH_VIEW.md) — how the graph is laid out
-- [`docs/CODEMODE_UPSTREAM.md`](docs/CODEMODE_UPSTREAM.md) — findings from porting to
-  IDA Code Mode, and which are fixed upstream
-- [`docs/PROJECTS.md`](docs/PROJECTS.md), [`docs/SPLIT_VIEW.md`](docs/SPLIT_VIEW.md),
-  [`docs/TEXTUAL_NOTES.md`](docs/TEXTUAL_NOTES.md),
-  [`docs/PAGING_FINDINGS.md`](docs/PAGING_FINDINGS.md),
-  [`docs/TRISKEL_EVAL.md`](docs/TRISKEL_EVAL.md)
-
-### Working on this with an LLM agent
+## Working on this with an LLM agent
 
 [`.agents/skills/idatui/SKILL.md`](.agents/skills/idatui/SKILL.md) is an
 [Agent Skills](https://agentskills.io/specification) skill covering the architecture,
