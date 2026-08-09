@@ -412,6 +412,54 @@ async def s_auto_land(c: Ctx):
     c.check("auto-land is idempotent (guarded)", app._cur is prev)
 
 
+@scenario("segment_index")
+async def s_segment_index(c: Ctx):
+    """segment_index must count EXACTLY what streaming the pages produces.
+
+    It exists so the listing can know its row total without fetching every row
+    (1 call and ~0.5s instead of 458 calls and ~1.8s on bash). That is only
+    usable if the number is exact: the total sizes the scrollbar, and the
+    anchors are what a future "seek to row N" would jump through, so being off
+    by a handful of rows means the bar lies and a jump lands in the wrong place.
+
+    Approximating it is the tempting mistake, which is why this compares against
+    the real thing rather than a tolerance.
+    """
+    app = c.app
+    await c.open_biggest("listing")
+    lv = app.query_one(ListingView)
+    model = lv.model
+    if model is None:
+        c.check("listing model exists", False)
+        return
+    await c.wait(lambda: model.complete, 30)
+    if not model.complete:
+        c.check("segment streamed for comparison", False)
+        return
+
+    idx = app.program.client.invoke("segment_index", addr=hex(model.seg_start))
+    c.check("segment_index counts exactly what streaming produced",
+            idx.get("rows") == len(model),
+            f"index={idx.get('rows')} streamed={len(model)}")
+    c.check("it reports the same segment",
+            int(str(idx.get("addr")), 16) == model.seg_start,
+            f"{idx.get('addr')} vs {model.seg_start:#x}")
+    anchors = idx.get("anchors") or []
+    c.check("anchors cover the segment",
+            len(anchors) >= max(1, len(model) // 500),
+            f"{len(anchors)} anchors for {len(model)} rows")
+
+    # Every anchor must name the address of the row it claims, or seeking to it
+    # would land somewhere else entirely.
+    bad = []
+    for row, ea in anchors:
+        h = model.get(row)
+        if h is None or h.ea != int(str(ea), 16):
+            bad.append((row, ea, hex(h.ea) if h else None))
+    c.check("every anchor points at the row it claims", not bad,
+            f"{len(bad)} wrong, first={bad[:2]}")
+
+
 @scenario("skeleton_pages")
 async def s_skeleton_pages(c: Ctx):
     """The background grower loads text-less pages; reading one must fill it in.

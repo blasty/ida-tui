@@ -1205,6 +1205,12 @@ _OPERATIONS["pc_num_format"] = _remote_op(
 # would reformat) and had no digest/expect support (so every page was re-sent
 # after any edit), and whose span walk was the per-character loop our own
 # version had already been rewritten to avoid.
+#: Row count + seek anchors for a whole segment, in ONE call. See
+#: remote_tools.segment_index: the alternative is fetching every row.
+_OPERATIONS["segment_index"] = _remote_op(
+    'segment_index(addr=a["addr"], end=a.get("end", ""),'
+    ' page_rows=int(a.get("page_rows", 500)))')
+
 _HEADS = _remote_op(
     'heads(addr=a["addr"], count=int(a.get("count", 200)),'
     ' offset=int(a.get("offset", 0)), end=a.get("end", ""),'

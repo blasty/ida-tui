@@ -510,6 +510,95 @@ def _idatui_func_footer_rows(ea, func):
     ]
 
 
+def segment_index(
+    addr: Annotated[str, "Any address in the segment to index"],
+    end: Annotated[str, "Optional exclusive end address; default = segment end"] = "",
+    page_rows: Annotated[int, "Rows between anchors (default 500)"] = 500,
+) -> dict:
+    """How many listing rows a segment has, and where to seek into it.
+
+    The listing needs a total row count to size its scrollbar, and the only way
+    to get one used to be to fetch every row: 455 round trips and 227k rows for
+    a 1.2MB bash, none of which is looked at. This walks the same items and
+    counts what ``heads`` WOULD emit, without building or rendering any of them.
+
+    Returns ``{rows, heads, anchors}`` where anchors is ``[[row, ea], ...]``
+    every ``page_rows`` logical rows -- enough to turn "show me row N" into a
+    ``heads(addr=anchor)`` call, so pages can be fetched on demand instead of
+    streamed in order.
+
+    **The count must match what heads() actually emits, exactly**, or the
+    scrollbar lies and a jump lands on the wrong row. It therefore mirrors
+    _rows_for's arithmetic rather than approximating it: 3 banner rows at a
+    function start, a label row for a named code head that is not one, the head
+    row itself, struct member rows for data, 2 footer rows at a function end,
+    and an undefined run counted as its byte length (the client presents one
+    collapsed row as that many logical rows). Verified equal to summing the real
+    pages, head for head, over a whole segment.
+    """
+
+    count = max(int(page_rows), 1)
+    try:
+        start = parse_address(addr)
+    except Exception as e:
+        return {"addr": str(addr), "error": str(e), "rows": 0, "anchors": []}
+    import ida_segment
+    seg = ida_segment.getseg(start)
+    if not seg:
+        return {"addr": str(addr), "error": "no segment", "rows": 0, "anchors": []}
+    lo, hi = seg.start_ea, seg.end_ea
+    if end:
+        try:
+            hi = min(hi, parse_address(end))
+        except Exception:
+            pass
+
+    get_flags = ida_bytes.get_flags
+    get_item_end = ida_bytes.get_item_end
+    next_head = ida_bytes.next_head
+    get_ea_name = ida_name.get_ea_name
+    get_func = idaapi.get_func
+    BAD = idaapi.BADADDR
+
+    rows = 0
+    n_heads = 0
+    anchors = []
+    fn = None
+    ea = ida_bytes.get_item_head(lo)
+    while ea != BAD and ea < hi:
+        if rows // count >= len(anchors):
+            anchors.append([rows, hex(ea)])
+        f = get_flags(ea)
+        cls = f & _MS_CLS
+        if cls != _FF_CODE and cls != _FF_DATA:
+            # An undefined run is ONE emitted row that PRESENTS as one logical
+            # row per byte (see _idatui_unknown_row and the client's _span).
+            nh = next_head(ea, hi)
+            stop = nh if (nh != BAD and ea < nh <= hi) else hi
+            run = stop - ea
+            rows += run if run > 1 else 1
+            n_heads += 1
+            ea = stop
+            continue
+        if fn is None or not (fn.start_ea <= ea < fn.end_ea):
+            fn = get_func(ea)
+        n = 1
+        if fn is not None and fn.start_ea == ea:
+            n += 3                                   # blank, banner, `proc`
+        elif cls == _FF_CODE and get_ea_name(ea):
+            n += 1                                   # loc_XXX label on its own row
+        if cls == _FF_DATA:
+            n += len(_idatui_struct_member_rows(ea))
+        item_end = get_item_end(ea)
+        if fn is not None and item_end >= fn.end_ea:
+            n += 2                                   # `endp` + separator
+        rows += n
+        n_heads += 1
+        ea = item_end if item_end > ea else ea + 1
+    return {"addr": hex(lo), "end": hex(hi), "rows": rows,
+            "heads": n_heads, "anchors": anchors}
+
+
 def heads(
     addr: Annotated[str, "Start address or name to walk from"],
     count: Annotated[int, "Max heads to return (default 200, max 2000)"] = 200,
