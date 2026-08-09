@@ -11,15 +11,29 @@ unnecessary.
 **Environment:** ida-codemode 0.3.1, IDA 9.4 (idalib), Linux, single managed
 worker backend, quiet box. Target for timings: `targets/echo` unless stated.
 
-> **Status against 0.3.2 (upstream `93e8aad`).** Items **1 and 2 are FIXED** —
-> the two that mattered most. `sys.settrace` is gone from the runtime entirely
-> (the deadline is now a C-level thread interrupt, `runtime._interrupt_thread`),
-> and `serialization.dumps_json` hands results straight to the C encoder,
-> falling back to the `to_jsonable` walker only for values `json.dumps` rejects.
-> Both of our workarounds re-measured at **0.99x and 0.97x** on 0.3.2 — i.e.
-> nothing. The settrace strip has been deleted; `_PACK_EPILOGUE` is kept only
-> for encoder determinism. Harness: `experiments/bench_pack_trace.py`.
-> Items 3–9 are **not** re-verified against 0.3.2 and may still stand.
+> **Status against 0.3.2 (upstream `93e8aad`) — every item re-checked.**
+>
+> | item | verdict |
+> |---|---|
+> | 1 `timeout_trace` line tracing | ✅ **fixed** — no `settrace` in the runtime at all |
+> | 2 `to_jsonable` on large results | ✅ **fixed** — `dumps_json` C fast path |
+> | 3 2 ms `execute_sync` floor | ✅ **fixed, 7.0x** — 2.055 ms → 0.294 ms |
+> | 4 loader switches fatal on reopen | ❌ open |
+> | 5 IDB replaced under a live lease | ❌ open |
+> | 6 no close-without-save | ❌ open |
+> | 7 no change notification | ❌ open |
+> | 8 package exports | ❌ open |
+> | 9 no `py.typed` / handle Protocol | ❌ open |
+>
+> Items 4–9 are open **by construction**: `client.py`, `registry.py`,
+> `resolver.py`, `server.py`, `database.py` and `worker.py` are byte-identical
+> between 0.3.1 and 0.3.2 (`git diff --quiet 4195f21..HEAD -- <file>`), and every
+> one of those items lives in those files. Only `runtime.py`, `http.py`,
+> `serialization.py` (new) and `benchmark.py` (new) changed.
+>
+> Both of our client-side workarounds re-measured at **0.99x and 0.97x** on 0.3.2
+> — i.e. nothing. The settrace strip has been deleted; `_PACK_EPILOGUE` is kept
+> only for encoder determinism. Harness: `experiments/bench_pack_trace.py`.
 
 **What the client does**, for scale: it renders a continuous disassembly listing,
 pseudocode, a CFG graph view and a hex view, paging over the database as the user
@@ -121,7 +135,23 @@ has to discover and re-implement it.
 
 ## 3. The per-operation floor is `execute_sync`, not HTTP
 
-Same worker, same connection, 200 iterations:
+✅ **FIXED in 0.3.2 — 7.0x.** Re-measured as a same-box A/B by checking the
+installed editable checkout back to `4195f21` and forward again, 200 iterations
+each, `targets/echo`:
+
+| | 0.3.1 | 0.3.2 | |
+|---|---|---|---|
+| `GET /health` | 0.497 ms | 0.318 ms | 1.6x |
+| `execute_python("result = 1")` | **2.055 ms** | **0.294 ms** | **7.0x** |
+
+The 0.3.1 column reproduces the original 2.025 ms measurement below almost
+exactly, which is what makes the 0.3.2 column believable. `execute_python` now
+costs about the same as a bare HTTP GET, so the `execute_sync` marshalling that
+was ~93% of the floor is essentially gone. The design advice below — "a client
+that makes one call per row will be 20–100x slower than an in-process one" — is
+correspondingly much weaker now.
+
+Original 0.3.1 measurement, same worker, same connection, 200 iterations:
 
 | | cost |
 |---|---|
@@ -269,12 +299,12 @@ added a test asserting our kwargs are a subset of
 |---|---|---|---|
 | ~~1~~ | ~~`timeout_trace` line tracing~~ | ~~52x on IDA calls~~ | ✅ fixed in 0.3.2 |
 | ~~2~~ | ~~`to_jsonable` on large results~~ | ~~114x on serialisation~~ | ✅ fixed in 0.3.2 |
+| ~~3~~ | ~~2 ms `execute_sync` floor~~ | ~~shapes client design~~ | ✅ fixed in 0.3.2, 7.0x |
 | 7 | no change/revision counter | correctness for shared editing | yes, cheap |
 | 4 | loader switches fatal on reopen | crashes, hard to diagnose | yes |
 | 5 | replaced/deleted IDB under lease | silent hang | yes |
 | 6 | no close-without-save | a feature we had to drop | design question |
 | 8 | package exports | forces internal imports | yes, trivial |
-| 3 | 2 ms `execute_sync` floor | shapes client design | document; maybe batch |
 | 9 | typed handle for fakes | catches a whole bug class | yes |
 
 Items 1 and 2 together were the difference between "the port is 35x slower than
@@ -282,9 +312,14 @@ the private worker it replaced" and "the port is within 2x, and faster on severa
 operations". Both are in the runtime, not in client code — which is why they are
 worth fixing centrally rather than leaving each client to rediscover.
 
-**Both landed in 0.3.2**, and both client-side workarounds could then be measured
-at parity and retired. That is the outcome this document was written for; the
-remaining items (3–9) have not been re-checked against 0.3.2.
+**Both landed in 0.3.2**, along with item 3 — all three performance items are now
+fixed upstream, and both client-side workarounds could be measured at parity and
+retired. That is the outcome this document was written for.
+
+**What is left is entirely non-performance**: items 4–9 are correctness,
+lifecycle and API-surface items, and all six are untouched in 0.3.2 because the
+files they live in are byte-identical to 0.3.1. Item 7 (a monotonic revision
+counter on `/health`) remains the cheapest large win for any caching client.
 
 Happy to supply the benchmark harness (it is backend-agnostic and runs against
 both our old worker and Code Mode), or to test a patch.
