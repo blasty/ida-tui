@@ -39,9 +39,6 @@ HGAP = 3
 VGAP = 1
 LANE = 1
 
-#: Columns between two weakly-connected components laid out side by side.
-COMPONENT_GAP = 4
-
 _mod: object | None = None
 _tried = False
 
@@ -78,35 +75,55 @@ def available() -> bool:
     return module() is not None
 
 
-def _components(g: G._Graph) -> list[list[int]]:
-    """Weakly-connected components, entry's component first.
+def _reachable(succ: dict[int, list[int]], root: int) -> set[int]:
+    seen = {root}
+    stack = [root]
+    while stack:
+        for j in succ.get(stack.pop(), ()):
+            if j not in seen:
+                seen.add(j)
+                stack.append(j)
+    return seen
 
-    Triskel raises ``EMPTY BL`` on a disconnected graph (its cycle-equivalence
-    bracket lists run dry), and IDA flowcharts do contain unreachable blocks --
-    ``tests/test_graph.py:t_unreachable`` is exactly that shape. So we split the
-    work ourselves and stack the pieces side by side, which is also what the
-    native engine effectively does.
+
+def _phantom_edges(g: G._Graph, root: int) -> list[tuple[int, int]]:
+    """Extra root->node edges that make every node reachable from ``root``.
+
+    **This is a hard precondition, not a nicety.** Triskel's root is whichever
+    node was created first, and every analysis walks out from it; hand it a node
+    the root cannot reach and it either throws ``EMPTY BL`` from the SESE
+    bracket lists or -- with an entry block that has no successors at all --
+    dereferences its way straight off the end and SEGFAULTS. A segfault cannot
+    be caught and fallen back from; it takes the TUI with it.
+
+    Real CFGs hit this in two ways, both routine: IDA flowcharts contain blocks
+    unreachable from the entry (dead code, a jump table entry it could not
+    resolve), and a function whose entry is a bare `jmp` thunk can leave the
+    rest of the chunk weakly connected but not reachable.
+
+    The edges are handed to the layout but never drawn. They cost a little
+    reserved space and, in exchange, triskel positions the orphans sensibly
+    (under the entry) instead of us stacking them beside the graph and hoping.
+    Attachment points are chosen at the natural entry of each orphan subgraph --
+    a node no other orphan reaches -- so one phantom edge usually covers many
+    blocks.
     """
-    adj: dict[int, set[int]] = {i: set() for i in g.nodes}
+    succ: dict[int, list[int]] = {i: [] for i in g.nodes}
+    preds: dict[int, list[int]] = {i: [] for i in g.nodes}
     for e in g.edges:
-        adj[e.src].add(e.dst)
-        adj[e.dst].add(e.src)
-    seen: set[int] = set()
-    comps: list[list[int]] = []
-    for start in g.nodes:
-        if start in seen:
-            continue
-        stack, comp = [start], []
-        seen.add(start)
-        while stack:
-            i = stack.pop()
-            comp.append(i)
-            for j in adj[i]:
-                if j not in seen:
-                    seen.add(j)
-                    stack.append(j)
-        comps.append(sorted(comp))
-    return comps
+        succ[e.src].append(e.dst)
+        preds[e.dst].append(e.src)
+
+    reach = _reachable(succ, root)
+    phantom: list[tuple[int, int]] = []
+    while len(reach) < len(g.nodes):
+        rest = [i for i in g.nodes if i not in reach]
+        rest_set = set(rest)
+        head = next((i for i in rest
+                     if not any(p in rest_set for p in preds[i])), rest[0])
+        phantom.append((root, head))
+        reach |= _reachable(succ, head)
+    return phantom
 
 
 def _edge_type(pt, kind: str):
@@ -154,16 +171,10 @@ def run(g: G._Graph, root: int) -> tuple[list[G.Route], int]:
     pt.set_spacing(x_gutter=float(HGAP), y_gutter=float(VGAP),
                    edge_height=float(LANE))
 
-    by_src: dict[int, list[G.Edge]] = {}
-    for e in g.edges:
-        by_src.setdefault(e.src, []).append(e)
-
     routes: list[G.Route] = []
-    x_off = 0
-    for comp in _components(g):
-        members = set(comp)
-        edges = [e for i in comp for e in by_src.get(i, []) if e.dst in members]
-        x_off = _layout_component(pt, g, comp, edges, routes, x_off)
+    if g.nodes:
+        phantom = _phantom_edges(g, root)
+        _layout_graph(pt, g, root, g.edges, phantom, routes)
 
     # The native engine learns which edges are back edges from its DFS, because
     # it has to reverse them to get a DAG. Triskel handles cycles internally and
@@ -192,12 +203,32 @@ def run(g: G._Graph, root: int) -> tuple[list[G.Route], int]:
     return routes, len(bands)
 
 
-def _layout_component(pt, g: G._Graph, comp: list[int], edges: list[G.Edge],
-                      routes: list[G.Route], x_off: int) -> int:
-    """Lay one component out, shifted right by ``x_off``. Returns the next x."""
+def _layout_graph(pt, g: G._Graph, root: int, edges: list[G.Edge],
+                  phantom: list[tuple[int, int]],
+                  routes: list[G.Route]) -> None:
+    """Lay the whole graph out and append its routes."""
+    order = [root] + [i for i in g.nodes if i != root]
+    succ: dict[int, list[int]] = {i: [] for i in g.nodes}
+    for e in edges:
+        succ[e.src].append(e.dst)
+    for a, b in phantom:
+        succ[a].append(b)
+    unreachable = set(g.nodes) - _reachable(succ, root)
+    if unreachable:
+        # Belt and braces: _phantom_edges is supposed to have made this
+        # impossible, and the consequence of being wrong is a SIGSEGV rather
+        # than an exception, so check before crossing into C++ rather than
+        # after. RuntimeError here means a fallback to native; a segfault means
+        # the user loses the session.
+        raise RuntimeError(f"{len(unreachable)} blocks unreachable from the "
+                           f"layout root {root}: {sorted(unreachable)[:8]}")
+
     builder = pt.make_layout_builder()
     tid = {}
-    for nid in comp:
+    # The root MUST be created first: triskel takes its graph root to be
+    # whichever node was made first, and every one of its analyses walks out
+    # from there.
+    for nid in order:
         n = g.nodes[nid]
         # NOTE the argument order: make_node(height, width). Upstream's Python
         # docstring says "width and height", which is the other way round; our
@@ -205,6 +236,8 @@ def _layout_component(pt, g: G._Graph, comp: list[int], edges: list[G.Edge],
         tid[nid] = builder.make_node(height=float(n.h), width=float(n.w))
     teid = [(builder.make_edge(tid[e.src], tid[e.dst], _edge_type(pt, e.kind)), e)
             for e in edges]
+    for a, b in phantom:
+        builder.make_edge(tid[a], tid[b], _edge_type(pt, G.E_UNCOND))
     lay = builder.build()
 
     polys: list[tuple[G.Edge, list[tuple[float, float]]]] = []
@@ -214,31 +247,27 @@ def _layout_component(pt, g: G._Graph, comp: list[int], edges: list[G.Edge],
     # Triskel's origin is not its bounding box: a loop edge routed around the
     # side runs to y = -1, above every node. Normalise on everything drawn, not
     # just the boxes, or the canvas clips its own edges.
-    xs = [lay.get_coords(tid[i]).x for i in comp]
-    ys = [lay.get_coords(tid[i]).y for i in comp]
+    xs = [lay.get_coords(tid[i]).x for i in g.nodes]
+    ys = [lay.get_coords(tid[i]).y for i in g.nodes]
     xs += [x for _, wps in polys for x, _ in wps]
     ys += [y for _, wps in polys for _, y in wps]
     min_x, min_y = min(xs, default=0.0), min(ys, default=0.0)
 
     def cell(x: float, y: float) -> tuple[int, int]:
-        return int(round(y - min_y)), int(round(x - min_x)) + x_off
+        return int(round(y - min_y)), int(round(x - min_x))
 
-    for nid in comp:
+    for nid in g.nodes:
         n = g.nodes[nid]
         p = lay.get_coords(tid[nid])
         n.y, n.x = cell(p.x, p.y)
 
-    right = max((g.nodes[i].x + g.nodes[i].w for i in comp), default=x_off)
     for e, wps in polys:
         pts = _clean([cell(x, y) for x, y in wps])
         if len(pts) < 2:
             continue
         _snap_ports(g, e, pts)
-        pts = _clean(pts)
-        routes.append(G.Route(edge=e, pts=pts, head=True, tail=True,
+        routes.append(G.Route(edge=e, pts=_clean(pts), head=True, tail=True,
                               flipped=False))
-        right = max(right, max(c for _, c in pts) + 1)
-    return right + COMPONENT_GAP
 
 
 def _box_index(g: G._Graph) -> tuple[dict[int, list[G.Node]], dict[int, list[G.Node]]]:

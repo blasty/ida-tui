@@ -98,12 +98,22 @@ ports already land spread along the box border, and — because our fork made th
 spacing settable — **we hand it cell counts rather than pixels**, so nothing is
 ever rounded and two edge lanes can never land on the same row.
 
-What it does not do is trust the library with degenerate input, all of which is
-handled before the call: self-loops (drawn as `↺`, and they make triskel throw),
-disconnected components (laid out separately and stacked; IDA flowcharts do have
-unreachable blocks), and the one edge in the corpus that triskel routes *through*
-a block, which is detoured and then re-verified — if the detour fails the whole
-layout falls back to native rather than draw an edge through the disassembly.
+What it does not do is trust the library with degenerate input. Triskel's graph
+root is **whichever node was created first**, and every one of its analyses walks
+out from there, so anything the root cannot reach is undefined behaviour — it
+throws `EMPTY BL` from its SESE bracket lists, or, when the entry block has no
+successors at all, segfaults. That is not survivable: a crash in a C extension
+takes the TUI with it, with no chance to fall back. So the entry is created
+first, orphan blocks are attached to it with **phantom edges** that steer the
+layout but are never drawn, and reachability is *asserted in python* before
+crossing into C++.
+
+The rest is handled before the call too: self-loops (drawn as `↺`; they make
+triskel throw), and edges routed through a block, which are detoured and
+re-verified. Whatever is left over falls back to native rather than reach the
+screen wrong — currently 8 layouts in 1200 (`ls`, three zoom levels each), all
+of them triskel leaving two boxes a few columns into each other, which in a
+terminal means one block's disassembly overwriting another's.
 
 ## Layout (`idatui/graph.py`, the native engine)
 

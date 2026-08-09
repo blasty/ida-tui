@@ -161,6 +161,33 @@ def t_unreachable() -> None:
     check(len(lay.nodes) == 3, "unreachable: every block is placed")
 
 
+def t_unreachable_entry() -> None:
+    """Blocks the entry cannot reach, including an entry with no successors.
+
+    IDA hands these out routinely -- dead code, an unresolved jump table -- and
+    triskel's root is whichever node was created first, with every analysis
+    walking out from there. Anything it cannot reach is undefined behaviour:
+    this exact 7-block shape SEGFAULTED the interpreter, and lesser versions
+    threw "EMPTY BL" from its SESE bracket lists. A crash cannot be fallen back
+    from, so the engine must never be handed one.
+    """
+    # entry 0 is a sink; 2 and 3 jump INTO it; 1 and 6 self-loop.
+    lay = layout(mk({0: [], 1: [(5, "switch"), (1, "fall"), (4, "switch")],
+                     2: [(5, "jump"), (0, "uncond")], 3: [(0, "switch")],
+                     4: [], 5: [(4, "jump")],
+                     6: [(2, "jump"), (6, "switch"), (3, "jump")]}), entry=0)
+    invariants(lay, "unreachable_entry")
+    check(len(lay.nodes) == 7, "unreachable_entry: every block is placed")
+    check(lay.stats.get("engine_error") is None,
+          f"unreachable_entry: no fallback ({lay.stats.get('engine_error')})")
+
+    # An entry that reaches nothing at all, with everything hanging off nodes
+    # it cannot see, is the degenerate version of the same thing.
+    lay = layout(mk({0: [], 1: [(2, "jump")], 2: [(1, "jump")]}), entry=0)
+    invariants(lay, "orphan_pair")
+    check(len(lay.nodes) == 3, "orphan_pair: every block is placed")
+
+
 def t_long_edge() -> None:
     """An edge spanning many layers gets dummies, so it reserves real space."""
     chain = {i: [(i + 1, "uncond")] for i in range(6)}
@@ -280,7 +307,8 @@ def main() -> int:
         ENGINE = engine
         print(f"\nengine: {engine}")
         for fn in (t_linear, t_diamond, t_selfloop, t_loop, t_switch,
-                   t_unreachable, t_long_edge, t_empty, t_row_query, t_hit_test):
+                   t_unreachable, t_unreachable_entry, t_long_edge, t_empty,
+                   t_row_query, t_hit_test):
             print(f"  {fn.__name__}")
             fn()
         for path in sys.argv[1:]:
