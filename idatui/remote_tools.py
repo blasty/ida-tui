@@ -26,6 +26,32 @@ self-contained: no relative imports, nothing beyond what Code Mode provides.
 # ruff: noqa
 import re as _re
 
+# IDAPython, imported ONCE at module scope.
+#
+# This file is never imported by the client -- codemode_client reads it as
+# TEXT and installs it as a module inside the database process -- so the
+# no-IDA house rule that keeps idatui importable without IDA does not apply
+# here, and these need not be function-local.
+#
+# It is worth real time: a function-local `import` still costs a sys.modules
+# lookup per call (0.124us measured in the database process) and
+# _idatui_head_row did three per LISTING ROW -- 3.2ms on a 500-row page,
+# which the background grower pays 455 times to stream one bash.
+#
+# ida_hexrays is deliberately NOT here: it is licence-dependent, and a
+# module-level import would break this whole library for someone without the
+# decompiler instead of failing only when they decompile.
+import ida_bytes
+import ida_funcs
+import ida_lines
+import ida_nalt
+import ida_name
+import ida_offset
+import ida_segment
+import ida_typeinf
+import ida_ua
+import idaapi
+
 from typing import Annotated  # the extracted tool signatures still carry these
 
 
@@ -40,7 +66,6 @@ def parse_address(addr):
     try:
         return int(addr, 0)
     except ValueError:
-        import idaapi
         ea = idaapi.get_name_ea(idaapi.BADADDR, str(addr).strip())
         if ea != idaapi.BADADDR:
             return ea
@@ -81,9 +106,6 @@ def _idatui_head_row(ea, flags=None):
     ``heads`` used to fetch them three times per head (here, in _is_unknown from
     _advance, and again from _rows_for).
     """
-    import ida_bytes
-    import ida_lines
-    import ida_name
 
     f = ida_bytes.get_flags(ea) if flags is None else flags
     if ida_bytes.is_code(f):
@@ -140,7 +162,6 @@ def _idatui_line_parts(line):
     treat them as read-only. Pickle notices the sharing too, so a page of
     repetitive disassembly also serialises smaller.
     """
-    import ida_lines
     text = " ".join(ida_lines.tag_remove(line).split())  # collapse the padding
     spans, ops = _idatui_spans(line)
     # Built from the SAME line as `text`, then whitespace-collapsed identically,
@@ -159,9 +180,6 @@ def _idatui_head_row(ea, flags=None):
     ``heads`` used to fetch them three times per head (here, in _is_unknown from
     _advance, and again from _rows_for).
     """
-    import ida_bytes
-    import ida_lines
-    import ida_name
 
     f = ida_bytes.get_flags(ea) if flags is None else flags
     if ida_bytes.is_code(f):
@@ -219,7 +237,6 @@ def _idatui_line_parts(line):
     treat them as read-only. Pickle notices the sharing too, so a page of
     repetitive disassembly also serialises smaller.
     """
-    import ida_lines
     text = " ".join(ida_lines.tag_remove(line).split())  # collapse the padding
     spans, ops = _idatui_spans(line)
     # Built from the SAME line as `text`, then whitespace-collapsed identically,
@@ -251,7 +268,6 @@ _IDATUI_SPAN_KINDS = {
 
 def _idatui_tag_map():
     """{tag character: kind}, built once from whatever this IDA actually has."""
-    import ida_lines
     out = {}
     for kind, names in _IDATUI_SPAN_KINDS.items():
         for n in names:
@@ -280,7 +296,6 @@ def _idatui_opnd_tag_map():
     line in COLOR_OPND1..8, so the line already says where operand N starts and
     ends -- no need to re-render operands with print_operand to find out (and
     the two agree exactly; checked over thousands of instructions)."""
-    import ida_lines
     out = {}
     for i in range(1, 9):
         v = getattr(ida_lines, "COLOR_OPND%d" % i, None)
@@ -303,7 +318,6 @@ def _idatui_spans(line):
     emit a colour we don't classify, and losing the characters would corrupt the
     line."""
     global _IDATUI_TAGS, _IDATUI_OPND_TAGS, _IDATUI_CTL, _IDATUI_TAGINFO
-    import ida_lines
     if _IDATUI_TAGS is None:
         _IDATUI_TAGS = _idatui_tag_map()
     if _IDATUI_OPND_TAGS is None:
@@ -475,7 +489,6 @@ def _idatui_unknown_row(ea, size):
     ``ea``. A single byte is rendered normally (shows its value); a longer run
     collapses to ``db N dup(?)`` so a big .bss/gap doesn't explode into millions
     of one-byte rows."""
-    import ida_name
 
     if size <= 1:
         return _idatui_head_row(ea)
@@ -490,9 +503,6 @@ def _idatui_unknown_row(ea, size):
 def _idatui_struct_member_rows(ea):
     """Indented member rows for a struct-typed data item at ``ea`` (expansion),
     or [] if it isn't a struct. Top-level fields only."""
-    import ida_nalt
-    import ida_typeinf
-    import idaapi
 
     tif = ida_typeinf.tinfo_t()
     if not (ida_nalt.get_tinfo(tif, ea) and tif.is_udt()):
@@ -522,7 +532,6 @@ def _idatui_struct_member_rows(ea):
 
 def _idatui_func_header_rows(ea):
     """IDA-style subroutine banner rows shown just before a function's entry."""
-    import ida_funcs
 
     name = ida_funcs.get_func_name(ea) or "sub_%X" % ea
     bar = "=" * 15 + " S U B R O U T I N E " + "=" * 15
@@ -536,7 +545,6 @@ def _idatui_func_header_rows(ea):
 
 def _idatui_func_footer_rows(ea, func):
     """End-of-function marker shown just after a function's last item."""
-    import ida_funcs
 
     name = ida_funcs.get_func_name(func.start_ea) or "sub_%X" % func.start_ea
     return [
@@ -561,9 +569,6 @@ def heads(
     byte) this shows db/dw/dd/... lines for data and undefined regions — IDA's
     real disassembly view. Address-paged: page forward by re-calling with
     ``addr`` = the returned cursor.next; page up with ``back=true``."""
-    import ida_bytes
-    import ida_segment
-    import idaapi
 
     count = 2000 if count > 2000 else (1 if count < 1 else count)
     offset = max(int(offset), 0)
@@ -705,7 +710,6 @@ def _idatui_fmt_nibbles():
     """{format name: IDA operand-type nibble}. Built on call, not at import:
     this module is injected into a file that is imported before a database is
     open."""
-    import ida_bytes
     return {
         "default": ida_bytes.FF_N_VOID, "hex": ida_bytes.FF_N_NUMH,
         "dec": ida_bytes.FF_N_NUMD, "char": ida_bytes.FF_N_CHAR,
@@ -730,7 +734,6 @@ def _idatui_op_fmt(ea, n):
     Reads the nibble IDA keeps per operand rather than guessing from the text --
     ``1`` renders identically in hex and decimal, so the rendered line cannot
     answer this."""
-    import ida_bytes
     F = ida_bytes.get_flags(ea)
     nib = (F >> ida_bytes.get_operand_type_shift(int(n))) & 0xF
     return _idatui_fmt_name(nib)
@@ -741,8 +744,6 @@ def _idatui_op_value(ea, n):
 
     The value is what decides which formats are OFFERED: a character constant
     for 0x38A9 or an offset to an unmapped address are stops worth skipping."""
-    import ida_bytes
-    import ida_ua
 
     F = ida_bytes.get_flags(ea)
     if ida_bytes.is_code(F):
@@ -801,8 +802,6 @@ def _idatui_offset_worth(v):
     An explicit request still converts anything mapped: that's a decision, not a
     keypress that happened to land here. After it, the target HAS a name, so the
     ring includes the stop from then on."""
-    import ida_bytes
-    import ida_name
 
     return bool(v and ida_bytes.is_mapped(v) and ida_name.get_ea_name(v))
 
@@ -820,8 +819,6 @@ def _idatui_op_candidates(ea):
       that appears to do nothing is worse than one that says it can't.
 
     An explicit ``n`` still reaches them; this is what a bare cursor picks."""
-    import ida_bytes
-    import ida_ua
 
     F = ida_bytes.get_flags(ea)
     if ida_bytes.is_data(F):
@@ -852,8 +849,6 @@ def _idatui_op_spans(ea, text):
     fallback for a processor module that emits no operand markers -- it agrees
     with the tags where both exist, but it re-renders every operand to say so.
     """
-    import ida_lines
-    import ida_ua
 
     line = ida_lines.generate_disasm_line(ea, 0)
     if line:
@@ -883,7 +878,6 @@ def _idatui_op_spans(ea, text):
 
 
 def _idatui_line_text(ea):
-    import ida_lines
     line = ida_lines.generate_disasm_line(ea, 0)
     return " ".join(ida_lines.tag_remove(line).split()) if line else ""
 
@@ -898,9 +892,6 @@ def _idatui_op_text(ea, text, n):
 
 def _idatui_apply_fmt(ea, n, fmt):
     """Set operand ``n``'s display format. Returns (ok, error)."""
-    import ida_bytes
-    import ida_offset
-    import idaapi
 
     n = int(n)
     if fmt == "default":
@@ -943,7 +934,6 @@ def op_format(
     Which operand: ``n`` if given, else the one under ``col`` (a column in the
     whitespace-collapsed line, as ``heads`` renders it), else the first literal
     on the line."""
-    import ida_bytes
 
     try:
         ea = ida_bytes.get_item_head(parse_address(addr))
@@ -1135,10 +1125,7 @@ def _idatui_pc_nums(cf, sl):
     Asks Hex-Rays what each column belongs to rather than pattern-matching the
     text: a regex over ``v6 = a1 - 1;`` has to guess which of those characters
     are a literal, and ``v11`` looks like one."""
-    import ida_bytes
     import ida_hexrays
-    import ida_lines
-    import idaapi
 
     plain = ida_lines.tag_remove(sl.line)
     out = []
@@ -1199,8 +1186,6 @@ def pc_nums(
     Columns are in the same collapsed coordinates the decompile tool serves its
     text in, i.e. what the client actually displays."""
     import ida_hexrays
-    import ida_lines
-    import idaapi
 
     if not ida_hexrays.init_hexrays_plugin():
         return {"addr": str(addr), "error": "no decompiler", "nums": []}
@@ -1251,8 +1236,6 @@ def pc_num_format(
     makes the function stop decompiling). Returns the re-rendered line, and
     marks the function dirty so the next decompile is the new text."""
     import ida_hexrays
-    import ida_lines
-    import idaapi
 
     if not ida_hexrays.init_hexrays_plugin():
         return {"addr": str(addr), "error": "no decompiler"}
@@ -1346,7 +1329,6 @@ def pc_num_format(
         # set here would silently win over the new one.
         ida_hexrays.user_numforms_erase(cf.numforms, it)
     if want != "default":
-        import ida_bytes
         nf = ida_hexrays.number_format_t(target["opnum"])
         nf.flags = ida_bytes.get_operand_flag(_idatui_fmt_nibbles()[want],
                                               target["opnum"])
@@ -1391,11 +1373,7 @@ def decompile(addr, include_addresses=True):
     Text is whitespace-collapsed exactly as the client displays it, because
     ``pc_nums`` reports literal columns in those coordinates.
     """
-    import ida_bytes
     import ida_hexrays
-    import ida_lines
-    import ida_name
-    import idaapi
 
     try:
         ea = parse_address(addr)
@@ -1468,7 +1446,6 @@ def decomp_map(
     swept across the line's columns via get_line_item. Shape:
     {addr, lines:[{ea: primary|None, eas:[hex,...]}, ...]}."""
     import ida_hexrays
-    import idaapi
     try:
         ea = int(str(addr), 16)
     except ValueError:
@@ -1482,7 +1459,6 @@ def decomp_map(
         return {"error": f"decompile failed: {e}"}
     if cfunc is None:
         return {"error": "decompile failed"}
-    import ida_lines
     # Three things this loop must not do, each measured on real functions (the 25
     # largest of bash went 68.3s -> 6.5s; echo's 60 largest 5.4s -> 0.6s, with
     # byte-identical output):
