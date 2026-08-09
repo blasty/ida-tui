@@ -3110,6 +3110,58 @@ class FunctionsPanel(Vertical):
 
 
 # --------------------------------------------------------------------------- #
+# Shared list navigation for the overlays
+# --------------------------------------------------------------------------- #
+class OptionListNav:
+    """Cursor + paging for an overlay whose filter ``Input`` keeps the focus.
+
+    These screens focus a filter box, not the list, so the ``OptionList``'s own
+    bindings never fire -- the Input sees every key first. These actions forward
+    to the list on its behalf.
+
+    Paging delegates to the widget's OWN ``action_page_up``/``action_page_down``
+    rather than reimplementing it: those know the live viewport height, skip
+    disabled options and clamp at both ends. A hand-rolled "move by N" here
+    would have to guess the height and would drift from the list that DOES have
+    focus (``XrefsScreen``, or the struct list), which pages natively.
+
+    Textual only merges ``BINDINGS`` from ``DOMNode`` subclasses, so a plain
+    mixin's are silently dropped -- every screen must splat ``*NAV_BINDINGS``
+    (or list its own keys) explicitly. Same trap as ``SearchMixin``.
+    """
+
+    #: The common key set. ``StructEditor`` deliberately does NOT use this: it
+    #: binds ctrl+n to "new type", so it lists bare up/down itself.
+    NAV_BINDINGS = [
+        Binding("down,ctrl+n", "cursor_down", show=False),
+        Binding("up,ctrl+p", "cursor_up", show=False),
+        Binding("pagedown", "page_down", show=False),
+        Binding("pageup", "page_up", show=False),
+    ]
+
+    def _nav_list(self):
+        """The list to drive, or None when there is nothing to move through."""
+        ol = self.query_one(OptionList)
+        return ol if ol.option_count else None
+
+    def action_cursor_down(self) -> None:
+        if (ol := self._nav_list()) is not None:
+            ol.highlighted = min((ol.highlighted or 0) + 1, ol.option_count - 1)
+
+    def action_cursor_up(self) -> None:
+        if (ol := self._nav_list()) is not None:
+            ol.highlighted = max((ol.highlighted or 0) - 1, 0)
+
+    def action_page_down(self) -> None:
+        if (ol := self._nav_list()) is not None:
+            ol.action_page_down()
+
+    def action_page_up(self) -> None:
+        if (ol := self._nav_list()) is not None:
+            ol.action_page_up()
+
+
+# --------------------------------------------------------------------------- #
 # Xrefs popup
 # --------------------------------------------------------------------------- #
 class XrefsScreen(ModalScreen):
@@ -3181,13 +3233,12 @@ def _fuzzy(name: str, q: str):
     return (score, tuple(pos))
 
 
-class SymbolPalette(ModalScreen):
+class SymbolPalette(OptionListNav, ModalScreen):
     """A command-palette overlay: type to fuzzy-find a symbol, Enter opens it."""
 
     BINDINGS = [
         Binding("escape", "close", "Close"),
-        Binding("down,ctrl+n", "cursor_down", show=False),
-        Binding("up,ctrl+p", "cursor_up", show=False),
+        *OptionListNav.NAV_BINDINGS,
         # F2, not ctrl+a: the focused Input binds "home,ctrl+a" so it would never
         # reach us. Function keys are untouched by Input.
         Binding("f2", "scope", "This binary / whole project", show=False),
@@ -3291,16 +3342,6 @@ class SymbolPalette(ModalScreen):
         self.query_one("#pal-box").border_title = Text(
             f"symbols [{scope}]: {len(self._results)}{more}{hint}")
 
-    def action_cursor_down(self) -> None:
-        ol = self.query_one(OptionList)
-        if ol.option_count:
-            ol.highlighted = min((ol.highlighted or 0) + 1, ol.option_count - 1)
-
-    def action_cursor_up(self) -> None:
-        ol = self.query_one(OptionList)
-        if ol.option_count:
-            ol.highlighted = max((ol.highlighted or 0) - 1, 0)
-
     def action_choose(self) -> None:
         ol = self.query_one(OptionList)
         i = ol.highlighted
@@ -3326,7 +3367,7 @@ def _str_display(text: str, limit: int = 200) -> str:
     return out[:limit] + ("\u2026" if len(out) > limit else "")
 
 
-class SearchPalette(ModalScreen):
+class SearchPalette(OptionListNav, ModalScreen):
     """Ctrl+F: search the whole database, by text or by bytes.
 
     Unlike every other palette here this does NOT filter as you type: each
@@ -3343,8 +3384,7 @@ class SearchPalette(ModalScreen):
 
     BINDINGS = [
         Binding("escape", "close", "Close"),
-        Binding("down,ctrl+n", "cursor_down", show=False),
-        Binding("up,ctrl+p", "cursor_up", show=False),
+        *OptionListNav.NAV_BINDINGS,
         Binding("f2", "mode", "Text / bytes", show=False),
     ]
     LIMIT = 500
@@ -3478,16 +3518,6 @@ class SearchPalette(ModalScreen):
                           f"hit{'' if n == 1 else 's'} \u2014 Enter opens")
 
     # -- moving / choosing --------------------------------------------------- #
-    def action_cursor_down(self) -> None:
-        ol = self.query_one(OptionList)
-        if ol.option_count:
-            ol.highlighted = min((ol.highlighted or 0) + 1, ol.option_count - 1)
-
-    def action_cursor_up(self) -> None:
-        ol = self.query_one(OptionList)
-        if ol.option_count:
-            ol.highlighted = max((ol.highlighted or 0) - 1, 0)
-
     def action_choose(self) -> None:
         ol = self.query_one(OptionList)
         i = ol.highlighted
@@ -3502,14 +3532,13 @@ class SearchPalette(ModalScreen):
         self.dismiss(None)
 
 
-class StringsPalette(ModalScreen):
+class StringsPalette(OptionListNav, ModalScreen):
     """Every string in the binary (IDA's Shift+F12), filterable; Enter jumps to
     it in the unified listing."""
 
     BINDINGS = [
         Binding("escape", "close", "Close"),
-        Binding("down,ctrl+n", "cursor_down", show=False),
-        Binding("up,ctrl+p", "cursor_up", show=False),
+        *OptionListNav.NAV_BINDINGS,
         Binding("f2", "scope", "This binary / whole project", show=False),
     ]
     LIMIT = 500
@@ -3606,16 +3635,6 @@ class StringsPalette(ModalScreen):
             "  (F2: whole project)" if self._index is not None else "")
         self.query_one("#pal-box").border_title = Text(
             f"strings [{scope}]: {len(self._results)}{more} of {len(self._rows)}{hint}")
-
-    def action_cursor_down(self) -> None:
-        ol = self.query_one(OptionList)
-        if ol.option_count:
-            ol.highlighted = min((ol.highlighted or 0) + 1, ol.option_count - 1)
-
-    def action_cursor_up(self) -> None:
-        ol = self.query_one(OptionList)
-        if ol.option_count:
-            ol.highlighted = max((ol.highlighted or 0) - 1, 0)
 
     def action_choose(self) -> None:
         ol = self.query_one(OptionList)
@@ -3824,7 +3843,7 @@ class HelpScreen(ModalScreen):
         self.dismiss(None)
 
 
-class RegWriteScreen(ModalScreen):
+class RegWriteScreen(OptionListNav, ModalScreen):
     """Registers, and the instruction that set each one.
 
     "Which instruction set this register to its current value?" is the question
@@ -3835,8 +3854,7 @@ class RegWriteScreen(ModalScreen):
 
     BINDINGS = [
         Binding("escape", "close", "Close"),
-        Binding("down,ctrl+n", "cursor_down", show=False),
-        Binding("up,ctrl+p", "cursor_up", show=False),
+        *OptionListNav.NAV_BINDINGS,
         Binding("enter", "choose", show=False, priority=True),
         Binding("f", "choose_forward", show=False),
     ]
@@ -3873,16 +3891,6 @@ class RegWriteScreen(ModalScreen):
         ol.add_options(opts)
         ol.highlighted = 0
         ol.focus()
-
-    def action_cursor_down(self) -> None:
-        ol = self.query_one(OptionList)
-        if ol.option_count:
-            ol.highlighted = min((ol.highlighted or 0) + 1, ol.option_count - 1)
-
-    def action_cursor_up(self) -> None:
-        ol = self.query_one(OptionList)
-        if ol.option_count:
-            ol.highlighted = max((ol.highlighted or 0) - 1, 0)
 
     def _pick(self, forward: bool) -> None:
         i = self.query_one(OptionList).highlighted
@@ -4039,7 +4047,7 @@ class TraceTimeline(Static):
         return out
 
 
-class LoadOptionsScreen(ModalScreen):
+class LoadOptionsScreen(OptionListNav, ModalScreen):
     """Ask how to load a file no loader recognised.
 
     IDA's own answer to an unidentified file is a dialog; ours is this. Without
@@ -4054,8 +4062,7 @@ class LoadOptionsScreen(ModalScreen):
 
     BINDINGS = [
         Binding("escape", "close", "Close"),
-        Binding("down,ctrl+n", "cursor_down", show=False),
-        Binding("up,ctrl+p", "cursor_up", show=False),
+        *OptionListNav.NAV_BINDINGS,
         Binding("enter", "choose", show=False, priority=True),
     ]
 
@@ -4138,16 +4145,6 @@ class LoadOptionsScreen(ModalScreen):
         self.query_one("#pal-box").border_title = Text(
             f"unrecognised file \u2014 processor? ({len(rows)})")
 
-    def action_cursor_down(self) -> None:
-        ol = self.query_one(OptionList)
-        if ol.option_count:
-            ol.highlighted = min((ol.highlighted or 0) + 1, ol.option_count - 1)
-
-    def action_cursor_up(self) -> None:
-        ol = self.query_one(OptionList)
-        if ol.option_count:
-            ol.highlighted = max((ol.highlighted or 0) - 1, 0)
-
     def action_choose(self) -> None:
         ol = self.query_one(OptionList)
         i = ol.highlighted
@@ -4177,14 +4174,13 @@ class LoadOptionsScreen(ModalScreen):
         self.dismiss({})
 
 
-class ProjectPalette(ModalScreen):
+class ProjectPalette(OptionListNav, ModalScreen):
     """The project's binaries; Enter switches to one. Shows which are resident
     (a live worker, so switching is instant) vs cold (needs an open)."""
 
     BINDINGS = [
         Binding("escape", "close", "Close"),
-        Binding("down,ctrl+n", "cursor_down", show=False),
-        Binding("up,ctrl+p", "cursor_up", show=False),
+        *OptionListNav.NAV_BINDINGS,
     ]
 
     def __init__(self, entries: list[dict]) -> None:
@@ -4243,16 +4239,6 @@ class ProjectPalette(ModalScreen):
             ol.highlighted = active
         self.query_one("#pal-box").border_title = Text(
             f"binaries: {len(rows)} of {len(self._entries)}")
-
-    def action_cursor_down(self) -> None:
-        ol = self.query_one(OptionList)
-        if ol.option_count:
-            ol.highlighted = min((ol.highlighted or 0) + 1, ol.option_count - 1)
-
-    def action_cursor_up(self) -> None:
-        ol = self.query_one(OptionList)
-        if ol.option_count:
-            ol.highlighted = max((ol.highlighted or 0) - 1, 0)
 
     def action_choose(self) -> None:
         i = self.query_one(OptionList).highlighted
@@ -4522,10 +4508,13 @@ class StructEditor(ModalScreen):
         Binding("delete,d", "delete", "Delete", show=False),
         Binding("escape", "close", "Close"),
         # Only ever reached while the FILTER has focus: a focused OptionList
-        # consumes up/down itself, so these move its highlight from the prompt
+        # consumes these itself, so they move its highlight from the prompt
         # (type to narrow, arrow to pick, exactly like the symbol palette).
+        # NOT OptionListNav.NAV_BINDINGS: ctrl+n is "new type" here.
         Binding("up", "cursor_up", "Up", show=False),
         Binding("down", "cursor_down", "Down", show=False),
+        Binding("pageup", "page_up", show=False),
+        Binding("pagedown", "page_down", show=False),
     ]
 
     NEW_TEMPLATE = "struct NewStruct\n{\n    int field;\n};\n"
@@ -4713,14 +4702,33 @@ class StructEditor(ModalScreen):
     def action_cursor_down(self) -> None:
         self._move_highlight(1)
 
-    def _move_highlight(self, delta: int) -> None:
+    def action_page_up(self) -> None:
+        self._page(-1)
+
+    def action_page_down(self) -> None:
+        self._page(1)
+
+    def _list_from_filter(self):
+        """The type list, but only while the FILTER holds focus.
+
+        When the list itself has focus it handles these keys natively, and
+        forwarding as well would move the highlight twice.
+        """
         if not self._filter_focused():
-            return  # the list has focus and moves itself
+            return None
         ol = self.query_one("#se-list", OptionList)
-        if not ol.option_count:
-            return
-        cur = ol.highlighted or 0
-        ol.highlighted = max(0, min(cur + delta, ol.option_count - 1))
+        return ol if ol.option_count else None
+
+    def _move_highlight(self, delta: int) -> None:
+        ol = self._list_from_filter()
+        if ol is not None:
+            ol.highlighted = max(0, min((ol.highlighted or 0) + delta,
+                                        ol.option_count - 1))
+
+    def _page(self, direction: int) -> None:
+        ol = self._list_from_filter()
+        if ol is not None:
+            (ol.action_page_down if direction > 0 else ol.action_page_up)()
 
     @work(thread=True, exclusive=True, group="se-load")
     def _load(self, name: str) -> None:

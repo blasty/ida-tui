@@ -412,6 +412,98 @@ async def s_auto_land(c: Ctx):
     c.check("auto-land is idempotent (guarded)", app._cur is prev)
 
 
+@scenario("palette_paging")
+async def s_palette_paging(c: Ctx):
+    """PgUp/PgDn move the palette list by a viewport, with the Input focused.
+
+    The palettes focus their filter box, not the list, so the OptionList's own
+    pageup/pagedown bindings never fire -- OptionListNav forwards them. That
+    forwarding is the thing under test; if it regresses, these keys silently do
+    nothing (the failure mode is a no-op, not an error).
+    """
+    app = c.app
+    await c.press("ctrl+n")
+    if not await c.wait(lambda: isinstance(app.screen, SymbolPalette), 10):
+        c.check("palette opens for the paging test", False)
+        return
+    pal = app.screen
+    ol = pal.query_one(OptionList)
+    inp = pal.query_one(Input)
+    await c.wait(lambda: ol.option_count > 5, 10)
+
+    # Paging is GEOMETRY: the widget moves by scrollable_content_region.height,
+    # which is 0 until a frame has been laid out. Without this wait every check
+    # below would pass vacuously against a zero-height page.
+    await c.wait(lambda: ol.scrollable_content_region.height >= 1, 10)
+    page = ol.scrollable_content_region.height
+    c.check("the palette list has a real viewport to page by", page >= 1,
+            f"height={page}")
+    if ol.option_count <= 2:
+        c.check("enough symbols to page through", False, f"n={ol.option_count}")
+        return
+
+    c.check("the filter Input holds focus (so the list never sees the key)",
+            pal.focused is inp, f"focused={type(pal.focused).__name__}")
+
+    ol.highlighted = 0
+    await c.press("pagedown")
+    down = ol.highlighted or 0
+    # A page, not a line: the bug this guards against is PgDn falling through to
+    # the Input and moving nothing, or degrading to a single-step cursor move.
+    c.check("PgDn moves the symbol list by more than one row", down > 1,
+            f"highlighted={down} page={page} n={ol.option_count}")
+    c.check("PgDn moves by about a viewport (or lands on the last row)",
+            down >= min(page, ol.option_count - 1) - 1,
+            f"highlighted={down} page={page} n={ol.option_count}")
+
+    await c.press("pageup")
+    c.check("PgUp comes back to the top", (ol.highlighted or 0) == 0,
+            f"highlighted={ol.highlighted}")
+
+    # Clamping: hammering past the end must settle on the last row, not wrap or
+    # raise. 12 pages clears any list this palette will show.
+    for _ in range(12):
+        await c.press("pagedown")
+    c.check("PgDn clamps at the last row",
+            ol.highlighted == ol.option_count - 1,
+            f"highlighted={ol.highlighted} n={ol.option_count}")
+    for _ in range(12):
+        await c.press("pageup")
+    c.check("PgUp clamps at the first row", ol.highlighted == 0,
+            f"highlighted={ol.highlighted}")
+
+    await c.press("escape")
+    await c.wait(lambda: not isinstance(app.screen, SymbolPalette), 10)
+
+
+@scenario("xrefs_paging")
+async def s_xrefs_paging(c: Ctx):
+    """The xrefs popup focuses its list, so paging is Textual's own.
+
+    A regression guard for the other half of the split: OptionListNav must not
+    be needed here, and must not double-move if someone adds it later.
+    """
+    app = c.app
+    await c.open_biggest("listing")
+    await c.press("x")
+    if not await c.wait(lambda: isinstance(app.screen, XrefsScreen), 10):
+        c.check("xrefs popup opens for the paging test", True,
+                "skipped: no xrefs at this cursor")
+        return
+    scr = app.screen
+    ol = scr.query_one(OptionList)
+    await c.wait(lambda: ol.scrollable_content_region.height >= 1, 10)
+    c.check("the xrefs list itself has focus", scr.focused is ol,
+            f"focused={type(scr.focused).__name__}")
+    if ol.option_count > 2:
+        ol.highlighted = 0
+        await c.press("pagedown")
+        c.check("PgDn pages the xrefs list natively", (ol.highlighted or 0) > 1,
+                f"highlighted={ol.highlighted} n={ol.option_count}")
+    await c.press("escape")
+    await c.wait(lambda: not isinstance(app.screen, XrefsScreen), 10)
+
+
 @scenario("palette")
 async def s_palette(c: Ctx):
     app, pilot = c.app, c.pilot
@@ -1386,6 +1478,21 @@ async def s_struct_filter(c: Ctx):
     opened = await c.wait(lambda: inp.display and app.focused is inp, 5)
     c.check("'/' from the list opens the struct filter", opened,
             f"display={inp.display} focus={getattr(app.focused, 'id', None)}")
+
+    # PgDn from the FILTER: this screen can't use OptionListNav (ctrl+n is "new
+    # type" here), so it forwards through its own guarded _page(). Checked while
+    # the list is still unfiltered, so there is something to page through.
+    await c.wait(lambda: ol.scrollable_content_region.height >= 1, 5)
+    if ol.option_count > 2:
+        ol.highlighted = 0
+        await c.press("pagedown")
+        c.check("PgDn pages the struct list from the filter prompt",
+                (ol.highlighted or 0) > 1,
+                f"highlighted={ol.highlighted} n={ol.option_count}")
+        await c.press("pageup")
+        c.check("PgUp returns to the first struct", (ol.highlighted or 0) == 0,
+                f"highlighted={ol.highlighted}")
+
     for ch in q:
         await c.press(ch)
     await c.wait(lambda: len(se._structs) < total, 5)
