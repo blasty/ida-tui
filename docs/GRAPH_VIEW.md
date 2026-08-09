@@ -32,6 +32,7 @@ extra work.
 | `0` | jump to the entry block |
 | `z` | zoom: full → compact → collapsed |
 | `m` | show / hide the minimap |
+| `e` | layout engine: auto → native → triskel |
 | `f` | centre on the current block |
 | `Enter` | follow — stays in the graph when the target is a block of this function |
 | `x` `n` `y` `;` | xrefs / rename / retype / comment, exactly as in the listing |
@@ -56,7 +57,51 @@ The backend adds exactly one operation, `flowchart(addr)` in
 `idatui/codemode_client.py`, which returns block ranges and typed edges — **not**
 text.
 
-## Layout (`idatui/graph.py`)
+## Two layout engines
+
+`graph.layout(blocks, sizer, engine=...)` takes `auto` (the default, also
+`$IDATUI_GRAPH_ENGINE`), `native` or `triskel`, and `e` cycles them in the view.
+`auto` prefers **triskel** where it is installed and the function is at most 250
+blocks, and falls back to **native** otherwise — including if triskel raises,
+which is never fatal.
+
+| | native | triskel |
+|---|---|---|
+| algorithm | layered Sugiyama, below | SESE decomposition ([paper](https://hal.science/hal-04996939)) |
+| ships with | always, pure python | needs `pytriskel` (our fork) |
+| shape | wide and short | narrow and tall |
+| crossings | more | far fewer |
+| 87-block `main` | 15 ms, 1202×444 | 37 ms, 845×789 |
+| 424-block `sub_3720` | 145 ms | 1.5 s (so `auto` won't) |
+
+On the 128-function corpus with realistic box sizes, triskel draws fewer
+crossings on 12 functions, the same on 9, more on 3 — and the wins are where it
+matters: `sub_5CA0` 41 → 6, `sub_2C90` 32 → 7, `sub_2C00` 12 → 0. It also routes
+loop edges around the side of the graph the way IDA does, instead of straight
+back up the middle. It is not a clean sweep: on `sub_69C0` (109 blocks) its
+narrower canvas packs edges tighter and it ends up with *more* cells shared
+between edges than native (1280 vs 935).
+
+`experiments/graph_compare.py` regenerates all of those numbers, and
+`docs/TRISKEL_EVAL.md` is the full evaluation, including what had to be fixed in
+triskel to make it usable at all.
+
+### The triskel path (`idatui/graph_triskel.py`)
+
+The whole impedance mismatch lives in that one module. Three things keep it
+small: triskel's routes are already orthogonal (0 diagonal segments in 2471), its
+ports already land spread along the box border, and — because our fork made the
+spacing settable — **we hand it cell counts rather than pixels**, so nothing is
+ever rounded and two edge lanes can never land on the same row.
+
+What it does not do is trust the library with degenerate input, all of which is
+handled before the call: self-loops (drawn as `↺`, and they make triskel throw),
+disconnected components (laid out separately and stacked; IDA flowcharts do have
+unreachable blocks), and the one edge in the corpus that triskel routes *through*
+a block, which is detoured and then re-verified — if the detour fails the whole
+layout falls back to native rather than draw an edge through the disassembly.
+
+## Layout (`idatui/graph.py`, the native engine)
 
 Pure python: no IDA, no Textual, no I/O, so it is unit-tested offline in
 milliseconds (`tests/test_graph.py`, which needs no worker). Textbook Sugiyama,
@@ -130,9 +175,16 @@ listing. A CFG that size is not a picture anyone can read — IDA's own is a
 hairball there too (1853 crossings on the worst function in `targets/echo`).
 This is a feature, not a shortcoming.
 
-Known cosmetic gap: a back edge leaves its tail's *top* border (`┴`) and arrows
-up into the head's *bottom* (`▲`). Correct and readable, but IDA runs loop edges
-around the side of the graph.
+Known cosmetic gap **of the native engine**: a back edge leaves its tail's *top*
+border (`┴`) and arrows up into the head's *bottom* (`▲`). Correct and readable,
+but IDA runs loop edges around the side of the graph — which is exactly what the
+triskel engine does, so `e` is the workaround.
+
+That difference is why an edge's arrowhead is decided by `Route.flipped` and not
+by geometry. The native engine reverses back edges to get a DAG, so its polyline
+runs *against* control flow and the arrow belongs at the start; triskel keeps the
+real direction. Reading the direction off the drawing would silently reverse
+every loop edge on one of the two engines.
 
 ## Driving it
 
@@ -151,8 +203,25 @@ drive raw graph action=zoom
 
 - `experiments/cfg_dump.py` — freeze real CFGs from a binary to JSON.
 - `experiments/graph_spike.py` — lay out and render a corpus function to stdout,
-  or `--stats` the whole corpus. Uses `idatui.graph`, so it exercises the
-  shipping engine with no worker in the loop.
+  or `--stats` the whole corpus; `--engine` picks the backend. Uses
+  `idatui.graph`, so it exercises the shipping engine with no worker in the loop.
+- `experiments/graph_compare.py` — both engines over a corpus: crossings, canvas,
+  ambiguous cells, cost. `--real-sizer` sizes boxes from the disassembly text,
+  which is the only comparison worth reading.
 - `experiments/graph_smoke.py` — end-to-end: tool → domain → layout.
 - `experiments/graph_shot.py` — render the real view headless at a chosen size
-  (the pane you are in is usually too narrow to judge it).
+  (the pane you are in is usually too narrow to judge it); takes an engine as
+  its fifth argument.
+
+## Installing the triskel engine
+
+It is optional; without it everything works and `auto` means `native`.
+
+```bash
+uv pip install ~/dev/triskel/bindings/python    # needs cmake, ninja, a C++23 compiler
+```
+
+That is **our fork**, not PyPI. Upstream's wheels stop at cp313 with no sdist
+(so there is nothing to install on 3.14), and on any version their
+`get_waypoints()` raises, which means no edge routes at all. `~/dev/triskel/PATCHES.md`
+lists every change. `$IDATUI_TRISKEL_PATH` can point at a build tree instead.

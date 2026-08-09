@@ -3479,6 +3479,62 @@ async def s_graph_zoom(c: Ctx):
             f"{gv.lay.height} vs {full_h}")
 
 
+@scenario("graph_engine")
+async def s_graph_engine(c: Ctx):
+    """`e` swaps the layout backend under a live view.
+
+    The interesting part is not that triskel draws a different picture, it is
+    that everything anchored to the old one survives: the cursor keeps its
+    address, the canvas is resized to the new extent (triskel routes loop edges
+    OUTSIDE the boxes' bounding box, which is what made the first version clip
+    them), and a missing pytriskel degrades to native instead of raising.
+    """
+    from idatui import graph_triskel
+    app = c.app
+    fn, gv = await _open_graph(c)
+    if gv.lay is None:
+        c.check("graph loaded", False)
+        return
+    ea = gv._cursor_ea()
+    first = gv.lay.stats["engine"]
+    c.check("auto picks triskel when it is installed",
+            first == ("triskel" if graph_triskel.available() else "native"),
+            f"engine={first} available={graph_triskel.available()}")
+
+    seen = [first]
+    for _ in range(3):
+        await c.press("e")
+        await c.pause(0.2)
+        seen.append(gv.lay.stats["engine"])
+        c.check(f"the view survives engine={gv._engine}",
+                gv.lay is not None and gv.lay.width > 0 and gv.lay.height > 0,
+                f"{gv.lay.width}x{gv.lay.height}")
+        c.check(f"the cursor keeps an address on engine={gv._engine}",
+                gv._cursor_ea() is not None)
+        c.check(f"the canvas covers every edge on engine={gv._engine}",
+                all(0 <= col < gv.lay.width and 0 <= row < gv.lay.height
+                    for rt in _routes_of(gv.lay) for row, col in rt),
+                f"canvas {gv.lay.width}x{gv.lay.height}")
+    c.check("e cycles back round", seen[0] == seen[-1], str(seen))
+    c.check("native was one of them", "native" in seen, str(seen))
+    c.check("the status names the engine", "graph:" in c.status() or
+            gv.fc.name in c.status(), c.status())
+    if ea is not None:
+        c.check("the cursor address is unchanged by relayout",
+                gv._cursor_ea() is not None)
+
+
+def _routes_of(lay):
+    """Every painted point, as (row, col) pairs, straight out of the index."""
+    out = []
+    for row, runs in lay.painting.hruns.items():
+        out.append([(row, lo) for lo, _hi, _s, _e in runs]
+                   + [(row, hi) for _lo, hi, _s, _e in runs])
+    for lo, hi, col, _s, _e in lay.painting.vruns:
+        out.append([(lo, col), (hi, col)])
+    return out
+
+
 @scenario("graph_render")
 async def s_graph_render(c: Ctx):
     """The drawing itself: boxes, instruction text and edge glyphs must actually

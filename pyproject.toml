@@ -13,6 +13,12 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8"]
+# The graph view's SESE layout engine (`e` in graph mode) is optional: without
+# it, layout falls back to the pure-python engine. It is deliberately NOT listed
+# as a dependency -- PyPI's pytriskel has no wheel for current Pythons, no sdist,
+# and a binding bug that makes edge routes unreachable. Install our fork:
+#     uv pip install ~/dev/triskel/bindings/python
+# See docs/TRISKEL_EVAL.md and ~/dev/triskel/PATCHES.md.
 
 [project.scripts]
 idatui = "idatui.launch:main"

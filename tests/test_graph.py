@@ -41,6 +41,16 @@ def sizer(b: G.Block) -> tuple[int, int]:
     return (len(f"loc_{b.start:X}") + 6, 4)
 
 
+#: Which layout engine the current pass is exercising. Every invariant here is
+#: a claim about the DRAWING, not about how it was arrived at, so the whole
+#: suite runs once per available engine (see main()).
+ENGINE = "native"
+
+
+def layout(blocks, sz=None, entry=None) -> G.Layout:
+    return G.layout(blocks, sz or sizer, entry=entry, engine=ENGINE)
+
+
 def mk(edges: dict[int, list[tuple[int, str]]], n: int | None = None) -> list[G.Block]:
     ids = set(edges) | {d for v in edges.values() for d, _ in v}
     if n:
@@ -95,7 +105,7 @@ def invariants(lay: G.Layout, name: str) -> None:
 # ---------------------------------------------------------------- cases
 
 def t_linear() -> None:
-    lay = G.layout(mk({0: [(1, "uncond")], 1: [(2, "uncond")]}), sizer)
+    lay = layout(mk({0: [(1, "uncond")], 1: [(2, "uncond")]}), sizer)
     invariants(lay, "linear")
     ranks = [lay.by_id[i].rank for i in (0, 1, 2)]
     check(ranks == [0, 1, 2], f"linear: ranks stack ({ranks})")
@@ -103,7 +113,7 @@ def t_linear() -> None:
 
 
 def t_diamond() -> None:
-    lay = G.layout(mk({0: [(1, "jump"), (2, "fall")],
+    lay = layout(mk({0: [(1, "jump"), (2, "fall")],
                        1: [(3, "uncond")], 2: [(3, "uncond")]}), sizer)
     invariants(lay, "diamond")
     check(lay.by_id[3].rank == 2, "diamond: join sits below both arms")
@@ -115,7 +125,7 @@ def t_diamond() -> None:
 def t_selfloop() -> None:
     """A self-loop must not stall the ranking — the bug that collapsed a whole
     function into three layers and made the graph 280 columns wide."""
-    lay = G.layout(mk({0: [(1, "uncond")], 1: [(1, "jump"), (2, "fall")],
+    lay = layout(mk({0: [(1, "uncond")], 1: [(1, "jump"), (2, "fall")],
                        2: [(3, "uncond")]}), sizer)
     invariants(lay, "selfloop")
     ranks = [lay.by_id[i].rank for i in (0, 1, 2, 3)]
@@ -124,7 +134,7 @@ def t_selfloop() -> None:
 
 
 def t_loop() -> None:
-    lay = G.layout(mk({0: [(1, "uncond")], 1: [(2, "jump"), (3, "fall")],
+    lay = layout(mk({0: [(1, "uncond")], 1: [(2, "jump"), (3, "fall")],
                        2: [(1, "uncond")]}), sizer)
     invariants(lay, "loop")
     check(any(e.back for e in lay.edges), "loop: a back edge is detected")
@@ -136,7 +146,7 @@ def t_loop() -> None:
 
 
 def t_switch() -> None:
-    lay = G.layout(mk({0: [(i, "switch") for i in range(1, 9)],
+    lay = layout(mk({0: [(i, "switch") for i in range(1, 9)],
                        **{i: [(9, "uncond")] for i in range(1, 9)}}), sizer)
     invariants(lay, "switch")
     check(len({lay.by_id[i].rank for i in range(1, 9)}) == 1,
@@ -146,7 +156,7 @@ def t_switch() -> None:
 
 def t_unreachable() -> None:
     """A block reachable only through a reversed edge must still get a rank."""
-    lay = G.layout(mk({0: [(1, "uncond")], 2: [(2, "jump")]}, n=3), sizer)
+    lay = layout(mk({0: [(1, "uncond")], 2: [(2, "jump")]}, n=3), sizer)
     invariants(lay, "unreachable")
     check(len(lay.nodes) == 3, "unreachable: every block is placed")
 
@@ -155,15 +165,19 @@ def t_long_edge() -> None:
     """An edge spanning many layers gets dummies, so it reserves real space."""
     chain = {i: [(i + 1, "uncond")] for i in range(6)}
     chain[0] = [(1, "fall"), (6, "jump")]
-    lay = G.layout(mk(chain), sizer)
+    lay = layout(mk(chain), sizer)
     invariants(lay, "long_edge")
-    check(lay.stats["dummies"] >= 4,
-          f"long_edge: the skip edge is padded ({lay.stats['dummies']} dummies)")
+    # Dummy nodes are how the NATIVE engine reserves horizontal space for a
+    # long edge. Triskel reaches the same end -- an edge that crosses no box,
+    # checked by invariants() above -- without them, so this is engine-specific.
+    if ENGINE == "native":
+        check(lay.stats["dummies"] >= 4,
+              f"long_edge: the skip edge is padded ({lay.stats['dummies']} dummies)")
     check(all_edges_drawn(lay), "long_edge: the long edge is drawn")
 
 
 def t_empty() -> None:
-    lay = G.layout([], sizer)
+    lay = layout([], sizer)
     check(lay.nodes == [], "empty: no nodes")
     check(lay.width >= 1 and lay.height >= 1, "empty: canvas is still sane")
 
@@ -171,7 +185,7 @@ def t_empty() -> None:
 def t_row_query() -> None:
     """cells_at_row must be windowed: asking for a slice returns only that
     slice, which is what keeps a 13M-cell graph renderable."""
-    lay = G.layout(mk({0: [(1, "jump"), (2, "fall")],
+    lay = layout(mk({0: [(1, "jump"), (2, "fall")],
                        1: [(3, "uncond")], 2: [(3, "uncond")]}), sizer)
     for row in range(lay.height):
         full = lay.painting.cells_at_row(row, 0, lay.width)
@@ -182,7 +196,7 @@ def t_row_query() -> None:
 
 
 def t_hit_test() -> None:
-    lay = G.layout(mk({0: [(1, "jump"), (2, "fall")]}), sizer)
+    lay = layout(mk({0: [(1, "jump"), (2, "fall")]}), sizer)
     n = lay.nodes[0]
     check(lay.node_at(n.y, n.x) is n, "hit: top-left corner hits the node")
     check(lay.node_at(n.y + 1, n.x + 1) is n, "hit: interior hits the node")
@@ -202,7 +216,7 @@ def t_corpus(path: str) -> None:
         blocks = [G.Block(id=b["id"], start=b["start"], end=b["end"],
                           succs=[(d, k) for d, k in b["succs"]])
                   for b in rec["blocks"]]
-        lay = G.layout(blocks, sizer)
+        lay = layout(blocks, sizer)
         if lay.stats["ms"] > worst_ms:
             worst_ms, worst_name = lay.stats["ms"], rec["name"]
         check(no_box_overlap(lay), f"corpus {rec['name']}: boxes must not overlap")
@@ -220,14 +234,24 @@ def t_corpus(path: str) -> None:
 
 
 def main() -> int:
+    global ENGINE
     print("idatui.graph layout tests")
-    for fn in (t_linear, t_diamond, t_selfloop, t_loop, t_switch,
-               t_unreachable, t_long_edge, t_empty, t_row_query, t_hit_test):
-        print(f"  {fn.__name__}")
-        fn()
-    for path in sys.argv[1:]:
-        if os.path.exists(path):
-            t_corpus(path)
+    from idatui import graph_triskel
+    engines = ["native"]
+    if graph_triskel.available():
+        engines.append("triskel")
+    else:
+        print("  (pytriskel not importable: skipping the triskel engine)")
+    for engine in engines:
+        ENGINE = engine
+        print(f"\nengine: {engine}")
+        for fn in (t_linear, t_diamond, t_selfloop, t_loop, t_switch,
+                   t_unreachable, t_long_edge, t_empty, t_row_query, t_hit_test):
+            print(f"  {fn.__name__}")
+            fn()
+        for path in sys.argv[1:]:
+            if os.path.exists(path):
+                t_corpus(path)
     print(f"\n{CHECKS} checks, {len(FAILED)} failed")
     for f in FAILED:
         print(f"  - {f}")

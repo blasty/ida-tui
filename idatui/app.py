@@ -2356,6 +2356,7 @@ class GraphView(NavMixin, ScrollView, can_focus=True):
         Binding("0", "goto_entry", "Entry", show=False),
         Binding("z", "zoom", "Zoom"),
         Binding("m", "minimap", "Minimap", show=False),
+        Binding("e", "engine", "Engine", show=False),
         Binding("f", "center", "Centre", show=False),
         Binding("ctrl+d", "pan(12)", "½↓", show=False),
         Binding("ctrl+u", "pan(-12)", "½↑", show=False),
@@ -2388,6 +2389,9 @@ class GraphView(NavMixin, ScrollView, can_focus=True):
         self._blocks: dict[int, object] = {}
         self._zoom = 0
         self._show_minimap = True
+        #: layout backend; "auto" prefers triskel where it is installed and the
+        #: function is small enough for it. Cycled with `e`.
+        self._engine = "auto"
         self._mini_cache: tuple | None = None
         self._drag: tuple[int, int, float, float] | None = None
         self._drag_map = False      # the drag started on the minimap
@@ -2423,7 +2427,8 @@ class GraphView(NavMixin, ScrollView, can_focus=True):
             return
         blocks = [graph.Block(id=b.id, start=b.start, end=b.end,
                               succs=list(b.succs)) for b in self.fc.blocks]
-        self.lay = graph.layout(blocks, self._sizer, entry=self.fc.entry)
+        self.lay = graph.layout(blocks, self._sizer, entry=self.fc.entry,
+                                engine=self._engine)
         self.virtual_size = Size(self.lay.width + 2, self.lay.height + 1)
 
     def _rows(self, nid: int):
@@ -2656,6 +2661,26 @@ class GraphView(NavMixin, ScrollView, can_focus=True):
         self._show_minimap = not self._show_minimap
         self.refresh()
         self.app._status(f"graph: minimap {'on' if self._show_minimap else 'off'}")
+
+    def action_engine(self) -> None:
+        """Cycle the layout engine and redraw the same function with it.
+
+        The two engines disagree about shape more than about correctness --
+        native draws wide and short, triskel narrow and tall with far fewer
+        crossings -- and which one reads better genuinely depends on the
+        function. Cheaper to look than to argue.
+        """
+        from . import graph_triskel
+        choices = ["auto", "native"] + (["triskel"] if graph_triskel.available()
+                                         else [])
+        self._engine = choices[(choices.index(self._engine) + 1) % len(choices)]
+        self._relayout()
+        self._clamp_cursor()
+        self._center_cursor()
+        self.refresh(layout=True)
+        got = self.lay.stats["engine"] if self.lay else "?"
+        note = "" if graph_triskel.available() else " (pytriskel not installed)"
+        self.app._status(f"graph: engine {self._engine} \u2192 {got}{note}")
 
     def action_center(self) -> None:
         self._center_cursor()
@@ -3664,6 +3689,7 @@ _HELP = (
         ("0", "jump to the entry block"),
         ("z", "zoom: full \u2192 compact \u2192 collapsed"),
         ("m", "show/hide the minimap"),
+        ("e", "layout engine: auto \u2192 native \u2192 triskel"),
         ("f", "centre on the current block"),
         ("Enter", "follow (stays in the graph if it lands here)"),
         ("drag / click", "pan / put the cursor in a block"),
@@ -6502,9 +6528,10 @@ class IdaTui(App):
             return
         s = gv.lay.stats
         loops = f", {s['back']} loop{'s' if s['back'] != 1 else ''}" if s["back"] else ""
+        eng = "" if s.get("engine") == "native" else f", {s.get('engine')}"
         self._status(
             f"{gv.fc.name}  @ {gv.fc.func_ea:#x}   [graph: {s['blocks']} blocks, "
-            f"{s['edges']} edges{loops}]  "
+            f"{s['edges']} edges{loops}{eng}]  "
             f"z=zoom({gv.ZOOMS[gv._zoom]}) m=map J/K=edge space=text")
 
     def on_graph_view_cursor_moved(self, msg: "GraphView.CursorMoved") -> None:

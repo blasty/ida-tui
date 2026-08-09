@@ -110,6 +110,8 @@ def main() -> int:
     ap.add_argument("--max-lines", type=int, default=8,
                     help="collapse blocks longer than this (0 = never)")
     ap.add_argument("--no-color", action="store_true")
+    ap.add_argument("--engine", choices=G.ENGINES, default=None,
+                    help="layout backend (default: $IDATUI_GRAPH_ENGINE or auto)")
     args = ap.parse_args()
 
     recs = json.load(open(args.corpus))
@@ -119,7 +121,7 @@ def main() -> int:
         tot = 0.0
         for r in sorted(recs, key=lambda r: len(r["blocks"])):
             blocks, sizer, _ = build(r, args.max_lines)
-            lay = G.layout(blocks, sizer)
+            lay = G.layout(blocks, sizer, engine=args.engine)
             s = lay.stats
             tot += s["ms"]
             print(f"{s['blocks']:>7} {s['nodes']:>6} {s['dummies']:>6} "
@@ -138,7 +140,7 @@ def main() -> int:
         rec = min(recs, key=lambda r: len(r["blocks"]))
 
     blocks, sizer, texts = build(rec, args.max_lines)
-    lay = G.layout(blocks, sizer)
+    lay = G.layout(blocks, sizer, engine=args.engine)
     print(render(lay, texts, color=not args.no_color))
     print(f"\n{rec['name']}: {lay.stats}  canvas {lay.width}x{lay.height}",
           file=sys.stderr)

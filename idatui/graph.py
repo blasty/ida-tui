@@ -28,8 +28,12 @@ row at a time (``cells_at_row``), exactly like the listing's ``render_line``.
 """
 from __future__ import annotations
 
+import logging
+import os
 import time
 from dataclasses import dataclass, field
+
+_LOG = logging.getLogger(__name__)
 
 # Terminal cells are about twice as tall as they are wide, so horizontal gaps
 # need roughly 2x the cell count of vertical gaps to look square.
@@ -100,6 +104,12 @@ class Edge:
     kind: str = E_UNCOND
     back: bool = False
     chain: list[int] = field(default_factory=list)
+    #: ``src``/``dst`` are swapped relative to control flow. The native engine
+    #: reverses back edges so layering sees a DAG; the triskel engine handles
+    #: cycles itself and leaves them alone. Everything downstream that has to
+    #: recover the real direction (succ/pred, arrowheads) reads THIS, not
+    #: ``back`` -- which is now purely a style bit.
+    flipped: bool = False
 
     @property
     def style(self) -> str:
@@ -151,6 +161,7 @@ def _break_cycles(g: _Graph, root: int) -> None:
     for e in g.edges:
         if e.back:
             e.src, e.dst = e.dst, e.src
+            e.flipped = True
 
 
 # --------------------------------------------------------- 2. layering
@@ -461,6 +472,9 @@ class Route:
     pts: list[tuple[int, int]]
     head: bool = True      # arrowhead (target is a real block)
     tail: bool = True      # port tee (source is a real block)
+    #: the polyline is drawn against control flow (a reversed back edge), so the
+    #: arrowhead belongs at ``pts[0]`` and the port tee at ``pts[-1]``.
+    flipped: bool = False
 
 
 def _route(g: _Graph, layers: list[list[int]]) -> list[Route]:
@@ -521,8 +535,8 @@ def _route(g: _Graph, layers: list[list[int]]) -> list[Route]:
         else:
             ych = chan_y[na.rank] + lanes.get((a, b, id(e)), 0)
             pts = [(y0, x0), (ych, x0), (ych, x1), (y1, x1)]
-        routes.append(Route(edge=e, pts=pts,
-                            head=not nb.dummy, tail=not na.dummy))
+        routes.append(Route(edge=e, pts=pts, head=not nb.dummy,
+                            tail=not na.dummy, flipped=e.flipped))
     return routes
 
 
@@ -646,20 +660,25 @@ class Layout:
         return None
 
 
-def layout(blocks: list[Block], sizer, entry: int | None = None) -> Layout:
-    """Lay out ``blocks``. ``sizer(block) -> (width, height)`` in cells."""
-    t0 = time.perf_counter()
+def _build(blocks: list[Block], sizer, entry: int | None) -> tuple[_Graph, int]:
+    """The block list as a layout graph, plus the entry node id.
+
+    Shared by both engines, and re-run from scratch if one of them has to fall
+    back, because an engine positions nodes in place.
+    """
     g = _Graph()
     for b in blocks:
         w, h = sizer(b)
+        b.selfloop = False
         g.add(Node(id=b.id, block=b, label=f"loc_{b.start:X}",
                    w=max(int(w), 4), h=max(int(h), 3)))
     for b in blocks:
         outs = [(d, k) for d, k in b.succs if d in g.nodes]
         for dst, kind in outs:
             if dst == b.id:
-                # A self-loop constrains nothing and would deadlock the Kahn
-                # ranking (its own in-degree never drains). Drawn as a marker.
+                # A self-loop constrains nothing, deadlocks the Kahn ranking
+                # (its own in-degree never drains) and makes triskel throw
+                # "EMPTY BL" from its bracket lists. Drawn as a marker instead.
                 b.selfloop = True
                 continue
             if len(outs) == 1:
@@ -667,15 +686,70 @@ def layout(blocks: list[Block], sizer, entry: int | None = None) -> Layout:
             g.edges.append(Edge(src=b.id, dst=dst, kind=kind))
 
     root = entry if entry in g.nodes else (min(g.nodes) if g.nodes else 0)
-    if g.nodes:
-        _break_cycles(g, root)
-        _assign_ranks(g, root)
-        _add_dummies(g)
-        layers = _order_layers(g, root)
-        _assign_x(g, layers)
-        routes = _route(g, layers)
+    return g, root
+
+
+def _native_engine(g: _Graph, root: int) -> tuple[list[Route], int]:
+    """Layered Sugiyama in cells: the pipeline documented at the top."""
+    _break_cycles(g, root)
+    _assign_ranks(g, root)
+    _add_dummies(g)
+    layers = _order_layers(g, root)
+    _assign_x(g, layers)
+    return _route(g, layers), len(layers)
+
+
+#: Engine names accepted by ``layout(engine=...)`` and ``IDATUI_GRAPH_ENGINE``.
+ENGINES = ("auto", "native", "triskel")
+
+#: Above this many blocks ``auto`` stays native: triskel's SESE decomposition
+#: costs ~10x at 424 blocks (1.5s vs 145ms), and a layout that blocks the UI for
+#: a second is worse than a layout with more crossings. Measured, see
+#: docs/TRISKEL_EVAL.md.
+AUTO_TRISKEL_MAX_BLOCKS = 250
+
+
+def _pick_engine(engine: str | None, nblocks: int) -> str:
+    want = (engine or os.environ.get("IDATUI_GRAPH_ENGINE") or "auto").lower()
+    if want not in ENGINES:
+        want = "auto"
+    if want == "auto":
+        from . import graph_triskel
+        if nblocks <= AUTO_TRISKEL_MAX_BLOCKS and graph_triskel.available():
+            return "triskel"
+        return "native"
+    return want
+
+
+def layout(blocks: list[Block], sizer, entry: int | None = None,
+           engine: str | None = None) -> Layout:
+    """Lay out ``blocks``. ``sizer(block) -> (width, height)`` in cells.
+
+    ``engine`` picks the layout backend: ``native`` (pure python, always
+    available), ``triskel`` (SESE decomposition via the C++ library, far fewer
+    crossings) or ``auto``. Defaults to ``$IDATUI_GRAPH_ENGINE`` or ``auto``.
+    A triskel failure is never fatal: it falls back to native.
+    """
+    t0 = time.perf_counter()
+    name = _pick_engine(engine, len(blocks))
+    g, root = _build(blocks, sizer, entry)
+
+    layers = 0
+    if not g.nodes:
+        routes = []
+    elif name == "triskel":
+        from . import graph_triskel
+        try:
+            routes, layers = graph_triskel.run(g, root)
+        except Exception as exc:                      # noqa: BLE001
+            # Native code with a history of throwing on degenerate CFGs. The
+            # graph view is a convenience; losing it beats losing the session.
+            _LOG.warning("triskel layout failed (%s), falling back", exc)
+            name = "native+triskel-failed"
+            g, root = _build(blocks, sizer, entry)
+            routes, layers = _native_engine(g, root)
     else:
-        layers, routes = [], []
+        routes, layers = _native_engine(g, root)
 
     # ---- paint into the index -----------------------------------------
     p = Painting()
@@ -708,40 +782,60 @@ def layout(blocks: list[Block], sizer, entry: int | None = None) -> Layout:
             ch = CORNER.get((_dir(a, b), _dir(b, c)))
             if ch and not blocked(*b):
                 p.add_mark(b[0], b[1], ch, style, eid)
-        # A back edge was reversed for layering, so its polyline runs from the
-        # loop HEAD down to the tail: the arrow belongs at the start, pointing
-        # up into the block control returns to.
+        # Where the arrowhead goes is a question about CONTROL FLOW, not about
+        # geometry. The native engine reverses back edges for layering, so their
+        # polyline runs from the loop HEAD down to the tail and the arrow
+        # belongs at the start, pointing up into the block control returns to.
+        # The triskel engine keeps the real direction and routes the loop around
+        # the side of the graph, so the arrow is at the end like any other edge.
+        # ``rt.flipped`` is the only thing that distinguishes the two.
         first, last = rt.pts[0], rt.pts[-1]
-        if e.back:
+        down_first = rt.pts[1][0] > first[0] if len(rt.pts) > 1 else True
+        down_last = last[0] > rt.pts[-2][0] if len(rt.pts) > 1 else True
+        if rt.flipped:
             if rt.tail:
-                p.add_mark(first[0], first[1], "\u25b2", style, eid)
+                p.add_mark(first[0], first[1],
+                           "\u25b2" if down_first else "\u25bc", style, eid)
             if rt.head:
-                p.add_mark(last[0], last[1], "\u2534", style, eid)
+                p.add_mark(last[0], last[1],
+                           "\u2534" if down_last else "\u252c", style, eid)
         else:
             if rt.tail:
-                p.add_mark(first[0], first[1], "\u252c", style, eid)
+                p.add_mark(first[0], first[1],
+                           "\u252c" if down_first else "\u2534", style, eid)
             if rt.head:
-                p.add_mark(last[0], last[1], "\u25bc", style, eid)
+                p.add_mark(last[0], last[1],
+                           "\u25bc" if down_last else "\u25b2", style, eid)
 
     succ: dict[int, list[tuple[int, str]]] = {n.id: [] for n in real}
     pred: dict[int, list[tuple[int, str]]] = {n.id: [] for n in real}
     for e in g.edges:
-        a, b = (e.dst, e.src) if e.back else (e.src, e.dst)   # undo reversal
+        a, b = (e.dst, e.src) if e.flipped else (e.src, e.dst)   # undo reversal
         if a in succ:
             succ[a].append((b, e.style))
         if b in pred:
             pred[b].append((a, e.style))
 
+    # The canvas has to cover the EDGES too, not just the boxes. Under the
+    # native engine that is the same thing -- dummy nodes reserve space, so no
+    # edge is ever outside the boxes' bounding box. Triskel routes a loop around
+    # the side of the graph, past every node, and sizing on boxes alone clipped
+    # exactly the edges that make its layouts worth having.
     width = max((n.right + 1 for n in real), default=1)
     height = max((n.y + n.h for n in real), default=1)
+    for rt in routes:
+        for r, c in rt.pts:
+            width = max(width, c + 1)
+            height = max(height, r + 1)
     order = sorted(real, key=lambda n: (n.rank, n.order))
     stats = {
         "blocks": len(blocks),
         "nodes": len(g.nodes),
         "dummies": len(g.nodes) - len(real),
-        "layers": len(layers),
+        "layers": layers,
         "edges": len(g.edges),
         "back": sum(1 for e in g.edges if e.back),
+        "engine": name,
         "ms": (time.perf_counter() - t0) * 1000,
     }
     return Layout(nodes=order, by_id={n.id: n for n in g.nodes.values()},
