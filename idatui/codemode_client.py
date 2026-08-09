@@ -22,7 +22,7 @@ import shlex
 import threading
 import time
 from pathlib import Path
-from textwrap import dedent, indent
+from textwrap import dedent
 from typing import Any
 
 from .errors import IDAConnectionError, IDATimeoutError, IDAToolError, Session
@@ -170,58 +170,45 @@ _PACKED = "__idatui_json__"
 
 #: Serialise the answer INSIDE the database process and hand back one string.
 #:
-#: Code Mode runs to_jsonable() over whatever a snippet returns, walking the
-#: whole structure to make it JSON-safe. Our answers are already JSON-safe, and
-#: they are big: a 200-row listing page is ~10k small objects, which costs 66ms
-#: to walk -- 72% of the page's total cost, and 114x what json.dumps of the very
-#: same data costs (0.58ms). Returning a STRING makes that walk O(1); the client
-#: parses it, which it was going to do at the transport layer anyway.
+#: Written when Code Mode ran to_jsonable() over every snippet result, walking
+#: the whole structure in Python to make it JSON-safe: a 200-row listing page is
+#: ~10k small objects, which cost 66ms to walk -- 72% of the page's total cost,
+#: and 114x what json.dumps of the same data cost (0.58ms).
+#:
+#: ida-codemode 0.3.2 removed that reason: serialization.dumps_json now hands
+#: the structure straight to the C encoder and only falls back to the walker for
+#: values json.dumps rejects. Re-measured against 0.3.2, packing buys 0.97x on
+#: that same page (experiments/bench_pack_trace.py) -- i.e. nothing, because the
+#: dodged walk is replaced by a double encode.
+#:
+#: It is kept anyway, on correctness rather than speed: packing pins OUR encoder
+#: settings (compact separators, default=str) inside the database process, so an
+#: un-encodable IDA object degrades to repr() at a point we control instead of
+#: depending on the runtime's fallback. Delete it if that stops being worth a
+#: protocol step -- it is no longer load-bearing for performance.
 _PACK_EPILOGUE = (
     '\n{"' + _PACKED + '": json.dumps(result, separators=(",", ":"), default=str)}\n'
 )
 
 
-#: Keep Code Mode's per-line trace hook installed while our snippet runs.
-#: Set IDATUI_CODEMODE_TRACE=1 to restore the stock behaviour.
-_KEEP_TRACE = os.environ.get("IDATUI_CODEMODE_TRACE", "") not in ("", "0")
-
-
 def _script(args: dict[str, Any], body: str) -> str:
     """Bind JSON arguments without interpolating user text into Python code.
 
-    Also runs the body with Code Mode's trace hook detached, which is worth an
-    order of magnitude. The runtime wraps every execute_python in
-    sys.settrace(timeout_trace), and that trace function RETURNS ITSELF, which
-    turns on line tracing in every frame it sees -- so every line of every
-    function we call pays a Python-level callback. Measured on this box:
-    ida_bytes.get_flags is 0.106us untraced (0.119us in a plain idalib process)
-    and 5.49us traced, 52x; a 200-row listing page is 2.0ms untraced and 20.2ms
-    traced. That single hook was the whole residual gap against the old worker.
+    This used to also run the body with Code Mode's trace hook detached
+    (sys.settrace(None) + restore), because the runtime wrapped every
+    execute_python in a trace function that returned ITSELF -- enabling line
+    tracing in every frame it saw, so every line of every function we called
+    paid a Python-level callback (ida_bytes.get_flags: 0.106us -> 5.49us, 52x).
 
-    What this gives up: the deadline is no longer enforced for a pure-Python
-    loop inside our snippet. The runtime's OTHER cancellation path -- a
-    threading.Timer that calls ida_kernwin.set_cancelled() -- is independent of
-    the trace and still fires, so a long IDA operation is still interruptible;
-    and every operation here is bounded by its own count/limit argument. The
-    trace is restored in a finally, so a raising snippet cannot leak the change.
+    ida-codemode 0.3.2 deleted that hook; cancellation is now a C-level thread
+    interrupt (runtime._interrupt_thread) that costs nothing while idle. The
+    workaround measured 0.99x on a 200-row listing page against 0.3.2 -- pure
+    noise -- so it is gone, and with it the caveat that a pure-Python loop in a
+    snippet escaped its deadline. See experiments/bench_pack_trace.py.
     """
     encoded = json.dumps(args, ensure_ascii=False, separators=(",", ":"))
     head = f"import json\na = json.loads({encoded!r})\n"
-    if _KEEP_TRACE:
-        return f"{head}{dedent(body).strip()}\n{_PACK_EPILOGUE}"
-    return (
-        f"{head}"
-        "import sys\n"
-        "_idatui_trace = sys.gettrace()\n"
-        "sys.settrace(None)\n"
-        "try:\n"
-        f"{indent(dedent(body).strip(), '    ')}\n"
-        '    _idatui_packed = {"' + _PACKED + '": json.dumps('
-        'result, separators=(",", ":"), default=str)}\n'
-        "finally:\n"
-        "    sys.settrace(_idatui_trace)\n"
-        "_idatui_packed\n"
-    )
+    return f"{head}{dedent(body).strip()}\n{_PACK_EPILOGUE}"
 
 
 _OPERATIONS: dict[str, str] = {
