@@ -59,20 +59,19 @@ uv add --editable ../ida-codemode
 ./ida-tui                        # attach, when exactly one database is registered
 ```
 
-ida-tui never owns an IDA process. It takes a **lease**: a matching database open
+ida-tui never owns an IDA process — it takes a **lease**. A matching database open
 in the IDA GUI is reused, otherwise Code Mode starts or shares a managed idalib
 worker. Quitting drops the lease and leaves everyone else alone.
 
-Headerless blobs have no format to detect — IDA falls back to x86 at address 0
-and analyses nothing, so say what it is:
+Headerless blobs need a hint, or IDA assumes x86 at address 0 and analyses nothing:
 
 ```sh
 ./ida-tui fw.bin --processor arm --base 0x8000000
 ```
 
-`--base` is a real address. These apply only when a database is being **created**;
-an existing IDB already records them. On ARM, `t` toggles ARM/Thumb decoding at
-the cursor and `T` scans a vector table for Thumb entry points.
+These apply only when the database is **created** — an existing IDB already records
+them. On ARM, `t` toggles ARM/Thumb at the cursor, `T` scans a vector table for
+Thumb entry points.
 
 ## Keys
 
@@ -93,82 +92,55 @@ the cursor and `T` scans a vector table for Thumb entry points.
 
 ## What's in it
 
-**Listing** — one continuous IDA-style view: code, data and undefined runs
-together, with IDA's own colour tags and per-operand marks. Line-virtualized, so
-a 400 MB binary scrolls like a text file.
+**Listing** — code, data and undefined runs in one continuous view, with IDA's own
+colours. Line-virtualized: a 400 MB binary scrolls like a text file.
 
-**Decompiler** — Hex-Rays pseudocode with syntax highlighting, per-line address
-anchors, and rename/retype/comment that write back.
+**Decompiler** (`tab`) — Hex-Rays pseudocode, highlighted, with per-line address
+anchors. Renames, retypes and comments write back.
 
-**Search** (`ctrl+f`) — the whole database, two ways: **text** through the
-rendered disassembly (`call cs:`, `xor eax, eax`) and **bytes** with IDA's
-pattern language, wildcards included (`48 8b ?? c3`, nibbles like `8?`, quoted
-literals). Which one you meant is guessed from the query — a hex-looking *word*
-like `dead` stays a text search — and `hex:`/`text:` or F2 override the guess.
-Enter searches, then Enter opens the hit.
+**Graph** (`space`) — basic blocks laid out with a real layered (Sugiyama) algorithm
+and routed, colour-coded edges. The boxes hold the *same rows* as the listing, so
+renames and xrefs work inside them. → [`docs/GRAPH_VIEW.md`](docs/GRAPH_VIEW.md)
 
-**Findings export** (`ctrl+e`) — the session as a markdown writeup: your
-comments grouped by function, the names and prototypes you set, the types you
-declared. A `.i64` does not record *who* wrote a comment — IDA's own analyzer
-uses the same call — so idatui journals its edits into the database as it makes
-them, and the report is built from that. Also `python -m idatui.drive export`.
+**Split view** (`s`) — listing and pseudocode side by side, cursor-synced. The
+focused pane drives; the other highlights the instructions the current C line owns.
 
-**Structs / types** (`ctrl+t`) — local types as plain C: the list on the left,
-an editable, syntax-highlighted definition on the right. `Ctrl+S` declares it
-back into the database and reformats to IDA's own layout, `Ctrl+N` starts a new
-one, `d` deletes, and `/` fuzzy-filters the list.
+**Search** (`ctrl+f`) — the whole database, as **text** through the disassembly or as
+**bytes** with IDA's wildcard patterns (`48 8b ?? c3`). It guesses which you meant;
+`hex:`/`text:` overrides.
 
-**Graph** (`space`) — the current function's basic blocks, laid out with a real
-layered (Sugiyama) algorithm and routed edges: green taken, red fall-through,
-blue unconditional, purple loop. The boxes hold the *same rows* as the listing,
-so highlighting, renames and xrefs work inside them. Above 400 blocks it declines
-and says so, because nothing readable comes out at that size.
-→ [`docs/GRAPH_VIEW.md`](docs/GRAPH_VIEW.md)
+**Structs / types** (`ctrl+t`) — local types as plain C, editable and highlighted.
+`ctrl+s` declares it straight back into the database.
 
-**Split view** (`s`) — listing and pseudocode side by side. The focused pane
-drives; the other highlights every instruction the current C line owns.
+**Literal formats** (`o`) — hex → decimal → binary → char → offset, IDA's own key.
+Skips the stops that wouldn't change anything, so no press is a silent no-op.
 
-**Literal formats** (`o`) — hex → decimal → binary → char → offset, IDA's own
-key. Only stops that change what you see are visited, so no press is a silent
-no-op. The literal under the cursor is *marked*, and the mark is what changes —
-it keeps up as the text reflows. Works on Hex-Rays' separate number formats too.
+**Findings export** (`ctrl+e`) — the session as a markdown writeup: your comments,
+names and prototypes, grouped by function. idatui journals its own edits, so the
+report is *yours*, not IDA's analyzer's.
 
-**Execution traces** — load a [Tenet](https://github.com/gaasedelen/tenet) trace
-and move through time:
+**Execution traces** — load a [Tenet](https://github.com/gaasedelen/tenet) trace and
+move through time. Both code views paint the execution trail; the dock shows
+registers and stack as of that instant.
 
 ```sh
-./ida-tui /path/to/binary --trace trace.0.log
+./ida-tui /path/to/binary --trace trace.0.log     # ] [ step · } { step over
 ```
-
-`]`/`[` step, `}`/`{` step over. Both code views are painted with the execution
-trail — including the pseudocode, since `decomp_map` knows which instructions
-each C line covers. The dock shows registers and the stack *as of that instant*;
-bytes the trace never saw print as `??`, not zeros. Trace addresses are rebased
-onto the database automatically.
 
 **RPC** — drive the live TUI from another process (agent-driven RE, livestreams):
 
 ```sh
 ./ida-tui /abs/path/bin --rpc /tmp/ida.sock
-python -m idatui.drive where                 # terse-text helper
 python -m idatui.drive pc main               # pseudocode of main
 python -m idatui.drive rename sub_5BE0 foo   # goto + rename
 ```
 
-→ [`docs/RPC.md`](docs/RPC.md)
+→ [`docs/RPC.md`](docs/RPC.md) · scripted feature tour for screen recordings:
+`python tools/demo.py --spawn`
 
-There's a scripted feature tour on top of it, for screen recordings — it spawns
-its own pane on a scratch copy, drives ten scenes through the real prompts, and
-reverts its own edits:
-
-```sh
-python tools/demo.py --spawn          # --speed 0.5 to rehearse, --list for the scenes
-```
-
-**Splash** — the logo renders as a real image on terminals that speak the kitty
-graphics protocol, `logo.ans` everywhere else. Support is detected by *asking the
-terminal*, not by sniffing `$TERM` (under a multiplexer, every variable you'd
-test is empty while the protocol works fine).
+**Also** — hex view (`\`), strings (`"`), symbol and command palettes
+(`ctrl+n`/`ctrl+p`), multi-binary projects, and a splash that renders as a real
+image on terminals speaking the kitty graphics protocol.
 
 ## Tests
 
@@ -204,12 +176,10 @@ flake, and the four ways a test here wastes minutes.
 ### Working on this with an LLM agent
 
 [`.agents/skills/idatui/SKILL.md`](.agents/skills/idatui/SKILL.md) is an
-[Agent Skills](https://agentskills.io/specification) skill describing the
-architecture, the run/test loop and the traps that cost real time here (Code Mode,
-Textual, the graph engine, terminal graphics). Harnesses implementing that standard
-discover `.agents/skills/` automatically; others can be pointed at the file directly.
-A user-level skill of the same name takes precedence, so delete or symlink yours if
-you keep a personal copy.
+[Agent Skills](https://agentskills.io/specification) skill covering the architecture,
+the test loop, and the traps that cost real time here. Compatible harnesses pick it
+up automatically; point others at the file. (A user-level skill of the same name
+wins, so symlink yours if you keep one.)
 
 —
 
