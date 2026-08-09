@@ -175,7 +175,7 @@ test is empty while the protocol works fine).
 ```sh
 python3 tests/run.py --fast     # 380 checks, <1s, any python3 — between edits
 python3 tests/run.py --list     # what runs, and what needs IDA
-python3 tests/run.py            # 788 checks, ~2m — before a commit
+python3 tests/run.py            # 1031 checks, ~50s — before a commit
 ```
 
 Every suite declares `NEEDS_IDA`; `--fast` runs only the pure ones (stdlib, no
@@ -194,6 +194,22 @@ flake, and the four ways a test here wastes minutes.
 
 - [`docs/RPC.md`](docs/RPC.md) — the RPC protocol, verb by verb
 - [`docs/GRAPH_VIEW.md`](docs/GRAPH_VIEW.md) — how the graph is laid out
+- [`docs/CODEMODE_UPSTREAM.md`](docs/CODEMODE_UPSTREAM.md) — findings from porting to
+  IDA Code Mode, and which are fixed upstream
+- [`docs/PROJECTS.md`](docs/PROJECTS.md), [`docs/SPLIT_VIEW.md`](docs/SPLIT_VIEW.md),
+  [`docs/TEXTUAL_NOTES.md`](docs/TEXTUAL_NOTES.md),
+  [`docs/PAGING_FINDINGS.md`](docs/PAGING_FINDINGS.md),
+  [`docs/TRISKEL_EVAL.md`](docs/TRISKEL_EVAL.md)
+
+### Working on this with an LLM agent
+
+[`.agents/skills/idatui/SKILL.md`](.agents/skills/idatui/SKILL.md) is an
+[Agent Skills](https://agentskills.io/specification) skill describing the
+architecture, the run/test loop and the traps that cost real time here (Code Mode,
+Textual, the graph engine, terminal graphics). Harnesses implementing that standard
+discover `.agents/skills/` automatically; others can be pointed at the file directly.
+A user-level skill of the same name takes precedence, so delete or symlink yours if
+you keep a personal copy.
 
 —
 
