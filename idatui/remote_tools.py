@@ -98,80 +98,10 @@ def compact_whitespace(line: str) -> str:
     return lead + _IDATUI_STRING_OR_SPACES_RE.sub(_repl, stripped)
 
 
-def _idatui_head_row(ea, flags=None):
-    """One flat-listing row for the head at ``ea``: kind (code/data/unknown),
-    byte size, rendered text, and any symbol name.
-
-    ``flags`` lets a caller that already asked for them say so -- the walk in
-    ``heads`` used to fetch them three times per head (here, in _is_unknown from
-    _advance, and again from _rows_for).
-    """
-
-    f = ida_bytes.get_flags(ea) if flags is None else flags
-    if ida_bytes.is_code(f):
-        kind = "code"
-    elif ida_bytes.is_data(f):
-        kind = "data"
-    else:
-        kind = "unknown"
-    line = ida_lines.generate_disasm_line(ea, 0)
-    text, spans, ops = _idatui_line_parts(line) if line else ("", None, None)
-    row = {
-        "ea": hex(ea),
-        "kind": kind,
-        "size": int(ida_bytes.get_item_size(ea)),
-        "text": text,
-    }
-    if spans is not None:
-        row["spans"] = spans
-        # Where each operand sits in `text`. Comes out of the same tag walk
-        # (free), and is what lets the client show WHICH literal a keypress
-        # would reformat before you press it.
-        if ops:
-            row["ops"] = ops
-    nm = ida_name.get_ea_name(ea)
-    if nm:
-        row["name"] = nm
-    return row
-
-
-import functools as _idatui_functools
-
-
-import os as _idatui_os
-
-
-_IDATUI_LINE_CACHE = int(_idatui_os.environ.get("IDATUI_LINE_CACHE") or 65536)
-
-
-def _idatui_line_parts(line):
-    """``(text, spans, ops)`` for one tagged disassembly line -- memoised.
-
-    A function of the tagged line and nothing else, so the same line always
-    gives the same answer: a rename changes the line, which changes the key.
-    And listings repeat themselves hard -- 196k lines of bash are 53k distinct
-    ones, so a 16k-entry cache serves ~70% of them and takes the per-line cost
-    from 10.4us to 3.9us. This is the most expensive thing the backend does per
-    listing row, and a jump to an address near the end of a big binary walks
-    hundreds of thousands of them.
-
-    ``spans`` is None when the tag walk and the plain text disagree about what
-    the line says (then the text wins and the row renders unhighlighted).
-
-    The returned lists are SHARED between every row that has the same line;
-    treat them as read-only. Pickle notices the sharing too, so a page of
-    repetitive disassembly also serialises smaller.
-    """
-    text = " ".join(ida_lines.tag_remove(line).split())  # collapse the padding
-    spans, ops = _idatui_spans(line)
-    # Built from the SAME line as `text`, then whitespace-collapsed identically,
-    # so the two can never disagree about what the row says.
-    joined = "".join([t for _k, t in spans])
-    if " ".join(joined.split()) != text:
-        return (text, None, None)
-    return (text, spans, ops)
-
-
+# NOTE: an identical, UNDECORATED copy of _idatui_head_row/_idatui_line_parts
+# used to sit here, shadowed by the real ones below. If you find one again:
+# keep the copy carrying @lru_cache. Deleting that one instead is a silent
+# ~2.7x regression on every listing row (10.4us -> 3.9us is the cache).
 def _idatui_head_row(ea, flags=None):
     """One flat-listing row for the head at ``ea``: kind (code/data/unknown),
     byte size, rendered text, and any symbol name.
