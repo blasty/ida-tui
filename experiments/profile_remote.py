@@ -47,6 +47,7 @@ CALLS = {
     # One full listing page, exactly as the background grower asks for it.
     "heads": 'heads(addr=a["addr"], count=500, annotate=True)',
     "heads_plain": 'heads(addr=a["addr"], count=500, annotate=False)',
+    "heads_skeleton": 'heads(addr=a["addr"], count=500, annotate=True, text=False)',
     "decompile": 'decompile(a["addr"])',
     "disasm": 'disasm(a["addr"], 500)',
 }

@@ -683,6 +683,9 @@ class ListingModel:
     """
 
     PAGE = 500  # viewport-scale heads per Code Mode execution
+    #: Generation marker for a skeleton (text-less) page. Never equals a real
+    #: _text_gen, which counts up from 0, so such a page always reads as stale.
+    _SKELETON_GEN = -1
 
     def __init__(self, program: "Program", seg_start: int, seg_end: int,
                  name: str | None = None):
@@ -709,6 +712,10 @@ class ListingModel:
         #: Whether a rename has ever staled this model. Until one has, every
         #: read takes exactly the path it always did.
         self._renamed = False
+        #: Whether any page was loaded as a text-less skeleton. Same effect as
+        #: _renamed -- reads have to check the per-head generation -- so the two
+        #: are ORed at every gate rather than duplicating the machinery.
+        self._skeleton = False
         #: One entry per loaded PAGE: where its heads start, the address it was
         #: fetched from, the digest it came back with, and how many rows it
         #: held. A stale-text refresh re-asks for exactly that page, so it can
@@ -735,7 +742,7 @@ class ListingModel:
     # containing a huge coalesced undefined run doesn't pull megabytes.
     _OP_SPAN_CAP = 1 << 16
 
-    def _build_page(self, rows: list) -> list[Head]:
+    def _build_page(self, rows: list, raw: bool = True) -> list[Head]:
         """Turn the tool's raw rows into ``Head``s with their opcode bytes
         already attached, via one bulk read over the code extent.
 
@@ -753,7 +760,10 @@ class ListingModel:
                     lo = ea
                 hi = ea + int(r["size"])
         data = None
-        if 0 <= lo < hi and hi - lo <= self._OP_SPAN_CAP:
+        # A skeleton page shows no text, so it needs no opcode bytes -- and
+        # skipping them drops the SECOND round trip a page costs (heads is
+        # always followed by a bulk read_raw over the code extent).
+        if raw and 0 <= lo < hi and hi - lo <= self._OP_SPAN_CAP:
             try:
                 data = self._prog.read_bytes(lo, hi - lo)
             except Exception:  # noqa: BLE001 -- opcode bytes are decoration
@@ -782,26 +792,42 @@ class ListingModel:
         with self._lock:
             return self._max_raw
 
-    def load_next_page(self) -> int:
-        """Load one more page of heads; returns how many were added."""
-        return self._load_next_page()
+    def load_next_page(self, text: bool = True) -> int:
+        """Load one more page of heads; returns how many were added.
 
-    def _load_next_page(self) -> int:
+        ``text=False`` loads a SKELETON page: the same rows at the same
+        addresses with the same sizes and kinds, but no rendered disassembly
+        and no opcode bytes -- 2.8x cheaper, and one round trip instead of two.
+
+        That is all the background grower needs. It exists to discover how many
+        rows the segment has so the scrollbar and paging are right, and it
+        renders 227k rows of a 1.2MB bash to do it, essentially all of which are
+        never looked at. A skeleton page is marked text-stale, so the FIRST read
+        of one goes through exactly the same ``_ensure_text`` path a rename uses
+        and materialises it, one page per round trip, only for what is shown.
+        """
+        return self._load_next_page(text)
+
+    def _load_next_page(self, text: bool = True) -> int:
         with self._load_lock:
-            return self._load_next_page_locked()
+            return self._load_next_page_locked(text)
 
-    def _load_next_page_locked(self) -> int:
+    def _load_next_page_locked(self, text: bool = True) -> int:
         with self._lock:
             if self._done or self._next is None:
                 return 0
             frm = self._next
         payload = self._prog.client.invoke(
-            "heads", addr=hex(frm), count=self.PAGE, annotate=True)
+            "heads", addr=hex(frm), count=self.PAGE, annotate=True, text=text)
         rows = payload.get("heads", []) if isinstance(payload, dict) else []
         cur = payload.get("cursor", {}) if isinstance(payload, dict) else {}
-        page = self._build_page(rows)
+        page = self._build_page(rows, raw=text)
         with self._lock:
-            gen = self._text_gen
+            # A sentinel generation no _text_gen can ever equal, so the page
+            # reads as stale until something asks for it and refreshes it.
+            gen = self._text_gen if text else self._SKELETON_GEN
+            if not text:
+                self._skeleton = True
             self._page_head.append(len(self._heads))
             self._page_addr.append(frm)
             self._page_digest.append(payload.get("digest")
@@ -1104,7 +1130,8 @@ class ListingModel:
             j, off = self._phys(i)
             if j < 0:
                 return None
-            stale = self._renamed and self._head_gen[j] != self._text_gen
+            stale = ((self._renamed or self._skeleton)
+                     and self._head_gen[j] != self._text_gen)
             if not stale:
                 span = self._span(self._heads[j])
                 h = self._heads[j]
@@ -1132,7 +1159,7 @@ class ListingModel:
             # _renamed stays set once a rename has happened; _ensure_text then
             # does the precise, range-limited staleness check. Before the first
             # rename this is one boolean and the read is exactly as it was.
-            dirty = self._renamed
+            dirty = self._renamed or self._skeleton
             if dirty:
                 j0 = max(self._phys(max(start, 0))[0], 0)
                 j1 = self._phys(max(min(self._rows, start + count) - 1, 0))[0] + 1

@@ -1262,13 +1262,23 @@ class ListingView(SearchMixin, NavMixin, ColumnCursor, ScrollView, can_focus=Tru
     @work(thread=True, exclusive=True, group="listing-grow")
     def _grow(self) -> None:
         """Stream the rest of the segment's heads in the background, growing the
-        virtual size as they land so the scrollbar/paging catch up."""
+        virtual size as they land so the scrollbar/paging catch up.
+
+        SKELETON pages: this loop only exists to find out how many rows the
+        segment has, and it used to render every one of them to do it -- 227k
+        rows for a 1.2MB bash, ~9s, essentially all never displayed. A skeleton
+        page has the same rows at the same addresses and no text, is 2.8x
+        cheaper and costs one round trip instead of two. The first read of one
+        materialises it through the same path a rename uses, so only what is
+        actually shown ever gets rendered. _prime (the viewport) still loads
+        real pages, so what you are looking at is never a skeleton.
+        """
         model = self.model
         if model is None:
             return
         since = 0
         while not model.complete:
-            if model.load_next_page() == 0:
+            if model.load_next_page(text=False) == 0:
                 break
             if self.model is not model:  # a new load() replaced us
                 return

@@ -412,6 +412,63 @@ async def s_auto_land(c: Ctx):
     c.check("auto-land is idempotent (guarded)", app._cur is prev)
 
 
+@scenario("skeleton_pages")
+async def s_skeleton_pages(c: Ctx):
+    """The background grower loads text-less pages; reading one must fill it in.
+
+    _grow streams the whole segment only to learn how many rows it has, so it
+    asks for skeleton pages (same rows, same addresses, no rendered text) --
+    3x cheaper and one round trip instead of two. The first read of such a page
+    has to materialise it through the same path a rename uses.
+
+    The failure mode if that path breaks is BLANK ROWS deep in the listing, not
+    an exception, and nothing else in this suite scrolls far enough to see it:
+    _prime renders the first ~1000 rows for real, so a test that only pages down
+    a few screens passes against a completely broken implementation.
+    """
+    app = c.app
+    await c.open_biggest("listing")
+    lv = app.query_one(ListingView)
+    model = lv.model
+    if model is None:
+        c.check("listing model exists", False)
+        return
+    # Let the grower finish so the tail of the segment is definitely skeleton.
+    await c.wait(lambda: model.complete, 30)
+    c.check("the grower completes", model.complete, f"rows={len(model)}")
+    if not model.complete or len(model) < 1200:
+        # A target smaller than _prime's horizon has no skeleton pages at all,
+        # so there is nothing to check rather than something broken.
+        c.check("segment is big enough to have skeleton pages", True,
+                f"skipped: only {len(model)} rows, _prime renders ~1000")
+        return
+    c.check("pages were loaded as skeletons", model._skeleton is True)
+
+    # Well past _prime's horizon, and the very last row.
+    deep = max(1200, len(model) - 40)
+    for row in (1200, len(model) // 2, deep):
+        h = model.get(row)
+        c.check(f"row {row} of a skeleton page has real text",
+                h is not None and bool((h.text or "").strip()),
+                f"ea={getattr(h, 'ea', None)} text={getattr(h, 'text', None)!r}")
+
+    # And through the render path the user actually sees, not just the model.
+    lv.cursor = deep
+    lv.refresh()
+    await c.pause(0.1)
+    painted = lv._line_plain(deep)
+    c.check("a deep row RENDERS with text",
+            bool(painted and painted.strip()), f"painted={painted!r}")
+
+    # Materialising must not change the row count or move any address: the
+    # skeleton's structure is what the scrollbar was sized from.
+    before = len(model)
+    model.get(deep)
+    c.check("materialising a page does not change the row count",
+            len(model) == before, f"{before} -> {len(model)}")
+    c.check("the walk was not disturbed", not model.stale_structure)
+
+
 @scenario("palette_paging")
 async def s_palette_paging(c: Ctx):
     """PgUp/PgDn move the palette list by a viewport, with the Input focused.

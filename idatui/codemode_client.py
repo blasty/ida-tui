@@ -1209,7 +1209,7 @@ _HEADS = _remote_op(
     'heads(addr=a["addr"], count=int(a.get("count", 200)),'
     ' offset=int(a.get("offset", 0)), end=a.get("end", ""),'
     ' back=bool(a.get("back", False)), annotate=bool(a.get("annotate", False)),'
-    ' expect=a.get("expect", ""))')
+    ' expect=a.get("expect", ""), text=bool(a.get("text", True)))')
 
 
 # The graph view's only backend call. Blocks are address RANGES, never text:

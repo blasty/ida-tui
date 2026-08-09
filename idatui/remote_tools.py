@@ -102,13 +102,20 @@ def compact_whitespace(line: str) -> str:
 # used to sit here, shadowed by the real ones below. If you find one again:
 # keep the copy carrying @lru_cache. Deleting that one instead is a silent
 # ~2.7x regression on every listing row (10.4us -> 3.9us is the cache).
-def _idatui_head_row(ea, flags=None):
+def _idatui_head_row(ea, flags=None, text=True):
     """One flat-listing row for the head at ``ea``: kind (code/data/unknown),
     byte size, rendered text, and any symbol name.
 
     ``flags`` lets a caller that already asked for them say so -- the walk in
     ``heads`` used to fetch them three times per head (here, in _is_unknown from
     _advance, and again from _rows_for).
+
+    ``text=False`` builds a SKELETON row: address, kind, size and name, but no
+    rendered text and no colour spans. generate_disasm_line is 22x the cost of
+    the walk around it, and a caller that only needs to know how many rows a
+    segment has -- which is what sizing the scrollbar needs -- should not pay
+    it. The row COUNT and the addresses are identical either way, which is what
+    makes a skeleton page swappable for a real one later.
     """
 
     f = ida_bytes.get_flags(ea) if flags is None else flags
@@ -118,8 +125,11 @@ def _idatui_head_row(ea, flags=None):
         kind = "data"
     else:
         kind = "unknown"
-    line = ida_lines.generate_disasm_line(ea, 0)
-    text, spans, ops = _idatui_line_parts(line) if line else ("", None, None)
+    if text:
+        line = ida_lines.generate_disasm_line(ea, 0)
+        text, spans, ops = _idatui_line_parts(line) if line else ("", None, None)
+    else:
+        text, spans, ops = "", None, None
     row = {
         "ea": hex(ea),
         "kind": kind,
@@ -492,6 +502,7 @@ def heads(
     back: Annotated[bool, "Walk backwards: return the count heads ENDING just before addr, in forward order"] = False,
     annotate: Annotated[bool, "Emit IDA-style function boundary banner rows (kind sep/funchdr)"] = False,
     expect: Annotated[str, "Digest a caller already holds: the rows are omitted when they still hash to it"] = "",
+    text: Annotated[bool, "Render each row's disassembly text (default true). False = a skeleton page: same rows, same addresses, no text"] = True,
 ) -> dict:
     """Walk item heads from ``addr`` as a flat listing: every head is rendered
     (code OR data OR undefined) via generate_disasm_line and stepped with
@@ -578,7 +589,7 @@ def heads(
         out = []
         if at_start:
             out.extend(_idatui_func_header_rows(e))
-        row = _idatui_head_row(e, f)
+        row = _idatui_head_row(e, f, text)
         if at_start:
             row = dict(row)
             row["name"] = None  # the name is shown on the proc header line
@@ -612,7 +623,9 @@ def heads(
         rows.extend(_rows_for(ea, f))  # a struct head expands into member rows
         ea = _advance(ea, f)
     cursor = {"next": hex(ea)} if more else {"done": True}
-    dig = _idatui_rows_digest(rows)
+    # A skeleton page has no text to go stale, so there is nothing to digest --
+    # and the digest is only ever used to skip re-sending text.
+    dig = _idatui_rows_digest(rows) if text else None
     out = {"addr": str(addr), "cursor": cursor, "digest": dig, "count": len(rows)}
     # ``expect`` says "I already hold a page that hashed to this". The rows are
     # built either way -- generate_disasm_line is the floor and there is no way
