@@ -11,6 +11,16 @@ unnecessary.
 **Environment:** ida-codemode 0.3.1, IDA 9.4 (idalib), Linux, single managed
 worker backend, quiet box. Target for timings: `targets/echo` unless stated.
 
+> **Status against 0.3.2 (upstream `93e8aad`).** Items **1 and 2 are FIXED** —
+> the two that mattered most. `sys.settrace` is gone from the runtime entirely
+> (the deadline is now a C-level thread interrupt, `runtime._interrupt_thread`),
+> and `serialization.dumps_json` hands results straight to the C encoder,
+> falling back to the `to_jsonable` walker only for values `json.dumps` rejects.
+> Both of our workarounds re-measured at **0.99x and 0.97x** on 0.3.2 — i.e.
+> nothing. The settrace strip has been deleted; `_PACK_EPILOGUE` is kept only
+> for encoder determinism. Harness: `experiments/bench_pack_trace.py`.
+> Items 3–9 are **not** re-verified against 0.3.2 and may still stand.
+
 **What the client does**, for scale: it renders a continuous disassembly listing,
 pseudocode, a CFG graph view and a hex view, paging over the database as the user
 scrolls. It is latency-sensitive in a way an agent-driven MCP client is not — a
@@ -20,7 +30,9 @@ keypress must repaint. It issues ~1–8 operations per user action.
 
 ## 1. `timeout_trace` enables line tracing in every frame — 52x on IDA calls
 
-**Highest-impact item by a wide margin.**
+**Highest-impact item by a wide margin.** — ✅ **FIXED in 0.3.2.** The runtime no
+longer installs a trace hook at all; cancellation is a C-level thread interrupt.
+Our `sys.settrace(None)` workaround is deleted as of `a5137fe`.
 
 `runtime.py` wraps every `execute_python` in `sys.settrace(timeout_trace)` to
 enforce the deadline. `timeout_trace` ends with `return timeout_trace`, and
@@ -74,6 +86,11 @@ and do the same, which is an argument for fixing it in the runtime.
 ---
 
 ## 2. `to_jsonable` dominates any large result
+
+✅ **FIXED in 0.3.2**, via the first suggested fix below: `serialization.dumps_json`
+calls `json.dumps(value, default=to_jsonable)`, so a JSON-safe result never enters
+the Python walker. Our packing workaround now measures 0.97x and is retained only
+to pin encoder settings, not for speed.
 
 `execute_python` runs `to_jsonable()` over whatever the snippet returns. Our
 answers are already JSON-safe and they are big — a 200-row listing page is
@@ -250,8 +267,8 @@ added a test asserting our kwargs are a subset of
 
 | # | item | impact | fixable by you? |
 |---|---|---|---|
-| 1 | `timeout_trace` line tracing | 52x on IDA calls, 10x on real operations | yes, one line |
-| 2 | `to_jsonable` on large results | 114x on serialisation | yes |
+| ~~1~~ | ~~`timeout_trace` line tracing~~ | ~~52x on IDA calls~~ | ✅ fixed in 0.3.2 |
+| ~~2~~ | ~~`to_jsonable` on large results~~ | ~~114x on serialisation~~ | ✅ fixed in 0.3.2 |
 | 7 | no change/revision counter | correctness for shared editing | yes, cheap |
 | 4 | loader switches fatal on reopen | crashes, hard to diagnose | yes |
 | 5 | replaced/deleted IDB under lease | silent hang | yes |
@@ -264,6 +281,10 @@ Items 1 and 2 together were the difference between "the port is 35x slower than
 the private worker it replaced" and "the port is within 2x, and faster on several
 operations". Both are in the runtime, not in client code — which is why they are
 worth fixing centrally rather than leaving each client to rediscover.
+
+**Both landed in 0.3.2**, and both client-side workarounds could then be measured
+at parity and retired. That is the outcome this document was written for; the
+remaining items (3–9) have not been re-checked against 0.3.2.
 
 Happy to supply the benchmark harness (it is backend-agnostic and runs against
 both our old worker and Code Mode), or to test a patch.
