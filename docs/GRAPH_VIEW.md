@@ -217,9 +217,19 @@ drive raw graph action=zoom
 
 It is optional; without it everything works and `auto` means `native`.
 
+**Install it into the interpreter the launcher actually runs**, which is
+`$IDATUI_PYTHON` and defaults to `~/ida-venv/bin/python` — *not* the repo's
+`.venv`, which is only what the tests use. Getting this wrong is the one way to
+see `no pytriskel in ...` in the status bar while `tests/test_graph.py` happily
+exercises both engines; the message names the interpreter for that reason.
+
 ```bash
-uv pip install ~/dev/triskel/bindings/python    # needs cmake, ninja, a C++23 compiler
+~/ida-venv/bin/python -m pip install ~/dev/triskel/bindings/python
+.venv/bin/python   -m pip install ~/dev/triskel/bindings/python   # for the tests
 ```
+
+Needs cmake, ninja and a C++23 compiler at install time; the wheel is built from
+source for whichever interpreter runs pip.
 
 That is **our fork**, not PyPI. Upstream's wheels stop at cp313 with no sdist
 (so there is nothing to install on 3.14), and on any version their

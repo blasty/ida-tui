@@ -20,6 +20,7 @@ import asyncio
 import os
 import re
 import subprocess
+import sys
 import time
 from dataclasses import dataclass, field
 from enum import StrEnum
@@ -2679,7 +2680,11 @@ class GraphView(NavMixin, ScrollView, can_focus=True):
         self._center_cursor()
         self.refresh(layout=True)
         got = self.lay.stats["engine"] if self.lay else "?"
-        note = "" if graph_triskel.available() else " (pytriskel not installed)"
+        # Name the interpreter. The launcher runs $IDATUI_PYTHON (default
+        # ~/ida-venv), which is NOT the repo .venv the tests use, so "not
+        # installed" on its own sends people to check the wrong python.
+        note = ("" if graph_triskel.available()
+                else f" (no pytriskel in {sys.executable})")
         self.app._status(f"graph: engine {self._engine} \u2192 {got}{note}")
 
     def action_center(self) -> None:
