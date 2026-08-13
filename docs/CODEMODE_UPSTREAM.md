@@ -2,7 +2,7 @@
 
 Notes for the `ida-codemode` maintainers, gathered while porting **ida-tui** (a
 Textual TUI frontend for IDA) from a private idalib worker to
-`ida_codemode.client.DatabaseHandle`.
+`ida_codemode.DatabaseHandle`.
 
 Everything below is measured, not inferred. Where we worked around something, the
 workaround is named so you can judge whether the library should make it
@@ -11,25 +11,32 @@ unnecessary.
 **Environment:** ida-codemode 0.3.1, IDA 9.4 (idalib), Linux, single managed
 worker backend, quiet box. Target for timings: `targets/echo` unless stated.
 
-> **Status against 0.3.2 (upstream `93e8aad`) — every item re-checked.**
+> **Status against 0.6.1 (upstream `439289f`) — every item re-checked.**
 >
 > | item | verdict |
 > |---|---|
-> | 1 `timeout_trace` line tracing | ✅ **fixed** — no `settrace` in the runtime at all |
-> | 2 `to_jsonable` on large results | ✅ **fixed** — `dumps_json` C fast path |
-> | 3 2 ms `execute_sync` floor | ✅ **fixed, 7.0x** — 2.055 ms → 0.294 ms |
-> | 4 loader switches fatal on reopen | ❌ open |
+> | 1 `timeout_trace` line tracing | ✅ **fixed in 0.3.2** — no `settrace` in the runtime at all |
+> | 2 `to_jsonable` on large results | ✅ **fixed in 0.3.2** — `dumps_json` C fast path |
+> | 3 2 ms `execute_sync` floor | ✅ **fixed in 0.3.2, 7.0x** — 2.055 ms → 0.294 ms |
+> | 4 loader switches fatal on reopen | ✅ **fixed in 0.5.x** — see the caveat in §4 |
 > | 5 IDB replaced under a live lease | ❌ open |
 > | 6 no close-without-save | ❌ open |
-> | 7 no change notification | ❌ open |
-> | 8 package exports | ❌ open |
-> | 9 no `py.typed` / handle Protocol | ❌ open |
+> | 7 no change notification | ⚠️ partial — `DatabaseEventCallback` exists on `DatabaseManager`, but there is still no revision counter for an *external* caching client |
+> | 8 package exports | ✅ **fixed in 0.5.x** — a real `__all__` on the package root |
+> | 9 no `py.typed` / handle Protocol | ✅ **fixed in 0.5.x** — `ida_codemode/py.typed` ships |
 >
-> Items 4–9 are open **by construction**: `client.py`, `registry.py`,
-> `resolver.py`, `server.py`, `database.py` and `worker.py` are byte-identical
-> between 0.3.1 and 0.3.2 (`git diff --quiet 4195f21..HEAD -- <file>`), and every
-> one of those items lives in those files. Only `runtime.py`, `http.py`,
-> `serialization.py` (new) and `benchmark.py` (new) changed.
+> **0.5.x restructured the package**, which is why the old "these files are
+> byte-identical" re-check recipe no longer works: `client.py` → `handle.py`,
+> `registry.py` → `_registry.py` + `instances.py`, `resolver.py` → `_resolver.py`,
+> and the loader options moved into a frozen `DatabaseOpenOptions` dataclass.
+> Everything private is now underscore-prefixed, so the cheap re-check after an
+> upstream pull is simply: does anything we import still appear in
+> `ida_codemode.__all__`?
+>
+> 0.5.3 → 0.6.1 changed **nothing** we depend on: `__init__.py`, `handle.py`,
+> `instances.py`, `options.py`, `errors.py` and `models.py` are byte-identical
+> between those two releases. 0.6.1 only collapses the six console scripts into a
+> single `ida-codemode` command.
 >
 > Both of our client-side workarounds re-measured at **0.99x and 0.97x** on 0.3.2
 > — i.e. nothing. The settrace strip has been deleted; `_PACK_EPILOGUE` is kept
@@ -204,8 +211,25 @@ crash five minutes into a run.
   already exists on the worker's stderr; losing it turns a one-line fix into a
   bisect.
 
-**Our workaround:** the client checks whether the expected IDB exists and drops
-`processor`/`image_base`/`file_type` when it does.
+**Our workaround:** the client checked whether the expected IDB exists and
+dropped `processor`/`image_base`/`file_type` when it did.
+
+**FIXED in 0.5.x**, with exactly this fix, in `_resolver._build_worker_command`:
+
+```python
+if input_path == expected_idb and input_path != source:
+    # Loader/import switches are baked into an existing IDB...
+    options = WorkerLaunchOptions()
+```
+
+Our workaround is therefore deleted. **One narrow case remains**: the strip needs
+`input_path != source`, so passing an `.i64` path *directly* together with load
+options (`ida-tui foo.i64 --processor arm`) still forwards the switches and still
+fatals. Our old guard keyed on "the target IDB exists" and so covered it. It is a
+nonsense invocation and no idatui code path generates it — the project layer
+always passes `output_database`, and `_needs_load_options` bails when an `.i64`
+exists — but if this ever resurfaces as "worker exited with status 1", that is
+where it comes from.
 
 ---
 
@@ -256,27 +280,35 @@ shared editing safe for every caching client.
 
 ---
 
-## 8. Package exports and API surface stability
+## 8. Package exports and API surface stability — FIXED in 0.5.x
 
-`ida_codemode/__init__.py` exports nothing, so a library consumer must import
-from submodules:
+`ida_codemode/__init__.py` used to export nothing, so a library consumer had to
+import from submodules, including things that were clearly internals (`FileLock`,
+`REGISTRY_DIR`, `canonical_path`, `idb_key`, `scan_instances`) that we only
+touched because no public equivalent existed.
+
+**Suggested fix was:** export `DatabaseHandle` and the public exception types from
+the package root, and mark the intended-public registry helpers explicitly.
+
+**That is what 0.5.x did.** Everything we need is now on the package root, and
+the internals moved behind an underscore:
 
 ```python
-from ida_codemode.client   import DatabaseHandle, ClientError, RemoteError, InstanceDisconnectedError
-from ida_codemode.registry import REGISTRY_DIR, FileLock, RegistryEntry, canonical_path, idb_key, scan_instances
-from ida_codemode.resolver import IdbBusy, expected_idb_path
+from ida_codemode import DatabaseHandle, DatabaseOpenOptions, DatabaseInstance
+from ida_codemode import RemoteError, DatabaseBusyError, DatabaseDisconnectedError
+from ida_codemode import discover_databases, find_database_owner, wait_database_released
 ```
 
-Some of those are clearly internals (`FileLock`, `REGISTRY_DIR`) that we only
-touch because no public equivalent exists (see §5).
-
-**Suggested fix:** export `DatabaseHandle` and the public exception types from the
-package root, and mark the intended-public registry helpers explicitly. It also
-makes "what is API and what is internal" answerable, which right now it is not.
+The two lock-poking helpers we had reimplemented client-side
+(`_wait_for_entry_release`) are now `wait_database_released()`, and our
+registry-scanning ownership check is now `find_database_owner()`. Both are
+deleted from our tree. Note `find_database_owner()` *raises*
+`AmbiguousDatabaseError` where our scan silently took the first match — a
+behaviour improvement, but callers need a handler.
 
 ---
 
-## 9. A testing note: `DatabaseHandle.open()`'s 30 keyword-only options
+## 9. A testing note: `DatabaseHandle.open()`'s 30 keyword-only options — FIXED in 0.5.x
 
 The port we started from called `open(..., loading_address=...)`. The real
 parameter is `image_base`. Every `connect()` would have raised `TypeError` on the
@@ -291,6 +323,14 @@ can be checked against the real signature and a typo is caught statically. (We
 added a test asserting our kwargs are a subset of
 `inspect.signature(DatabaseHandle.open).parameters`, which is a poor substitute.)
 
+**0.5.x ships `ida_codemode/py.typed`**, and the 30 keyword-only options became a
+frozen `DatabaseOpenOptions` dataclass — which is strictly better, because an
+invented option name is now a `TypeError` at construction rather than something a
+`**kwargs` fake swallows. Our subset test survives in two halves
+(`_open_kwargs_are_real` for `open()`, `_option_fields_are_real` for the
+dataclass fields), because the offline contract suite must keep running with no
+`ida_codemode` installed at all and therefore still fakes both.
+
 ---
 
 ## Priority, from a client author's view
@@ -301,11 +341,11 @@ added a test asserting our kwargs are a subset of
 | ~~2~~ | ~~`to_jsonable` on large results~~ | ~~114x on serialisation~~ | ✅ fixed in 0.3.2 |
 | ~~3~~ | ~~2 ms `execute_sync` floor~~ | ~~shapes client design~~ | ✅ fixed in 0.3.2, 7.0x |
 | 7 | no change/revision counter | correctness for shared editing | yes, cheap |
-| 4 | loader switches fatal on reopen | crashes, hard to diagnose | yes |
+| ~~4~~ | ~~loader switches fatal on reopen~~ | ~~crashes, hard to diagnose~~ | ✅ fixed in 0.5.x (one edge, §4) |
 | 5 | replaced/deleted IDB under lease | silent hang | yes |
 | 6 | no close-without-save | a feature we had to drop | design question |
-| 8 | package exports | forces internal imports | yes, trivial |
-| 9 | typed handle for fakes | catches a whole bug class | yes |
+| ~~8~~ | ~~package exports~~ | ~~forces internal imports~~ | ✅ fixed in 0.5.x |
+| ~~9~~ | ~~typed handle for fakes~~ | ~~catches a whole bug class~~ | ✅ fixed in 0.5.x (`py.typed` + options dataclass) |
 
 Items 1 and 2 together were the difference between "the port is 35x slower than
 the private worker it replaced" and "the port is within 2x, and faster on several
@@ -316,10 +356,13 @@ worth fixing centrally rather than leaving each client to rediscover.
 fixed upstream, and both client-side workarounds could be measured at parity and
 retired. That is the outcome this document was written for.
 
-**What is left is entirely non-performance**: items 4–9 are correctness,
-lifecycle and API-surface items, and all six are untouched in 0.3.2 because the
-files they live in are byte-identical to 0.3.1. Item 7 (a monotonic revision
-counter on `/health`) remains the cheapest large win for any caching client.
+**What is left is entirely non-performance**: 0.5.x then fixed the API-surface
+items (4, 8, 9) — the package root is a real public API, `py.typed` ships, and
+the loader-switch fatal is handled in the resolver. What remains open is
+lifecycle: **5** (replacing an IDB under a live lease), **6** (close without
+save) and **7** — a monotonic revision counter on `/health`, still the cheapest
+large win for any caching client, and still the one thing an *external* client
+cannot build for itself.
 
 Happy to supply the benchmark harness (it is backend-agnostic and runs against
 both our old worker and Code Mode), or to test a patch.
