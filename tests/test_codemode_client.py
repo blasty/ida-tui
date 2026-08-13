@@ -40,7 +40,7 @@ class FakeEntry:
 class FakeHandle:
     def __init__(self, path: str) -> None:
         self.connected = True
-        self.entry = FakeEntry(exe_path=path, idb_path=path + ".i64")
+        self.instance = FakeEntry(exe_path=path, idb_path=path + ".i64")
         self.waited = None
         self.saved = 0
         self.closed = False
@@ -58,7 +58,7 @@ class FakeHandle:
 
     def save_database(self):
         self.saved += 1
-        return {"saved": True, "idb_path": self.entry.idb_path}
+        return {"saved": True, "idb_path": self.instance.idb_path}
 
     def close(self):
         self.connected = False
@@ -76,6 +76,28 @@ class FakeDatabaseHandle:
         return FakeHandle(path)
 
 
+@dataclass(frozen=True)
+class FakeOpenOptions:
+    """Stand-in for DatabaseOpenOptions when the library is not installed.
+
+    Deliberately STRICT (no **kwargs): an option the adapter invents would
+    raise here, and `_option_fields_are_real` checks the surviving names
+    against the real dataclass wherever it is importable.
+    """
+
+    spawn: bool = True
+    startup_timeout: float = 120.0
+    output_database: str | None = None
+    processor: str | None = None
+    image_base: int | None = None
+    file_type: str | None = None
+    new_database: bool = False
+
+
+class FakeBusy(Exception):
+    """Stand-in for DatabaseBusyError: `except None` is a TypeError."""
+
+
 def _open_kwargs_are_real(sent: dict):
     """(ok, detail) for the kwargs the adapter passes to DatabaseHandle.open.
 
@@ -83,12 +105,29 @@ def _open_kwargs_are_real(sent: dict):
     """
     try:
         import inspect
-        from ida_codemode.client import DatabaseHandle as Real
+        from ida_codemode import DatabaseHandle as Real
     except ImportError:
         return True, "ida_codemode not installed - signature not checked"
     accepted = set(inspect.signature(Real.open).parameters)
     unknown = sorted(set(sent) - accepted)
     return not unknown, f"open() rejects {unknown}"
+
+
+def _option_fields_are_real(options):
+    """(ok, detail) for the option names the adapter fills in.
+
+    The open() signature no longer names the loader options -- they moved
+    inside DatabaseOpenOptions -- so the `loading_address` class of bug now
+    hides there instead. Check it in the same way.
+    """
+    try:
+        import dataclasses
+        from ida_codemode import DatabaseOpenOptions as Real
+    except ImportError:
+        return True, "ida_codemode not installed - fields not checked"
+    accepted = {field.name for field in dataclasses.fields(Real)}
+    unknown = sorted({f.name for f in dataclasses.fields(options)} - accepted)
+    return not unknown, f"DatabaseOpenOptions rejects {unknown}"
 
 
 def main() -> int:
@@ -105,6 +144,12 @@ def main() -> int:
 
     original = module.DatabaseHandle
     module.DatabaseHandle = FakeDatabaseHandle
+    # The library's own names when it is installed; strict fakes when it is not
+    # (this file must keep running under a stdlib-only python3).
+    original_options = module.DatabaseOpenOptions
+    original_busy = module.DatabaseBusyError
+    module.DatabaseOpenOptions = original_options or FakeOpenOptions
+    module.DatabaseBusyError = original_busy or FakeBusy
     try:
         with tempfile.TemporaryDirectory() as tmp:
             path = os.path.join(tmp, "sample.bin")
@@ -116,10 +161,13 @@ def main() -> int:
             handle = client._handle
             check("connect delegates database discovery to DatabaseHandle.open",
                   FakeDatabaseHandle.opened == path and handle is not None)
+            options = FakeDatabaseHandle.kwargs["options"]
             check("typed loader options cross the dependency boundary",
-                  FakeDatabaseHandle.kwargs["processor"] == "arm:ARMv7-A"
-                  and FakeDatabaseHandle.kwargs["image_base"] == 0x1000,
-                  FakeDatabaseHandle.kwargs)
+                  options.processor == "arm:ARMv7-A"
+                  and options.image_base == 0x1000,
+                  options)
+            check("every open option exists in the real library",
+                  *_option_fields_are_real(options))
             # A fake that swallows **kwargs cannot catch a keyword the real
             # library does not have -- which is exactly how this port shipped
             # `loading_address` (the real name is `image_base`) and would have
@@ -145,6 +193,8 @@ def main() -> int:
                   client.wait_released(0) is False)
     finally:
         module.DatabaseHandle = original
+        module.DatabaseOpenOptions = original_options
+        module.DatabaseBusyError = original_busy
 
     client = CodeModeClient(__file__)
     try:

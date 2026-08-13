@@ -36,8 +36,25 @@ def _log(msg: str) -> None:
 def _registered_databases() -> tuple[list[dict], list[dict]]:
     """Ready and blocked Code Mode registrations, with normalized errors."""
     try:
-        from ida_codemode.registry import discover_instances
-        return discover_instances()
+        from ida_codemode import InstanceState, discover_databases
+
+        ready: list[dict] = []
+        blocked: list[dict] = []
+        for discovered in discover_databases():
+            instance = discovered.instance
+            item = {
+                "record_id": instance.record_id,
+                "backend": instance.backend,
+                "pid": instance.pid,
+                "exe_path": instance.exe_path,
+                "idb_path": instance.idb_path,
+            }
+            if discovered.state is InstanceState.READY:
+                ready.append(item)
+            else:
+                item["error"] = discovered.detail or "instance is unavailable"
+                blocked.append(item)
+        return ready, blocked
     except Exception as exc:  # discovery diagnostics belong at the CLI boundary
         return [], [{"error": str(exc)}]
 

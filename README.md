@@ -43,7 +43,7 @@ which is how ida-tui talks to IDA. To also attach to databases you have open in
 the IDA GUI, install its plugin:
 
 ```sh
-uvx --prerelease=allow --from ida-codemode ida-codemode-mcp --install-plugin
+uvx ida-hcli plugin install ida-codemode
 ```
 
 Hacking on ida-codemode itself? Point at a checkout instead:

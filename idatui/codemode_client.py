@@ -37,29 +37,24 @@ from .errors import IDAConnectionError, IDATimeoutError, IDAToolError, Session
 # the first operation that genuinely needs the library.
 _CODEMODE_ERROR: Exception | None = None
 try:
-    from ida_codemode.client import (
-        ClientError,
+    from ida_codemode import (
+        CodeModeConnectionError,
+        DatabaseBusyError,
+        DatabaseDisconnectedError,
         DatabaseHandle,
-        InstanceDisconnectedError,
+        DatabaseInstance,
+        DatabaseOpenOptions,
         RemoteError,
+        find_database_owner,
+        wait_database_released,
     )
-    from ida_codemode.registry import (
-        REGISTRY_DIR,
-        FileLock,
-        RegistryEntry,
-        canonical_path,
-        idb_key,
-        scan_instances,
-    )
-    from ida_codemode.resolver import IdbBusy, expected_idb_path
 except ImportError as _exc:  # library absent: usable only for offline layers
     _CODEMODE_ERROR = _exc
     # Bound to None rather than left undefined so the names stay patchable: the
     # offline contract tests inject a fake DatabaseHandle here.
-    ClientError = InstanceDisconnectedError = RemoteError = None  # type: ignore[assignment,misc]
-    DatabaseHandle = RegistryEntry = FileLock = None  # type: ignore[assignment,misc]
-    REGISTRY_DIR = canonical_path = idb_key = scan_instances = None  # type: ignore[assignment]
-    IdbBusy = expected_idb_path = None  # type: ignore[assignment]
+    CodeModeConnectionError = DatabaseDisconnectedError = RemoteError = None  # type: ignore[assignment,misc]
+    DatabaseBusyError = DatabaseHandle = DatabaseInstance = None  # type: ignore[assignment,misc]
+    DatabaseOpenOptions = find_database_owner = wait_database_released = None  # type: ignore[assignment]
 
 
 def _require_codemode() -> None:
@@ -70,48 +65,43 @@ def _require_codemode() -> None:
     """
     if DatabaseHandle is None:
         raise IDAConnectionError(
-            "ida-codemode-mcp is not installed in this environment "
+            "ida-codemode is not installed in this environment "
             f"({_CODEMODE_ERROR}). Install it (e.g. `uv sync`, or "
-            "`pip install -e ../ida-codemode-mcp`) so ida-tui can lease a "
+            "`pip install ida-codemode`) so ida-tui can lease a "
             "database.") from _CODEMODE_ERROR
 
 
 def database_owner(idb_path: str, staged_path: str | None = None):
-    """The registry entry that owns ``idb_path``/``staged_path``, else None.
+    """The Code Mode instance that owns ``idb_path``/``staged_path``, else None.
 
     Returns None when the Code Mode library is absent: with no library there is
     no client in this environment that could be holding the database, and the
-    IDA-free layers (project staging) must keep working. Registry errors that
-    happen WITH the library installed still propagate -- those mean "we could
-    not determine ownership", which is not the same as "nobody owns it".
+    IDA-free layers (project staging) must keep working. Discovery errors with
+    the library installed still propagate because unknown ownership is unsafe.
     """
     if DatabaseHandle is None:
         return None
-    expected_key = idb_key(idb_path)
-    staged = canonical_path(staged_path) if staged_path else None
-    for item in scan_instances(timeout=0.5):
-        entry = item.entry
-        if entry.idb_key == expected_key:
-            return entry
-        if staged and entry.exe_path and canonical_path(entry.exe_path) == staged:
-            return entry
-    return None
+    if staged_path:
+        owner = find_database_owner(
+            staged_path,
+            output_database=idb_path,
+            timeout=0.5,
+        )
+        return owner or find_database_owner(staged_path, timeout=0.5)
+    return find_database_owner(idb_path, timeout=0.5)
 
 
 def registered_database(path: str, output_database: str | None = None) -> bool:
     """Whether a live/lock-held Code Mode instance owns this target."""
     _require_codemode()
-    source = canonical_path(path)
-    expected = canonical_path(output_database) if output_database else expected_idb_path(source)
-    expected_key = idb_key(expected)
-    for instance in scan_instances(timeout=0.5):
-        entry = instance.entry
-        if entry.idb_key == expected_key:
-            return True
-        if not output_database and entry.backend == "gui" and entry.exe_path:
-            if canonical_path(entry.exe_path) == source:
-                return True
-    return False
+    return (
+        find_database_owner(
+            path,
+            output_database=output_database,
+            timeout=0.5,
+        )
+        is not None
+    )
 
 
 class _NoopKeepAlive:
@@ -1293,19 +1283,8 @@ class CodeModeClient:
         self._spawn = spawn
         self._new_database = new_database
         self._handle: DatabaseHandle | None = None
-        self._last_entry: RegistryEntry | None = None
+        self._last_instance: DatabaseInstance | None = None
         self._connect_lock = threading.Lock()
-
-    def _database_exists(self) -> bool:
-        """Whether the IDB this open would target is already on disk.
-
-        Its loader switches are baked in, so they must not be sent again.
-        """
-        try:
-            target = self._output_database or expected_idb_path(self._path)
-        except Exception:  # noqa: BLE001 -- resolver unavailable: assume fresh
-            return False
-        return bool(target) and os.path.exists(target)
 
     def connect(self, timeout: float = 1800.0, progress=None) -> "CodeModeClient":
         _require_codemode()
@@ -1323,56 +1302,46 @@ class CodeModeClient:
                 deadline = time.monotonic() + min(timeout, 60.0)
                 while True:
                     try:
-                        # Loader switches describe how to IMPORT a raw file and
-                        # are recorded in the database it produces. Sending them
-                        # again for a database that already exists is a FATAL
-                        # error in IDA itself ("Switch '-b400' can be used only
-                        # when loading a new file"), which kills the worker
-                        # before it can report anything useful. So: describe the
-                        # import only when there is an import to describe.
-                        fresh = self._new_database or not self._database_exists()
                         handle = DatabaseHandle.open(
                             self._path,
-                            spawn=self._spawn,
-                            timeout=max(0.1, timeout),
-                            output_database=self._output_database,
-                            processor=self._processor if fresh else None,
-                            # DatabaseHandle calls this image_base and wants the
-                            # natural (16-byte aligned) address; it does the
-                            # conversion to IDA's paragraph-based -b itself.
-                            image_base=self._loading_address if fresh else None,
-                            file_type=self._file_type if fresh else None,
-                            new_database=self._new_database,
+                            options=DatabaseOpenOptions(
+                                spawn=self._spawn,
+                                startup_timeout=max(0.1, timeout),
+                                output_database=self._output_database,
+                                processor=self._processor,
+                                # The natural byte address is converted to IDA's
+                                # paragraph-based -b value by Code Mode.
+                                image_base=self._loading_address,
+                                file_type=self._file_type,
+                                new_database=self._new_database,
+                            ),
                         )
                         break
-                    except IdbBusy:
+                    except DatabaseBusyError:
                         if not self._new_database or time.monotonic() >= deadline:
                             raise
                         if progress:
                             progress("waiting for the previous Code Mode lease to close…")
-                        # Remember the record before managed shutdown withdraws
-                        # its JSON. The lifetime lock remains held until IDA has
-                        # actually closed the IDB; waiting on it avoids racing a
-                        # replacement worker into the old process's file lock.
-                        expected = canonical_path(
-                            self._output_database or expected_idb_path(self._path)
+                        owner = find_database_owner(
+                            self._path,
+                            output_database=self._output_database,
+                            timeout=0.5,
                         )
-                        owners = [item.entry for item in scan_instances(timeout=0.5)
-                                  if item.entry.idb_key == idb_key(expected)]
-                        if owners:
-                            self._wait_for_entry_release(
-                                owners[0], max(0.0, deadline - time.monotonic())
+                        if owner is not None:
+                            wait_database_released(
+                                owner,
+                                max(0.0, deadline - time.monotonic()),
                             )
                         else:
                             time.sleep(0.2)
                 if progress:
-                    backend = handle.entry.backend
+                    backend = handle.instance.backend
                     progress(f"attached to {backend} database; waiting for auto-analysis…")
                 handle.wait_autoanalysis(timeout=timeout)
             except Exception as exc:  # normalize the dependency's transport errors
                 raise self._connection_error(exc) from exc
             self._handle = handle
-            self._last_entry = handle.entry
+            self._last_instance = handle.instance
             return self
 
     @staticmethod
@@ -1385,11 +1354,11 @@ class CodeModeClient:
 
     @property
     def pid(self) -> int | None:
-        return self._handle.entry.pid if self._handle is not None else None
+        return self._handle.instance.pid if self._handle is not None else None
 
     @property
     def backend(self) -> str | None:
-        return self._handle.entry.backend if self._handle is not None else None
+        return self._handle.instance.backend if self._handle is not None else None
 
     def execute_python(self, code: str, *, timeout: float | None = None) -> Any:
         if not self.connected:
@@ -1407,7 +1376,7 @@ class CodeModeClient:
             if exc.code == "operation_timeout":
                 raise IDATimeoutError(message) from exc
             raise IDAToolError("execute_python", message) from exc
-        except (InstanceDisconnectedError, ClientError) as exc:
+        except (DatabaseDisconnectedError, CodeModeConnectionError) as exc:
             raise self._connection_error(exc) from exc
         if not isinstance(response, dict) or "result" not in response:
             raise IDAToolError("execute_python", "Code Mode returned an invalid execution result")
@@ -1457,14 +1426,14 @@ class CodeModeClient:
             return handle.save_database()
         except RemoteError as exc:
             raise IDAToolError("save_database", str(exc)) from exc
-        except (InstanceDisconnectedError, ClientError) as exc:
+        except (DatabaseDisconnectedError, CodeModeConnectionError) as exc:
             raise self._connection_error(exc) from exc
 
     def health(self) -> dict[str, Any]:
         if not self.connected:
             self.connect()
         assert self._handle is not None
-        entry = self._handle.entry
+        entry = self._handle.instance
         module = os.path.basename(entry.exe_path or entry.idb_path or self._path)
         return {
             "ok": self._handle.connected,
@@ -1483,7 +1452,7 @@ class CodeModeClient:
         if not self.connected:
             self.connect()
         assert self._handle is not None
-        return self._handle.entry.record_id
+        return self._handle.instance.record_id
 
     def set_db(self, db: str | None) -> None:
         del db  # one handle is permanently bound to one registered database
@@ -1492,7 +1461,7 @@ class CodeModeClient:
         if not self.connected:
             self.connect()
         assert self._handle is not None
-        entry = self._handle.entry
+        entry = self._handle.instance
         path = entry.exe_path or entry.idb_path or self._path
         return [Session(session_id=entry.record_id, filename=os.path.basename(path),
                         input_path=path, is_active=True)]
@@ -1502,26 +1471,8 @@ class CodeModeClient:
         with self._connect_lock:
             handle, self._handle = self._handle, None
         if handle is not None:
-            self._last_entry = handle.entry
+            self._last_instance = handle.instance
             handle.close()  # release our lease; never close a GUI/other client's DB
-
-    @staticmethod
-    def _wait_for_entry_release(entry: "RegistryEntry", timeout: float) -> bool:
-        _require_codemode()
-        path = REGISTRY_DIR / f"{entry.record_id}.lock"
-        deadline = time.monotonic() + max(0.0, timeout)
-        while True:
-            lock = FileLock(path)
-            try:
-                if lock.try_acquire():
-                    return True
-            except OSError:
-                pass
-            finally:
-                lock.close()
-            if time.monotonic() >= deadline:
-                return False
-            time.sleep(min(0.1, deadline - time.monotonic()))
 
     def wait_released(self, timeout: float = 45.0) -> bool:
         """Wait until a managed instance releases its lifetime lock.
@@ -1531,10 +1482,10 @@ class CodeModeClient:
         temporary IDB safely after this client closes. GUI instances return
         ``False`` immediately because clients never own their lifetime.
         """
-        entry = self._last_entry
-        if entry is None or entry.backend != "idalib":
+        instance = self._last_instance
+        if instance is None or instance.backend != "idalib":
             return False
-        return self._wait_for_entry_release(entry, timeout)
+        return wait_database_released(instance, timeout)
 
     def __enter__(self) -> "CodeModeClient":
         return self.connect()

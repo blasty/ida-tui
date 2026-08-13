@@ -6,7 +6,7 @@ requires-python = ">=3.11"
 # ida-codemode supplies GUI discovery, shared idalib workers, leases, and the
 # execute_python/ida-domain database surface.
 dependencies = [
-    "ida-codemode>=0.3.1",
+    "ida-codemode>=0.5.3",
     "textual>=8",
     "pygments>=2",  # Used directly for pseudocode highlighting.
 ]

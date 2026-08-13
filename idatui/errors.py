@@ -1,6 +1,6 @@
 """TUI-facing error hierarchy and lightweight database session model.
 
-The Code Mode adapter normalizes ``ida_codemode.client`` transport and execution
+The Code Mode adapter normalizes ``ida_codemode`` transport and execution
 errors into these types so the domain and Textual layers do not depend on HTTP or
 registry implementation details.
 """
