@@ -146,10 +146,6 @@ database. Iterate on one with `--only`:
 ~/ida-venv/bin/python tests/test_scenarios.py targets/echo --only hex,rename
 ```
 
-Before optimising or debugging a slow run, read
-[`.fastfeedback/SPEED.md`](.fastfeedback/SPEED.md) — per-suite timings, the known
-flake, and the four ways a test here wastes minutes.
-
 —
 
 [sl0p.foo](https://sl0p.foo)

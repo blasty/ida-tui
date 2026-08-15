@@ -18,14 +18,14 @@ replace or delete it::
     PYTHONPATH=. ~/ida-venv/bin/python /tmp/bench_ops.py
 
     # A: the client as it SHIPPED on the old library, workarounds and all
-    git checkout d74b6f5          # the commit before the workaround removal
+    git checkout 8550474          # the commit before the workaround removal
     PYTHONPATH=. ~/ida-venv/bin/python /tmp/bench_ops.py
 
-    git checkout master && git -C ~/dev/ida-codemode checkout main   # ALWAYS restore
+    git checkout main && git -C ~/dev/ida-codemode checkout main   # ALWAYS restore
 
 ida-codemode is installed **editable** into both venvs, so checking that repo out
 swaps the backend under the TUI with no reinstall -- which is what makes this A/B
-cheap. Results for 0.3.1 vs 0.3.2 are in `.fastfeedback/SPEED.md`.
+cheap.
 """
 from __future__ import annotations
 

@@ -72,7 +72,7 @@ keypress, and triskel's cost knees hard just past it (174 blocks: 66 ms;
 | | native | triskel |
 |---|---|---|
 | algorithm | layered Sugiyama, below | SESE decomposition ([paper](https://hal.science/hal-04996939)) |
-| ships with | always, pure python | needs `pytriskel` (our fork) |
+| ships with | always, pure python | needs `pytriskel` (patched fork, unpublished) |
 | shape | wide and short | narrow and tall |
 | crossings | more | far fewer |
 | 87-block `main` | 15 ms, 1202×444 | 37 ms, 845×789 |
@@ -224,6 +224,14 @@ drive raw graph action=zoom
 
 It is optional; without it everything works and `auto` means `native`.
 
+It needs `pytriskel`, and specifically a **patched build that is not published
+anywhere yet**. Upstream's wheels stop at cp313 with no sdist (so there is
+nothing to install on 3.14), and on any version their `get_waypoints()` raises,
+which means no edge routes at all. Until that fork is released you will get the
+native engine — which is the default, ships with the repo, and is fully
+supported. The rest of this section only applies if you already have a patched
+build tree.
+
 **Install it into the interpreter the launcher actually runs**, which is
 `$IDATUI_PYTHON` and defaults to `~/ida-venv/bin/python` — *not* the repo's
 `.venv`, which is only what the tests use. Getting this wrong is the one way to
@@ -231,14 +239,10 @@ see `no pytriskel in ...` in the status bar while `tests/test_graph.py` happily
 exercises both engines; the message names the interpreter for that reason.
 
 ```bash
-~/ida-venv/bin/python -m pip install ~/dev/triskel/bindings/python
-.venv/bin/python   -m pip install ~/dev/triskel/bindings/python   # for the tests
+"$IDATUI_PYTHON" -m pip install /path/to/triskel/bindings/python
+.venv/bin/python  -m pip install /path/to/triskel/bindings/python   # for the tests
 ```
 
 Needs cmake, ninja and a C++23 compiler at install time; the wheel is built from
-source for whichever interpreter runs pip.
-
-That is **our fork**, not PyPI. Upstream's wheels stop at cp313 with no sdist
-(so there is nothing to install on 3.14), and on any version their
-`get_waypoints()` raises, which means no edge routes at all. `~/dev/triskel/PATCHES.md`
-lists every change. `$IDATUI_TRISKEL_PATH` can point at a build tree instead.
+source for whichever interpreter runs pip. `$IDATUI_TRISKEL_PATH` can point at a
+build tree instead of installing.
