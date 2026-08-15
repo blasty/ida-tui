@@ -6,17 +6,6 @@
 
 ---
 
-```
-┌ ida-tui ─────────────────────────────────────────────────────────────────────┐
-│ .text:00002490 ; ---------- S U B R O U T I N E ----------                   │
-│ .text:00002490 main            proc near                                     │
-│ .text:00002490                 endbr64                                       │
-│ .text:00002494                 push    rbp                ; ← cursor         │
-│ .text:00002495                 mov     rbp, rsp                              │
-│ .text:00002498                 sub     rsp, 0B0h          ; `o` → 176        │
-└──────────────────────────────────────────────────────────────────────────────┘
-```
-
 > **Status: personal project, actively hacked on.** No packaging, no versioning,
 > no support. It assumes a licensed IDA Pro and a venv at `~/ida-venv`. Things
 > move and break. Poke around; don't file expectations.
@@ -160,14 +149,6 @@ database. Iterate on one with `--only`:
 Before optimising or debugging a slow run, read
 [`.fastfeedback/SPEED.md`](.fastfeedback/SPEED.md) — per-suite timings, the known
 flake, and the four ways a test here wastes minutes.
-
-## Working on this with an LLM agent
-
-[`.agents/skills/idatui/SKILL.md`](.agents/skills/idatui/SKILL.md) is an
-[Agent Skills](https://agentskills.io/specification) skill covering the architecture,
-the test loop, and the traps that cost real time here. Compatible harnesses pick it
-up automatically; point others at the file. (A user-level skill of the same name
-wins, so symlink yours if you keep one.)
 
 —
 
