@@ -86,10 +86,6 @@ back up the middle. It is not a clean sweep: on `sub_69C0` (109 blocks) its
 narrower canvas packs edges tighter and it ends up with *more* cells shared
 between edges than native (1280 vs 935).
 
-`experiments/graph_compare.py` regenerates all of those numbers, and
-`docs/TRISKEL_EVAL.md` is the full evaluation, including what had to be fixed in
-triskel to make it usable at all.
-
 ### The triskel path (`idatui/graph_triskel.py`)
 
 The whole impedance mismatch lives in that one module. Three things keep it
@@ -219,9 +215,6 @@ drive raw graph action=zoom
 - `experiments/graph_spike.py` — lay out and render a corpus function to stdout,
   or `--stats` the whole corpus; `--engine` picks the backend. Uses
   `idatui.graph`, so it exercises the shipping engine with no worker in the loop.
-- `experiments/graph_compare.py` — both engines over a corpus: crossings, canvas,
-  ambiguous cells, cost. `--real-sizer` sizes boxes from the disassembly text,
-  which is the only comparison worth reading.
 - `experiments/graph_smoke.py` — end-to-end: tool → domain → layout.
 - `experiments/graph_shot.py` — render the real view headless at a chosen size
   (the pane you are in is usually too narrow to judge it); takes an engine as

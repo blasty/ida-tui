@@ -5,7 +5,7 @@ into Single-Entry Single-Exit regions first, laying each region out on its own,
 and pasting the results back as super-nodes. On our corpus that takes functions
 that our own layered engine draws with up to 41 edge crossings down to 0 or 1,
 and it routes loop edges around the side of the graph the way IDA does instead
-of straight back up the middle. ``docs/TRISKEL_EVAL.md`` has the measurements.
+of straight back up the middle.
 
 This module owns the whole impedance mismatch between a float/pixel layout
 engine and a grid of character cells. Three things make that mismatch small:

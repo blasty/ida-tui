@@ -18,7 +18,6 @@ dev = ["pytest>=8"]
 # as a dependency -- PyPI's pytriskel has no wheel for current Pythons, no sdist,
 # and a binding bug that makes edge routes unreachable. Install our fork:
 #     uv pip install ~/dev/triskel/bindings/python
-# See docs/TRISKEL_EVAL.md and ~/dev/triskel/PATCHES.md.
 
 [project.scripts]
 idatui = "idatui.launch:main"
