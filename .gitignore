@@ -24,3 +24,9 @@ tests/.synthetic/
 
 # the upstream port patch, kept locally for reference only
 ida-codemode-mcp.patch
+
+# local-only working artifacts (never published)
+.auto/
+.agents/
+plan/
+rehearsed-engineer.md
