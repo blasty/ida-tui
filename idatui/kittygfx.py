@@ -71,8 +71,16 @@ def log(msg: str) -> None:
 # Detection
 # --------------------------------------------------------------------------- #
 def _query_tty(timeout: float = 2.0) -> bool:
-    import termios
-    import tty as ttymod
+    # ``termios`` and ``/dev/tty`` are POSIX-only. Native Windows terminals
+    # generally don't expose the synchronous reply channel this probe needs;
+    # use the ANSI-art splash there instead of making graphics fatal to the
+    # whole application. IDATUI_KITTY=1 still permits an explicit override.
+    try:
+        import termios
+        import tty as ttymod
+    except ImportError:
+        log("supported: tty queries are unavailable on this platform")
+        return False
 
     try:
         fd = os.open("/dev/tty", os.O_RDWR | os.O_NOCTTY)
@@ -136,7 +144,11 @@ def supported() -> bool:
         _supported = False        # pilot tests, pipes, redirected output
         log("supported: stdout is not a tty")
     else:
-        _supported = _query_tty()
+        try:
+            _supported = _query_tty()
+        except Exception as exc:  # graphics are optional on every platform
+            log(f"supported: terminal query failed ({type(exc).__name__}: {exc})")
+            _supported = False
     log(f"supported() -> {_supported}")
     return _supported
 
