@@ -935,7 +935,8 @@ async def s_help(c: Ctx):
     c.check("each key group gets its own card",
             titles == {t for t, _ in _HELP}, f"{titles}")
     c.check("it documents real bindings",
-            "set type" in txt and "split view" in txt and "cross-references" in txt)
+            "set type" in txt and "split view" in txt and "cross-references" in txt
+            and "refresh the current view" in txt)
     c.check("the graph keys are documented",
             "control-flow graph" in txt and "minimap" in txt)
     body = app.screen.query_one("#help-body")
@@ -1046,6 +1047,45 @@ async def s_view_modes_all_handled(c: Ctx):
         # listing model, which reads as split_view's bug and isn't.
         app._active = ViewMode.LISTING
         await c.open(fn.addr, "listing")
+
+
+@scenario("refresh_view")
+async def s_refresh_view(c: Ctx):
+    """Ctrl+R replaces stale backing data without moving the listing."""
+    fn = await c.open_biggest("listing")
+    await c.press("down", "down", "down")
+    lst = c.lst
+    old_model = lst.model
+    old_ea = lst._cursor_ea()
+    old_top = round(lst.scroll_offset.y)
+    old_head = old_model.get(old_top) if old_model is not None else None
+    old_top_ea = getattr(old_head, "ea", None)
+
+    await c.press("ctrl+r")
+    landed = await c.wait(
+        lambda: lst.model is not old_model and lst._cursor_ea() == old_ea, 25)
+    c.check("Ctrl+R rebuilds the listing model", lst.model is not old_model)
+    c.check("Ctrl+R preserves the cursor address", landed,
+            f"got={lst._cursor_ea()} want={old_ea}")
+    new_top = round(lst.scroll_offset.y)
+    new_head = lst.model.get(new_top) if lst.model is not None else None
+    c.check("Ctrl+R preserves the viewport by address",
+            getattr(new_head, "ea", None) == old_top_ea,
+            f"got={getattr(new_head, 'ea', None)} want={old_top_ea}")
+
+    await c.open(fn.addr, "decomp")
+    dec = c.dec
+    dec.cursor = min(3, max(len(dec._texts) - 1, 0))
+    old_dec_cursor = dec.cursor
+    await c.press("ctrl+r")
+    refreshed = await c.wait(
+        lambda: c.app.is_decomp and dec.loaded_ea == fn.addr and not dec.loading,
+        25)
+    c.check("Ctrl+R reloads pseudocode without changing views", refreshed,
+            f"active={c.app._active} loaded={dec.loaded_ea} want={fn.addr:#x}")
+    c.check("Ctrl+R preserves the pseudocode cursor",
+            dec.cursor == old_dec_cursor,
+            f"got={dec.cursor} want={old_dec_cursor}")
 
 
 @scenario("split_view")
@@ -1792,6 +1832,16 @@ async def s_hex(c: Ctx):
     c.check("hex shows the actual byte at that address",
             rb is not None and rb[hx.cursor % 16] == want[0],
             f"got={rb[hx.cursor % 16] if rb else None} want={want[0]}")
+    old_va = hx.cursor_va()
+    block = (old_va - hx.model.start) // hx.model.BLOCK
+    old_bytes = hx.model._blocks.get(block)
+    await c.press("ctrl+r")
+    reloaded = await c.wait(
+        lambda: hx.model._blocks.get(block) is not None
+        and hx.model._blocks.get(block) is not old_bytes, 20)
+    c.check("Ctrl+R refetches the visible hex block", reloaded)
+    c.check("Ctrl+R preserves the hex cursor", hx.cursor_va() == old_va,
+            f"got={hx.cursor_va():#x} want={old_va:#x}")
     await c.press("l")
     await c.pause(0.1)
     c.check("hex cursor steps one byte", hx.cursor_va() == code_ea + 1,
@@ -3691,6 +3741,15 @@ async def s_graph_open(c: Ctx):
                   for i, a in enumerate(boxes) for b in boxes[i + 1:])
     c.check("no two blocks overlap", not overlap)
     c.check("the status names the graph", "graph" in c.status(), c.status())
+    old_fc = gv.fc
+    old_ea = gv._cursor_ea()
+    await c.press("ctrl+r")
+    rebuilt = await c.wait(
+        lambda: app.is_graph and gv.fc is not None and gv.fc is not old_fc
+        and gv.lay is not None, 30)
+    c.check("Ctrl+R rebuilds the graph", rebuilt)
+    c.check("Ctrl+R preserves the graph cursor", gv._cursor_ea() == old_ea,
+            f"got={gv._cursor_ea()} want={old_ea}")
     await c.press("space")
     await c.wait(lambda: app._active != "graph", 15)
     c.check("space returns to the listing", app._active == "listing",

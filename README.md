@@ -76,7 +76,7 @@ Thumb entry points.
 | `o` `O` `B` | cycle this literal's format · reverse · opcode bytes |
 | `\` `"` `ctrl+t` | hex · strings · structs |
 | `ctrl+n` `ctrl+p` | symbol palette · command palette |
-| `ctrl+s` `ctrl+l` `q` | save · reload as… · quit |
+| `ctrl+r` `ctrl+s` `ctrl+l` `q` | refresh view · save · reload as… · quit |
 | `F1` | all of them |
 
 ## What's in it

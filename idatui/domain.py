@@ -1389,6 +1389,11 @@ class HexModel:
         for b in range(b0 - 1, b1 + 2):
             self._prefetch(b)
 
+    def invalidate(self) -> None:
+        """Drop cached bytes so the next viewport read reaches the database."""
+        with self._lock:
+            self._blocks.clear()
+
 
 # --------------------------------------------------------------------------- #
 # Program: top-level handle, model registry, prefetch pool
@@ -1714,6 +1719,23 @@ class Program:
             return m
 
     # -- decompilation ----------------------------------------------------- #
+    def force_recompile(self, ea: int) -> None:
+        """Drop local and Hex-Rays caches before an explicit view refresh.
+
+        Normal edit paths use generation-based invalidation. Ctrl+R is also for
+        changes made by another Code Mode/IDA client, for which this Program has
+        seen no generation bump, so it must explicitly ask Hex-Rays to discard
+        its cached cfunc.
+        """
+        with self._lock:
+            self._decomp.pop(ea, None)
+            self._pc_nums.pop(ea, None)
+            self._decomp_maps.pop(ea, None)
+        try:
+            self.client.invoke("force_recompile", items=[{"addr": hex(ea)}])
+        except Exception:  # noqa: BLE001 -- refresh still refetches best-effort
+            pass
+
     def decompile(self, ea: int, refresh: bool = False) -> Decompilation:
         """Full pseudocode for a function, returned directly by Code Mode."""
         if not refresh:

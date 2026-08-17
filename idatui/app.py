@@ -3695,6 +3695,7 @@ _HELP = (
         ("Ctrl+B", "show/hide the names pane"),
         ("Ctrl+T", "structs / types editor"),
         ("Ctrl+F", "search the database: text or bytes"),
+        ("Ctrl+R", "refresh the current view in place"),
         ("Ctrl+E", "export findings as markdown"),
         ("Ctrl+P", "command palette"),
     )),
@@ -5164,6 +5165,7 @@ class IdaTui(App):
         Binding("ctrl+n", "symbols", "Symbols"),
         Binding("ctrl+t", "structs", "Structs"),
         Binding("ctrl+f", "find", "Find"),
+        Binding("ctrl+r", "refresh_view", "Refresh", show=False),
         Binding("ctrl+e", "export", "Export", show=False),
         Binding("backslash", "hex", "Hex"),
         Binding("s", "toggle_split", "Split", show=False),
@@ -6316,6 +6318,127 @@ class IdaTui(App):
             self._switch_then_goto(binary, addr)
             return
         self._goto_ea(addr, push=True)  # land on the literal in the listing
+
+    def action_refresh_view(self) -> None:
+        """Ctrl+R: discard cached data and reload the visible view in place."""
+        if self.program is None or self._cur is None:
+            self._status("nothing to refresh")
+            return
+        if self._prompt_active() or self.screen is not self.screen_stack[0]:
+            return
+
+        if self.is_hex:
+            hx = self.query_one(HexView)
+            if hx.model is None:
+                self._status("hex: nothing to refresh")
+                return
+            self._status("hex — refreshing…")
+            hx.model.invalidate()
+            # Re-read the visible blocks off the UI thread. ``center=False``
+            # preserves both the byte cursor and the viewport.
+            hx._prime(center=False)
+            return
+
+        cur = self._cur
+        mode = self._active
+        split = self._split
+        listing_anchor = None
+        if self.is_listing or split:
+            # _anchor() follows the active pane. In split mode pseudocode may be
+            # active, but the listing must still round-trip through addresses:
+            # row indices do not survive an external structure change.
+            lst = self.query_one(ListingView)
+            listing_anchor = ViewAnchor(view=ViewMode.LISTING,
+                                        cursor_x=lst.cursor_x)
+            model = lst.model
+            if model is not None:
+                listing_anchor.ea = lst._cursor_ea()
+                top = round(lst.scroll_offset.y)
+                h = model.cached_line(top) or model.get(top)
+                listing_anchor.top_ea = getattr(h, "ea", None)
+
+        refresh_decomp = self.is_decomp or split
+        if refresh_decomp:
+            # Keep the live pseudocode position; NavEntry is only updated when
+            # navigating away and may lag behind the widget.
+            dec = self.query_one(DecompView)
+            if dec.loaded_ea == cur.ea:
+                cur.dec_cursor = dec.cursor
+                cur.dec_cursor_x = dec.cursor_x
+                cur.dec_scroll_y = round(dec.scroll_offset.y)
+                cur.dec_scroll_x = round(dec.scroll_offset.x)
+            dec.loading = True
+
+        want_ea = (self.query_one(GraphView)._cursor_ea()
+                   if self.is_graph else None)
+        if self.is_graph:
+            self._graph_sticky = True
+            self._status(f"{cur.name} — refreshing graph…")
+        else:
+            self._status(f"{cur.name} — refreshing…")
+        self._refresh_view(cur, mode, split, listing_anchor,
+                           refresh_decomp, want_ea, self.program)
+
+    @work(thread=True, exclusive=True, group="refresh-view")
+    def _refresh_view(self, cur: NavEntry, mode: ViewMode, split: bool,
+                      anchor: ViewAnchor | None, refresh_decomp: bool,
+                      want_ea: int | None, program) -> None:  # type: ignore[no-untyped-def]
+        """Invalidate and rebuild without blocking Textual's event loop."""
+        try:
+            program.bump_items()
+            if refresh_decomp:
+                program.force_recompile(cur.ea)
+
+            model = None
+            cursor = top = -1
+            if anchor is not None:
+                target = anchor.ea if anchor.ea is not None else cur.ea
+                model = program.listing(target)
+                if model is not None:
+                    model.ensure_ea(target)
+                    cursor, top = self._anchor_rows(anchor, model, target)
+        except Exception as exc:  # noqa: BLE001 -- a refresh is recoverable
+            diag.note("refresh_view", exc)
+            self.app.call_from_thread(
+                self._view_refresh_failed, cur, program, str(exc))
+            return
+        self.app.call_from_thread(
+            self._apply_view_refresh, cur, mode, split, anchor,
+            refresh_decomp, want_ea, program, model, cursor, top)
+
+    def _view_refresh_failed(self, cur: NavEntry, program, error: str) -> None:  # type: ignore[no-untyped-def]
+        if self.program is program and self._cur is cur:
+            self.query_one(DecompView).loading = False
+            self._status(f"refresh failed: {error}", priority=True)
+
+    def _apply_view_refresh(self, cur: NavEntry, mode: ViewMode, split: bool,
+                            anchor: ViewAnchor | None, refresh_decomp: bool,
+                            want_ea: int | None, program, model, cursor: int,
+                            top: int) -> None:  # type: ignore[no-untyped-def]
+        # A binary switch or navigation completed while the refresh was in
+        # flight. Its newer view wins; never drag the user back.
+        if self.program is not program or self._cur is not cur:
+            return
+        self._active = mode
+        self._split = split
+
+        if self.is_graph:
+            self._load_graph(cur.ea, want_ea)
+            return
+
+        if anchor is not None and model is not None:
+            lst = self.query_one(ListingView)
+            cur.cursor = max(cursor, 0)
+            cur.cursor_x = anchor.cursor_x
+            cur.scroll_y = top
+            lst.load(model, cur.name, cursor=cur.cursor,
+                     cursor_x=cur.cursor_x,
+                     scroll_y=top if top >= 0 else None)
+        if refresh_decomp:
+            self.query_one(DecompView).loaded_ea = None
+        self._show_active()
+        if not refresh_decomp:
+            self._status(f"{cur.name} — refreshed", priority=True)
 
     def action_toggle_view(self) -> None:
         """Tab: switch the code pane between disassembly and pseudocode (or leave
