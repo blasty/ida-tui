@@ -51,6 +51,19 @@ uv add --editable ../ida-codemode
 ida-tui never owns an IDA process — it takes a **lease**. A matching database open
 in the IDA GUI is reused, otherwise Code Mode starts or shares a managed idalib
 worker. Quitting drops the lease and leaves everyone else alone.
+Changes made in the GUI or another client arrive over Code Mode's IDB event
+stream; ida-tui debounces bursts and refreshes its cached views automatically.
+On quit with unsaved changes, a final managed-worker lease can discard the
+session without saving; GUI-backed or still-shared sessions leave that final
+decision with their owner or remaining clients.
+If the owning GUI or worker closes, ida-tui never replaces it by spawning a
+headless worker implicitly. It keeps the cached view disconnected until a
+matching owner is reopened and an attach-only rediscovery succeeds.
+Remote operations are typed, source-backed Python functions. ida-codemode
+installs content-addressed modules once per handle, so ida-tui keeps normal
+refactorable source without paying to resend hot listing/decompiler code.
+Operation attribution is also a per-call provider rather than a fixed string, so
+it can evolve from `IDA TUI` to labels such as `IDA TUI: alice`.
 
 Headerless blobs need a hint, or IDA assumes x86 at address 0 and analyses nothing:
 

@@ -22,13 +22,12 @@ import bisect
 import re
 import threading
 from base64 import b64decode
+from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor
-from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
-from typing import NamedTuple
-from typing import Callable, TYPE_CHECKING
+from typing import TYPE_CHECKING, NamedTuple
 
-from . import diag
+from . import remote_ops
 from .errors import IDAToolError
 
 if TYPE_CHECKING:  # type hint only
@@ -37,8 +36,7 @@ if TYPE_CHECKING:  # type hint only
 # Clamps derived from measured caps (list ~700, disasm ~500). Margin included.
 LIST_PAGE = 500
 DISASM_BLOCK = 256  # instructions per cached/fetched block (<= disasm cap)
-HEX_BLOCK = 16384   # bytes per cached/fetched hex block (compact read_raw -> cheap)
-DECOMPILE_TIMEOUT = 15.0  # s; cap per decompile so a failing one can't hang the CLI
+HEX_BLOCK = 16384  # bytes per cached/fetched hex block (compact read_raw -> cheap)
 
 _TRUNC_RE = re.compile(r"\[(\d+) chars total\]\s*$")
 
@@ -107,7 +105,7 @@ class Head(NamedTuple):
     """
 
     ea: int
-    kind: str            # 'code' | 'data' | 'unknown' | 'member'
+    kind: str  # 'code' | 'data' | 'unknown' | 'member'
     size: int
     text: str
     name: str | None = None
@@ -199,10 +197,10 @@ class Ref:
 
 @dataclass
 class Xref:
-    frm: int              # the referencing address
-    to: int | None        # the referenced address
-    type: str             # coarse: "code" | "data"
-    fn_name: str | None   # function containing `frm`
+    frm: int  # the referencing address
+    to: int | None  # the referenced address
+    type: str  # coarse: "code" | "data"
+    fn_name: str | None  # function containing `frm`
     fn_addr: int | None
     kind: str | None = None  # fine: call/jump/flow/read/write/offset/text/info
 
@@ -218,7 +216,7 @@ class LVar:
 class FuncTypes:
     addr: int
     name: str
-    prototype: str        # e.g. 'int __fastcall foo(int a, char *b)'
+    prototype: str  # e.g. 'int __fastcall foo(int a, char *b)'
     lvars: list[LVar]
 
 
@@ -227,7 +225,7 @@ class Struct:
     name: str
     size: int
     is_union: bool
-    members: int          # field count
+    members: int  # field count
     ordinal: int
 
     @classmethod
@@ -244,6 +242,7 @@ class Struct:
 @dataclass(frozen=True)
 class StrLit:
     """A string literal IDA found in the binary (the Shift+F12 list)."""
+
     addr: int
     text: str
     length: int
@@ -271,6 +270,7 @@ class SearchHit:
     an instruction, so ``head`` is the item to navigate to and ``line`` is what
     that item renders as.
     """
+
     addr: int
     head: int
     line: str = ""
@@ -287,6 +287,7 @@ class Comment:
     report can show what was being commented ON without a second round trip.
     ``whole_func`` marks a function comment rather than an instruction one.
     """
+
     addr: int
     text: str
     repeatable: bool = False
@@ -302,6 +303,7 @@ class NamedItem:
     """An address carrying a real name -- one you typed, or one the file's own
     symbols supplied. IDA records both as "user" names and does not remember
     which was which, so a report must say so rather than claim authorship."""
+
     addr: int
     name: str
     is_func: bool = False
@@ -319,6 +321,7 @@ class Linkage:
     ``name`` is the joinable name; ``raw`` keeps the spelling IDA reported, which
     is what the user sees in the listing.
     """
+
     addr: int
     name: str
     module: str = ""
@@ -374,7 +377,9 @@ class FunctionIndex:
         query: dict = {"offset": offset, "count": LIST_PAGE}
         if self.filter:
             query["filter"] = self.filter
-        data = _query_data(self._prog.client.invoke("list_funcs", queries=[query]))
+        data = _query_data(
+            self._prog.client.call(remote_ops.list_funcs, queries=[query])
+        )
         added = 0
         with self._lock:
             for d in data:
@@ -468,7 +473,7 @@ class DisasmModel:
         self._blocks: dict[int, list[Line]] = {}
         self._total: int | None = None
         self._ea_list: list[int] | None = None
-        self._max_raw = 0            # widest opcode length seen (bytes)
+        self._max_raw = 0  # widest opcode length seen (bytes)
         self._func_end: int | None = None
         self._func_end_done = False
         self._lock = threading.Lock()
@@ -484,8 +489,8 @@ class DisasmModel:
         code function this equals the heads row count that backs the lines."""
         if self._total is not None:
             return self._total
-        payload = self._prog.client.invoke(
-            "disasm", addr=hex(self.ea), max_instructions=1, include_total=True
+        payload = self._prog.client.call(
+            remote_ops.disasm, addr=hex(self.ea), max_instructions=1, include_total=True
         )
         total = payload.get("total_instructions")
         if total is None:
@@ -527,7 +532,7 @@ class DisasmModel:
             nxt = lines[i + 1].ea if i + 1 < len(lines) else last_end
             length = max(nxt - ln.ea, 0)
             off = ln.ea - start
-            b = bytes(data[off:off + length])
+            b = bytes(data[off : off + length])
             biggest = max(biggest, len(b))
             out.append(replace(ln, raw=b))
         with self._lock:
@@ -538,20 +543,22 @@ class DisasmModel:
     @staticmethod
     def _line_from_head(r: dict) -> Line:
         """Adapt a ``heads`` row to a disasm Line (label = the head's name)."""
-        return Line(ea=_as_int(r["ea"]), text=r.get("text", ""),
-                    label=r.get("name"))
+        return Line(ea=_as_int(r["ea"]), text=r.get("text", ""), label=r.get("name"))
 
     def _fetch_block(self, b: int) -> list[Line]:
         # The function disasm view is a listing filtered to the function: fetch a
         # block of heads (one per instruction for code). Over-fetch one row so
         # the block knows where its last instruction ends (opcode-byte sizing).
-        payload = self._prog.client.invoke(
-            "heads", addr=hex(self.ea), offset=b * self.BLOCK,
-            count=self.BLOCK + 1, **self._end_kw(),
+        payload = self._prog.client.call(
+            remote_ops.heads,
+            addr=hex(self.ea),
+            offset=b * self.BLOCK,
+            count=self.BLOCK + 1,
+            **self._end_kw(),
         )
         rows = payload.get("heads", []) if isinstance(payload, dict) else []
         fetched = [self._line_from_head(r) for r in rows]
-        lines = fetched[:self.BLOCK]
+        lines = fetched[: self.BLOCK]
         if len(fetched) > self.BLOCK:
             end_ea: int | None = fetched[self.BLOCK].ea
         else:  # this block ends the function
@@ -607,7 +614,7 @@ class DisasmModel:
             block = self._get_block(b)
             lo = start - b * self.BLOCK if b == b0 else 0
             hi = end - b * self.BLOCK if b == b1 else self.BLOCK
-            out.extend(block[max(lo, 0):hi])
+            out.extend(block[max(lo, 0) : hi])
         if prefetch:
             self._prefetch_block(b1 + 1)  # forward scroll
             self._prefetch_block(b0 - 1)  # backward scroll
@@ -699,8 +706,9 @@ class ListingModel:
     #: _text_gen, which counts up from 0, so such a page always reads as stale.
     _SKELETON_GEN = -1
 
-    def __init__(self, program: "Program", seg_start: int, seg_end: int,
-                 name: str | None = None):
+    def __init__(
+        self, program: "Program", seg_start: int, seg_end: int, name: str | None = None
+    ):
         self._prog = program
         self.seg_start = seg_start
         self.seg_end = seg_end
@@ -714,7 +722,7 @@ class ListingModel:
         # N bytes PRESENTS as N rows and the text for each is synthesised on
         # demand. _row_at[i] is the logical row where physical head i starts.
         self._row_at: list[int] = []
-        self._head_eas: list[int] = []      # parallel to _heads, for bisect
+        self._head_eas: list[int] = []  # parallel to _heads, for bisect
         #: Which name generation each head's TEXT was rendered at, parallel to
         #: _heads. A rename bumps :attr:`_text_gen`; the rows themselves stay
         #: (their addresses and row numbers are unchanged) and are re-rendered a
@@ -740,7 +748,7 @@ class ListingModel:
         #: means something DID move the walk. Program.listing() throws the model
         #: away when it sees this, so the next read rebuilds from scratch.
         self.stale_structure = False
-        self._rows = 0                      # total logical rows loaded
+        self._rows = 0  # total logical rows loaded
         self._ubytes: dict[int, bytes] = {}  # lazily-read bytes for those rows
         self._next: int | None = seg_start  # next address to fetch from
         self._done = False
@@ -788,7 +796,7 @@ class ListingModel:
                 size = int(r.get("size") or 0)
                 if size > 0:
                     off = _as_int(r["ea"]) - lo
-                    raw = bytes(data[off:off + size])
+                    raw = bytes(data[off : off + size])
                     if len(raw) > biggest:
                         biggest = len(raw)
             try:
@@ -827,19 +835,26 @@ class ListingModel:
         """
         with self._lock:
             if self._done and self._heads:
-                return True          # already indexed; re-priming is a no-op
+                return True  # already indexed; re-priming is a no-op
         try:
-            idx = self._prog.client.invoke(
-                "segment_index", addr=hex(self.seg_start), end=hex(self.seg_end),
-                page_rows=self.PAGE, detail=True)
+            idx = self._prog.client.call(
+                remote_ops.segment_index,
+                addr=hex(self.seg_start),
+                end=hex(self.seg_end),
+                page_rows=self.PAGE,
+                detail=True,
+            )
         except Exception:  # noqa: BLE001 -- fall back to streaming
             return False
         if not isinstance(idx, dict) or idx.get("error") or "eas" not in idx:
             return False
         try:
-            eas = array.array("Q"); eas.frombytes(b64decode(idx["eas"]))
-            kinds = array.array("B"); kinds.frombytes(b64decode(idx["kinds"]))
-            sizes = array.array("I"); sizes.frombytes(b64decode(idx["sizes"]))
+            eas = array.array("Q")
+            eas.frombytes(b64decode(idx["eas"]))
+            kinds = array.array("B")
+            kinds.frombytes(b64decode(idx["kinds"]))
+            sizes = array.array("I")
+            sizes.frombytes(b64decode(idx["sizes"]))
         except Exception:  # noqa: BLE001
             return False
         names = idx.get("kind_names") or []
@@ -881,7 +896,8 @@ class ListingModel:
             self._page_digest = [None] * len(anchors)
             self._page_rows = [
                 (anchors[k + 1][2] if k + 1 < len(anchors) else n) - anchors[k][2]
-                for k in range(len(anchors))]
+                for k in range(len(anchors))
+            ]
             self._skeleton = True
             self._done = True
             self._next = None
@@ -912,8 +928,9 @@ class ListingModel:
             if self._done or self._next is None:
                 return 0
             frm = self._next
-        payload = self._prog.client.invoke(
-            "heads", addr=hex(frm), count=self.PAGE, annotate=True, text=text)
+        payload = self._prog.client.call(
+            remote_ops.heads, addr=hex(frm), count=self.PAGE, annotate=True, text=text
+        )
         rows = payload.get("heads", []) if isinstance(payload, dict) else []
         cur = payload.get("cursor", {}) if isinstance(payload, dict) else {}
         page = self._build_page(rows, raw=text)
@@ -925,8 +942,9 @@ class ListingModel:
                 self._skeleton = True
             self._page_head.append(len(self._heads))
             self._page_addr.append(frm)
-            self._page_digest.append(payload.get("digest")
-                                     if isinstance(payload, dict) else None)
+            self._page_digest.append(
+                payload.get("digest") if isinstance(payload, dict) else None
+            )
             self._page_rows.append(len(rows))
             for h in page:
                 # Banner/label rows (function headers, separators, code labels)
@@ -983,7 +1001,7 @@ class ListingModel:
                 self._ubytes[b0] = blk
             off = a - b0
             take = min(BLK - off, n - len(out))
-            chunk = blk[off:off + take] if blk else b""
+            chunk = blk[off : off + take] if blk else b""
             if not chunk:
                 break
             out += chunk
@@ -1004,8 +1022,9 @@ class ListingModel:
         ea = h.ea + off
         b = self._unknown_bytes(ea, 1)
         text = f"db {b[0]:02X}h" if b else "db ?"
-        return Head(ea=ea, kind="unknown", size=1, text=text,
-                    name=h.name if off == 0 else None)
+        return Head(
+            ea=ea, kind="unknown", size=1, text=text, name=h.name if off == 0 else None
+        )
 
     def ensure(self, n: int) -> None:
         """Ensure at least ``n`` logical rows are loaded (or all, if fewer)."""
@@ -1022,8 +1041,11 @@ class ListingModel:
                 return idx
             with self._lock:
                 have = self._rows
-                last_ea = (self._heads[-1].ea + max(self._heads[-1].size, 1) - 1
-                           if self._heads else -1)
+                last_ea = (
+                    self._heads[-1].ea + max(self._heads[-1].size, 1) - 1
+                    if self._heads
+                    else -1
+                )
                 done = self._done
             if done or (have and last_ea >= ea):
                 # Loaded past ea without an exact head hit: return the first head
@@ -1086,13 +1108,13 @@ class ListingModel:
         """
         with self._lock:
             if not (self.seg_start <= ea < self.seg_end):
-                return True                 # another segment; nothing moved here
+                return True  # another segment; nothing moved here
             if len(self._page_head) < 3:
-                return False                # barely walked; a rebuild is cheaper
+                return False  # barely walked; a rebuild is cheaper
             p = bisect.bisect_right(self._page_addr, ea) - 1
             p = max(p - 1, 0)
             if p <= 0:
-                return False                # the edit is in the first pages
+                return False  # the edit is in the first pages
             keep = self._page_head[p]
             if keep <= 0:
                 return False
@@ -1110,7 +1132,7 @@ class ListingModel:
             last = self._heads[-1]
             self._rows = self._row_at[-1] + self._span(last)
             self._done = False
-            self._ubytes.clear()   # undefined-run bytes behind the drop point
+            self._ubytes.clear()  # undefined-run bytes behind the drop point
             return True
 
     def invalidate_text(self) -> None:
@@ -1156,8 +1178,9 @@ class ListingModel:
     def _page_bounds(self, p: int) -> tuple[int, int]:
         """[first, last) head index of page ``p`` (caller holds the lock)."""
         lo = self._page_head[p]
-        hi = (self._page_head[p + 1] if p + 1 < len(self._page_head)
-              else len(self._heads))
+        hi = (
+            self._page_head[p + 1] if p + 1 < len(self._page_head) else len(self._heads)
+        )
         return lo, hi
 
     def _ensure_page(self, p: int) -> int:
@@ -1181,13 +1204,20 @@ class ListingModel:
         # the expectation rather than asking first means a page that HAS changed
         # still costs one round trip.
         try:
-            payload = self._prog.client.invoke(
-                "heads", addr=hex(addr), count=self.PAGE, annotate=True,
-                expect="" if want_digest is None else str(want_digest))
+            payload = self._prog.client.call(
+                remote_ops.heads,
+                addr=hex(addr),
+                count=self.PAGE,
+                annotate=True,
+                expect="" if want_digest is None else str(want_digest),
+            )
         except Exception:  # noqa: BLE001 -- keep the old text rather than blank
             return p + 1
-        if (isinstance(payload, dict) and "heads" not in payload
-                and payload.get("count") == want_rows):
+        if (
+            isinstance(payload, dict)
+            and "heads" not in payload
+            and payload.get("count") == want_rows
+        ):
             with self._lock:
                 if self._text_gen == gen and len(self._heads) >= hi:
                     for k in range(lo, hi):
@@ -1212,8 +1242,9 @@ class ListingModel:
             # what it once loaded. Leaving it stale is how a literal cycling
             # hex -> dec -> hex ends up declared "unchanged" while the row still
             # shows the decimal it was refetched with in between.
-            self._page_digest[p] = (payload.get("digest")
-                                    if isinstance(payload, dict) else None)
+            self._page_digest[p] = (
+                payload.get("digest") if isinstance(payload, dict) else None
+            )
             for k in range(lo, hi):
                 self._head_gen[k] = gen
         return p + 1
@@ -1225,8 +1256,9 @@ class ListingModel:
             j, off = self._phys(i)
             if j < 0:
                 return None
-            stale = ((self._renamed or self._skeleton)
-                     and self._head_gen[j] != self._text_gen)
+            stale = (self._renamed or self._skeleton) and self._head_gen[
+                j
+            ] != self._text_gen
             if not stale:
                 span = self._span(self._heads[j])
                 h = self._heads[j]
@@ -1265,8 +1297,9 @@ class ListingModel:
             spans = [self._phys(i) for i in range(max(start, 0), max(rows, 0))]
             heads = self._heads
             plain = [(j, off, heads[j]) for j, off in spans if j >= 0]
-        return [self._row_head(j, off) if self._span(h) > 1 else h
-                for j, off, h in plain]
+        return [
+            self._row_head(j, off) if self._span(h) > 1 else h for j, off, h in plain
+        ]
 
     def index_of_ea(self, ea: int) -> int:
         with self._lock:
@@ -1361,7 +1394,7 @@ class HexModel:
         if block is None:
             return (va, None)
         bo = off - b * self.BLOCK
-        return (va, block[bo:bo + 16])
+        return (va, block[bo : bo + 16])
 
     def ensure(self, r0: int, count: int) -> None:
         """Blocking: fetch the blocks covering rows [r0, r0+count) if missing."""
@@ -1459,20 +1492,32 @@ class Program:
             return self._segments_cache
         segs: list[tuple[int, int, int, str]] = []
         try:
-            r = self.client.invoke("file_regions")
-            for d in (r.get("regions", []) if isinstance(r, dict) else []):
+            r = self.client.call(remote_ops.file_regions)
+            for d in r.get("regions", []) if isinstance(r, dict) else []:
                 if isinstance(d, dict) and "start" in d:
-                    segs.append((_as_int(d["start"]), _as_int(d["end"]),
-                                 int(d.get("file_off", -1)), d.get("name", "") or ""))
+                    segs.append(
+                        (
+                            _as_int(d["start"]),
+                            _as_int(d["end"]),
+                            int(d.get("file_off", -1)),
+                            d.get("name", "") or "",
+                        )
+                    )
         except IDAToolError:
             segs = []
         if not segs:  # older server without file_regions -> survey_binary (slow)
             try:
-                sb = self.client.invoke("survey_binary")
-                for s in (sb.get("segments", []) if isinstance(sb, dict) else []):
+                sb = self.client.call(remote_ops.survey_binary)
+                for s in sb.get("segments", []) if isinstance(sb, dict) else []:
                     try:
-                        segs.append((_as_int(s["start"]), _as_int(s["end"]), -1,
-                                     s.get("name", "") or ""))
+                        segs.append(
+                            (
+                                _as_int(s["start"]),
+                                _as_int(s["end"]),
+                                -1,
+                                s.get("name", "") or "",
+                            )
+                        )
                     except (KeyError, ValueError, TypeError):
                         continue
             except Exception:  # noqa: BLE001 -- best-effort; callers handle empty
@@ -1535,21 +1580,27 @@ class Program:
             return b""
         if not self._no_read_raw:
             try:
-                r = self.client.invoke("read_raw", addr=hex(ea), size=int(n))
+                r = self.client.call(remote_ops.read_raw, addr=hex(ea), size=int(n))
                 h = r.get("hex") if isinstance(r, dict) else None
                 if isinstance(h, str):
                     out = bytes.fromhex(h)
                     return out[:n] if len(out) >= n else out + b"\x00" * (n - len(out))
             except IDAToolError as e:
                 # Tool missing on this server: stop trying it, use get_bytes.
-                if "read_raw" in str(e) or "Unknown tool" in str(e) or "not found" in str(e):
+                if (
+                    "read_raw" in str(e)
+                    or "Unknown tool" in str(e)
+                    or "not found" in str(e)
+                ):
                     self._no_read_raw = True
                 else:
                     return b"\x00" * n
             except (ValueError, KeyError):
                 pass  # malformed hex -> fall through to the legacy decoder
         try:
-            r = self.client.invoke("get_bytes", regions=[{"addr": hex(ea), "size": int(n)}])
+            r = self.client.call(
+                remote_ops.get_bytes, regions=[{"addr": hex(ea), "size": int(n)}]
+            )
         except IDAToolError:
             return b"\x00" * n
         res = r.get("result", []) if isinstance(r, dict) else []
@@ -1590,7 +1641,7 @@ class Program:
         with self._lock:
             m = self._listings.get(start)
             if m is not None and m.stale_structure:
-                m = None        # a refresh found the walk had moved; start over
+                m = None  # a refresh found the walk had moved; start over
             if m is None:
                 m = ListingModel(self, start, end, name)
                 self._listings[start] = m
@@ -1600,11 +1651,15 @@ class Program:
     def list_structs(self, filter: str = "") -> list[Struct]:
         """All local structs/unions (optionally name-substring filtered), sorted
         by name."""
-        payload = self.client.invoke("search_structs", filter=filter)
+        payload = self.client.call(remote_ops.search_structs, filter=filter)
         res = payload.get("result", []) if isinstance(payload, dict) else []
-        out = [Struct.from_raw(d) for d in res
-               if isinstance(d, dict) and d.get("name")
-               and not str(d["name"]).startswith("$")]  # skip anonymous UDTs
+        out = [
+            Struct.from_raw(d)
+            for d in res
+            if isinstance(d, dict)
+            and d.get("name")
+            and not str(d["name"]).startswith("$")
+        ]  # skip anonymous UDTs
         out.sort(key=lambda s: s.name.lower())
         return out
 
@@ -1612,8 +1667,9 @@ class Program:
         """A C definition for ``name`` reconstructed from its member layout
         (the remote operation exposes members, not printable source). Faithful to IDA's
         field names/types; array dims are moved after the field name."""
-        payload = self.client.invoke(
-            "type_inspect", queries=[{"name": name, "include_members": True}])
+        payload = self.client.call(
+            remote_ops.type_inspect, queries=[{"name": name, "include_members": True}]
+        )
         res = payload.get("result", []) if isinstance(payload, dict) else []
         info = res[0] if res and isinstance(res[0], dict) else {}
         kw = "union" if info.get("is_union") else "struct"
@@ -1635,7 +1691,7 @@ class Program:
     def declare_type(self, decl: str) -> str | None:
         """Create or update a C type. Returns None on success, else the parse
         error. (Re-declaring a name updates it in place.)"""
-        payload = self.client.invoke("declare_type", decls=decl)
+        payload = self.client.call(remote_ops.declare_type, decls=decl)
         res = payload.get("result", []) if isinstance(payload, dict) else []
         if res and isinstance(res[0], dict):
             return res[0].get("error")
@@ -1646,20 +1702,32 @@ class Program:
         """Structured decompiler types for the function at ``ea`` (prototype +
         local variables). None if ``ea`` isn't a decompilable function."""
         try:
-            r = self.client.invoke("func_types", addr=hex(ea))
+            r = self.client.call(remote_ops.func_types, addr=hex(ea))
         except IDAToolError:
             return None
         if not isinstance(r, dict) or r.get("error"):
             return None
-        lvars = [LVar(name=lv.get("name", ""), type=lv.get("type", ""),
-                      is_arg=bool(lv.get("is_arg")))
-                 for lv in r.get("lvars", []) if isinstance(lv, dict)]
-        return FuncTypes(addr=_as_int(r.get("addr", hex(ea))), name=r.get("name", ""),
-                         prototype=r.get("prototype", ""), lvars=lvars)
+        lvars = [
+            LVar(
+                name=lv.get("name", ""),
+                type=lv.get("type", ""),
+                is_arg=bool(lv.get("is_arg")),
+            )
+            for lv in r.get("lvars", [])
+            if isinstance(lv, dict)
+        ]
+        return FuncTypes(
+            addr=_as_int(r.get("addr", hex(ea))),
+            name=r.get("name", ""),
+            prototype=r.get("prototype", ""),
+            lvars=lvars,
+        )
 
     def set_function_type(self, ea: int, signature: str) -> str | None:
         """Set a function's prototype. None on success, else an error string."""
-        r = self.client.invoke("set_type", edits=[{"addr": hex(ea), "signature": signature}])
+        r = self.client.call(
+            remote_ops.set_type, edits=[{"addr": hex(ea), "signature": signature}]
+        )
         res = r.get("result", []) if isinstance(r, dict) else []
         row = res[0] if res and isinstance(res[0], dict) else {}
         if row.get("ok"):
@@ -1670,7 +1738,7 @@ class Program:
         """Current type info for a data item/global: {addr,name,type,size,is_func}.
         None if the operation fails or the address isn't mapped."""
         try:
-            r = self.client.invoke("data_type", addr=hex(ea))
+            r = self.client.call(remote_ops.data_type, addr=hex(ea))
         except IDAToolError:
             return None
         if not isinstance(r, dict) or r.get("error"):
@@ -1679,8 +1747,10 @@ class Program:
 
     def set_data_type(self, ea: int, decl: str) -> str | None:
         """Set a global/data item's type. None on success, else an error string."""
-        r = self.client.invoke(
-            "set_type", edits=[{"kind": "global", "addr": hex(ea), "type": decl}])
+        r = self.client.call(
+            remote_ops.set_type,
+            edits=[{"kind": "global", "addr": hex(ea), "type": decl}],
+        )
         res = r.get("result", []) if isinstance(r, dict) else []
         row = res[0] if res and isinstance(res[0], dict) else {}
         if row.get("ok"):
@@ -1690,7 +1760,9 @@ class Program:
     def set_lvar_type(self, fn_ea: int, var: str, ty: str) -> str | None:
         """Set a decompiler local variable's type through ida-domain pseudocode.
         None on success, else an error string."""
-        r = self.client.invoke("set_lvar_type", addr=hex(fn_ea), variable=var, type=ty)
+        r = self.client.call(
+            remote_ops.set_lvar_type, addr=hex(fn_ea), variable=var, type=ty
+        )
         if isinstance(r, dict) and r.get("error"):
             return r["error"]
         if isinstance(r, dict) and not r.get("ok"):
@@ -1701,7 +1773,7 @@ class Program:
         """Delete a named type. Returns None on success, else an error string.
         Returns a clear error instead of raising when the runtime cannot do it."""
         try:
-            self.client.invoke("del_type", name=name)
+            self.client.call(remote_ops.del_type, name=name)
             return None
         except IDAToolError as e:
             msg = e.message
@@ -1732,7 +1804,7 @@ class Program:
             self._pc_nums.pop(ea, None)
             self._decomp_maps.pop(ea, None)
         try:
-            self.client.invoke("force_recompile", items=[{"addr": hex(ea)}])
+            self.client.call(remote_ops.force_recompile, items=[{"addr": hex(ea)}])
         except Exception:  # noqa: BLE001 -- refresh still refetches best-effort
             pass
 
@@ -1749,22 +1821,15 @@ class Program:
                 # Cached before a rename: names may be stale. Drop Hex-Rays'
                 # cache so the refetch reflects the new names.
                 try:
-                    self.client.invoke("force_recompile", items=[{"addr": hex(ea)}])
+                    self.client.call(
+                        remote_ops.force_recompile, items=[{"addr": hex(ea)}]
+                    )
                 except Exception:  # noqa: BLE001
                     pass
-        # Bound the decompile: a function Hex-Rays can't handle tends to stall
-        # near the client's default 30s timeout, and the transport retries a
-        # dropped connection up to max_retries+1 times, re-running the failing
-        # decompile each time. Cap it so the worst case stays well under the
-        # rpcclient socket timeout, and cache the failure below so a re-request
-        # returns instantly instead of re-grinding.
+        # The typed remote declaration carries a 15-second transport timeout,
+        # so a function Hex-Rays cannot handle does not stall the UI.
         try:
-            # Code Mode returns the complete JSON result directly; unlike the
-            # old MCP tool transport there is no structured-content envelope or
-            # out-of-band download URL to unwrap.
-            payload = self.client.invoke(
-                "decompile", addr=hex(ea), timeout=DECOMPILE_TIMEOUT
-            )
+            payload = self.client.call(remote_ops.decompile, addr=hex(ea))
         except Exception as e:  # noqa: BLE001 -- surface as a failed decompile
             dec = Decompilation(ea, None, True, f"decompile error: {e}", False, None)
             with self._lock:
@@ -1790,7 +1855,7 @@ class Program:
             self._name_gen += 1
             models = list(self._disasm.values())
             listings = list(self._listings.values())
-            self._pc_nums.clear()   # a reformat moves every literal on its line
+            self._pc_nums.clear()  # a reformat moves every literal on its line
         for m in models:
             m.invalidate()
         for lm in listings:
@@ -1832,6 +1897,34 @@ class Program:
                     if self._listings.get(start) is lm:
                         del self._listings[start]
 
+    def invalidate_external(self) -> None:
+        """Drop every cached view of an IDB changed by another client.
+
+        An event may describe a rename, a byte patch, a new function, or a
+        segment move. Treating an unknown event as text-only risks displaying a
+        structurally impossible mix of old rows and new metadata, so the
+        external boundary deliberately invalidates all derived state. The app
+        debounces event bursts before reaching this method.
+        """
+        with self._lock:
+            self._name_gen += 1
+            models = list(self._disasm.values())
+            self._indices.clear()
+            self._disasm.clear()
+            self._listings.clear()
+            self._decomp.clear()
+            self._pc_nums.clear()
+            self._decomp_maps.clear()
+            self._flowcharts.clear()
+            self._strings = None
+            self._linkage = None
+            self._segments_cache = None
+            self._sections = None
+            self._fileregions = None
+            self._hexmodel = None
+        for model in models:
+            model.invalidate()
+
     # -- item / function structure edits (IDA c/d/u/p) --------------------- #
     @staticmethod
     def _first_result(payload) -> dict:
@@ -1847,18 +1940,19 @@ class Program:
         Undefine first so it works even when the bytes are currently part of a
         data/align item — ``create_insn`` refuses to carve into a live item."""
         try:
-            self.client.invoke("undefine", items=[{"addr": hex(ea)}])
+            self.client.call(remote_ops.undefine, items=[{"addr": hex(ea)}])
         except IDAToolError:
             pass  # nothing defined here yet -> just try to create the insn
         res = self._first_result(
-            self.client.invoke("define_code", items=[{"addr": hex(ea)}]))
+            self.client.call(remote_ops.define_code, items=[{"addr": hex(ea)}])
+        )
         if res.get("error"):
             raise IDAToolError("define_code", f"@ {ea:#x}: {res['error']}")
 
     def decomp_error(self, ea: int) -> str:
         """Hex-Rays' own reason for refusing ``ea``, or "" if it won't say."""
         try:
-            r = self.client.invoke("decomp_error", addr=hex(ea))
+            r = self.client.call(remote_ops.decomp_error, addr=hex(ea))
         except IDAToolError:
             return ""
         if not isinstance(r, dict):
@@ -1877,19 +1971,22 @@ class Program:
 
     def thumb_scan(self, start: int, end: int, apply: bool = True) -> dict:
         """Find Thumb entry points from odd pointers in ``[start, end)``."""
-        r = self.client.invoke("thumb_scan", start=hex(start), end=hex(end),
-                             apply=bool(apply))
+        r = self.client.call(
+            remote_ops.thumb_scan, start=hex(start), end=hex(end), apply=bool(apply)
+        )
         if not isinstance(r, dict) or r.get("error"):
-            raise IDAToolError("thumb_scan",
-                               f"@ {start:#x}: {(r or {}).get('error', 'failed')}")
+            raise IDAToolError(
+                "thumb_scan", f"@ {start:#x}: {(r or {}).get('error', 'failed')}"
+            )
         return r
 
     def set_thumb(self, ea: int, mode: str = "toggle") -> dict:
         """Switch ARM/Thumb decoding at ``ea``. Returns the resulting state."""
-        r = self.client.invoke("set_thumb", addr=hex(ea), mode=mode)
+        r = self.client.call(remote_ops.set_thumb, addr=hex(ea), mode=mode)
         if not isinstance(r, dict) or r.get("error"):
-            raise IDAToolError("set_thumb",
-                               f"@ {ea:#x}: {(r or {}).get('error', 'failed')}")
+            raise IDAToolError(
+                "set_thumb", f"@ {ea:#x}: {(r or {}).get('error', 'failed')}"
+            )
         return r
 
     def define_code_run(self, ea: int, limit: int = 20000) -> dict:
@@ -1899,13 +1996,16 @@ class Program:
         provide the run operation.
         """
         try:
-            r = self.client.invoke("define_code_run", addr=hex(ea), limit=int(limit))
+            r = self.client.call(
+                remote_ops.define_code_run, addr=hex(ea), limit=int(limit)
+            )
         except IDAToolError:
             self.define_code(ea)
             return {"count": 1, "stopped": "single", "end": hex(ea)}
         if not isinstance(r, dict) or r.get("error"):
-            raise IDAToolError("define_code_run",
-                               f"@ {ea:#x}: {(r or {}).get('error', 'failed')}")
+            raise IDAToolError(
+                "define_code_run", f"@ {ea:#x}: {(r or {}).get('error', 'failed')}"
+            )
         return r
 
     def define_func(self, ea: int) -> dict:
@@ -1915,16 +2015,18 @@ class Program:
         falls back to a plain create for alternate clients.
         """
         try:
-            r = self.client.invoke("define_func_run", addr=hex(ea))
+            r = self.client.call(remote_ops.define_func_run, addr=hex(ea))
         except IDAToolError:
             res = self._first_result(
-                self.client.invoke("define_func", items=[{"addr": hex(ea)}]))
+                self.client.call(remote_ops.define_func, items=[{"addr": hex(ea)}])
+            )
             if res.get("error"):
                 raise IDAToolError("define_func", f"@ {ea:#x}: {res['error']}")
             return {"ok": True, "how": "legacy"}
         if not isinstance(r, dict) or not r.get("ok"):
-            raise IDAToolError("define_func",
-                               f"@ {ea:#x}: {(r or {}).get('error', 'failed')}")
+            raise IDAToolError(
+                "define_func", f"@ {ea:#x}: {(r or {}).get('error', 'failed')}"
+            )
         return r
 
     def undefine(self, ea: int, size: int | None = None) -> None:
@@ -1932,7 +2034,7 @@ class Program:
         item: dict = {"addr": hex(ea)}
         if size:
             item["size"] = int(size)
-        res = self._first_result(self.client.invoke("undefine", items=[item]))
+        res = self._first_result(self.client.call(remote_ops.undefine, items=[item]))
         if res.get("error"):
             raise IDAToolError("undefine", f"@ {ea:#x}: {res['error']}")
 
@@ -1942,24 +2044,29 @@ class Program:
         item: dict = {"addr": hex(ea), "type": type_decl}
         if name:
             item["name"] = name
-        res = self._first_result(self.client.invoke("make_data", items=[item]))
+        res = self._first_result(self.client.call(remote_ops.make_data, items=[item]))
         if res.get("ok") is False or res.get("error"):
             raise IDAToolError(
-                "make_data", f"@ {ea:#x}: {res.get('error') or 'rejected'}")
+                "make_data", f"@ {ea:#x}: {res.get('error') or 'rejected'}"
+            )
 
     def make_string(self, ea: int, length: int = 0, kind: str = "c") -> str:
         """Create a string literal at ``ea`` (IDA's 'A'); auto-length when 0.
         Returns the decoded contents."""
-        r = self.client.invoke("make_string", addr=hex(ea), length=int(length), kind=kind)
+        r = self.client.call(
+            remote_ops.make_string, addr=hex(ea), length=int(length), kind=kind
+        )
         res = r if isinstance(r, dict) else {}
         if not res.get("ok"):
             raise IDAToolError(
-                "make_string", f"@ {ea:#x}: {res.get('error') or 'rejected'}")
+                "make_string", f"@ {ea:#x}: {res.get('error') or 'rejected'}"
+            )
         return res.get("text", "")
 
     # -- literal display formats (IDA's 'o': hex / dec / char / offset) ---- #
-    def op_format(self, ea: int, mode: str = "cycle", col: int = -1,
-                  n: int = -1) -> dict:
+    def op_format(
+        self, ea: int, mode: str = "cycle", col: int = -1, n: int = -1
+    ) -> dict:
         """Change how the literal at ``ea`` is DISPLAYED in the listing.
 
         ``col`` is a column inside the rendered line, which is how the cursor
@@ -1967,8 +2074,9 @@ class Program:
         ``cycle``/``back`` (step the stops that make sense for this value) or a
         format by name. ``show`` reports without changing anything.
         """
-        r = self.client.invoke("op_format", addr=hex(ea), mode=str(mode),
-                             col=int(col), n=int(n))
+        r = self.client.call(
+            remote_ops.op_format, addr=hex(ea), mode=str(mode), col=int(col), n=int(n)
+        )
         res = r if isinstance(r, dict) else {}
         if res.get("error"):
             raise IDAToolError("op_format", f"@ {ea:#x}: {res['error']}")
@@ -1991,31 +2099,43 @@ class Program:
         if hit is not None and hit[1] == gen:
             return hit[0]
         try:
-            r = self.client.invoke("pc_nums", addr=hex(fn_ea))
+            r = self.client.call(remote_ops.pc_nums, addr=hex(fn_ea))
         except Exception:  # noqa: BLE001 -- an older worker hasn't got the tool
             r = {}
         out: dict[int, list[tuple[int, int, str, int, int]]] = {}
         for rec in (r or {}).get("nums", []):
             try:
                 out.setdefault(int(rec["line"]), []).append(
-                    (int(rec["x0"]), int(rec["x1"]), str(rec.get("value", "")),
-                     _as_int(rec["ea"]), int(rec.get("opnum", 0))))
+                    (
+                        int(rec["x0"]),
+                        int(rec["x1"]),
+                        str(rec.get("value", "")),
+                        _as_int(rec["ea"]),
+                        int(rec.get("opnum", 0)),
+                    )
+                )
             except Exception:  # noqa: BLE001 -- skip a malformed row
                 continue
         with self._lock:
             self._pc_nums[fn_ea] = (out, gen)
         return out
 
-    def pc_num_format(self, fn_ea: int, mode: str = "cycle", line: int = -1,
-                      col: int = -1) -> dict:
+    def pc_num_format(
+        self, fn_ea: int, mode: str = "cycle", line: int = -1, col: int = -1
+    ) -> dict:
         """The same, for a number in the DECOMPILATION of ``fn_ea``.
 
         Hex-Rays keeps number formats of its own, per (address, operand) — the
         listing's format doesn't reach the pseudocode and vice versa, so this is
         a separate call rather than a flag on ``op_format``.
         """
-        r = self.client.invoke("pc_num_format", addr=hex(fn_ea), mode=str(mode),
-                             line=int(line), col=int(col))
+        r = self.client.call(
+            remote_ops.pc_num_format,
+            addr=hex(fn_ea),
+            mode=str(mode),
+            line=int(line),
+            col=int(col),
+        )
         res = r if isinstance(r, dict) else {}
         if res.get("error"):
             raise IDAToolError("pc_num_format", f"@ {fn_ea:#x}: {res['error']}")
@@ -2043,22 +2163,30 @@ class Program:
         offset, page = 0, 2000
         while True:
             try:
-                payload = self.client.invoke(
-                    "list_strings", offset=offset, count=page, min_len=min_len,
-                    refresh=(refresh and offset == 0))
+                payload = self.client.call(
+                    remote_ops.list_strings,
+                    offset=offset,
+                    count=page,
+                    min_len=min_len,
+                    refresh=(refresh and offset == 0),
+                )
             except IDAToolError:
                 return []
             rows = payload.get("strings", []) if isinstance(payload, dict) else []
             for r in rows:
                 if not isinstance(r, dict):
                     continue
-                out.append(StrLit(
-                    addr=_as_int(r.get("addr", 0)),
-                    text=r.get("text", ""),
-                    length=int(r.get("len", 0) or 0),
-                    type=r.get("type", "") or "",
-                ))
-            total = int(payload.get("total", 0) or 0) if isinstance(payload, dict) else 0
+                out.append(
+                    StrLit(
+                        addr=_as_int(r.get("addr", 0)),
+                        text=r.get("text", ""),
+                        length=int(r.get("len", 0) or 0),
+                        type=r.get("type", "") or "",
+                    )
+                )
+            total = (
+                int(payload.get("total", 0) or 0) if isinstance(payload, dict) else 0
+            )
             if len(rows) < page or len(out) >= total:
                 break
             offset += len(rows)
@@ -2074,27 +2202,39 @@ class Program:
         if hit is not None:
             return hit
         try:
-            payload = self.client.invoke("list_linkage", kind="both")
+            payload = self.client.call(remote_ops.list_linkage, kind="both")
         except IDAToolError:
             return ([], [])
         if not isinstance(payload, dict):
             return ([], [])
-        imps = [Linkage(addr=_as_int(r.get("addr", 0)),
-                        name=link_name(r.get("name", "")),
-                        module=r.get("module", "") or "",
-                        raw=r.get("name", "") or "")
-                for r in payload.get("imports", []) if isinstance(r, dict)]
-        exps = [Linkage(addr=_as_int(r.get("addr", 0)),
-                        name=link_name(r.get("name", "")),
-                        ordinal=int(r.get("ordinal", 0) or 0),
-                        raw=r.get("name", "") or "")
-                for r in payload.get("exports", []) if isinstance(r, dict)]
+        imps = [
+            Linkage(
+                addr=_as_int(r.get("addr", 0)),
+                name=link_name(r.get("name", "")),
+                module=r.get("module", "") or "",
+                raw=r.get("name", "") or "",
+            )
+            for r in payload.get("imports", [])
+            if isinstance(r, dict)
+        ]
+        exps = [
+            Linkage(
+                addr=_as_int(r.get("addr", 0)),
+                name=link_name(r.get("name", "")),
+                ordinal=int(r.get("ordinal", 0) or 0),
+                raw=r.get("name", "") or "",
+            )
+            for r in payload.get("exports", [])
+            if isinstance(r, dict)
+        ]
         out = ([i for i in imps if i.name], [e for e in exps if e.name])
         with self._lock:
             self._linkage = out
         return out
 
-    def annotations(self, limit: int = 4000) -> tuple[list["Comment"], list["NamedItem"]]:
+    def annotations(
+        self, limit: int = 4000
+    ) -> tuple[list["Comment"], list["NamedItem"]]:
         """``(comments, names)`` -- everything a person added to this database.
 
         Not cached: it is the *current* state of your work, and the one caller
@@ -2102,44 +2242,64 @@ class Program:
         no such operation, so an alternate client degrades instead of breaking.
         """
         try:
-            payload = self.client.invoke("list_annotations", limit=int(limit))
+            payload = self.client.call(remote_ops.list_annotations, limit=int(limit))
         except IDAToolError:
             return ([], [])
         if not isinstance(payload, dict):
             return ([], [])
         comments = [
-            Comment(addr=_as_int(r.get("addr", 0)), text=str(r.get("text", "")),
-                    repeatable=bool(r.get("repeatable")),
-                    whole_func=bool(r.get("whole_func")),
-                    line=str(r.get("line", "") or ""),
-                    seg=str(r.get("seg", "") or ""),
-                    func=(r.get("func") or None),
-                    func_addr=(_as_int(r["func_addr"]) if r.get("func_addr") else None))
-            for r in payload.get("comments", []) if isinstance(r, dict) and r.get("text")]
+            Comment(
+                addr=_as_int(r.get("addr", 0)),
+                text=str(r.get("text", "")),
+                repeatable=bool(r.get("repeatable")),
+                whole_func=bool(r.get("whole_func")),
+                line=str(r.get("line", "") or ""),
+                seg=str(r.get("seg", "") or ""),
+                func=(r.get("func") or None),
+                func_addr=(_as_int(r["func_addr"]) if r.get("func_addr") else None),
+            )
+            for r in payload.get("comments", [])
+            if isinstance(r, dict) and r.get("text")
+        ]
         names = [
-            NamedItem(addr=_as_int(r.get("addr", 0)), name=str(r.get("name", "")),
-                      is_func=bool(r.get("func")), size=int(r.get("size", 0) or 0),
-                      proto=(r.get("proto") or None), seg=str(r.get("seg", "") or ""))
-            for r in payload.get("names", []) if isinstance(r, dict) and r.get("name")]
+            NamedItem(
+                addr=_as_int(r.get("addr", 0)),
+                name=str(r.get("name", "")),
+                is_func=bool(r.get("func")),
+                size=int(r.get("size", 0) or 0),
+                proto=(r.get("proto") or None),
+                seg=str(r.get("seg", "") or ""),
+            )
+            for r in payload.get("names", [])
+            if isinstance(r, dict) and r.get("name")
+        ]
         return (comments, names)
 
-
-    def search(self, query: str, mode: str = "text", *, limit: int = 500,
-               regex: bool = False, case: bool = False,
-               ) -> tuple[list["SearchHit"], str | None, bool]:
+    def search(
+        self,
+        query: str,
+        mode: str = "text",
+        *,
+        limit: int = 500,
+        regex: bool = False,
+        case: bool = False,
+    ) -> tuple[list["SearchHit"], str | None, bool]:
         """Search the whole database. Returns ``(hits, error, truncated)``.
 
         A failed search is DATA (a message to show), not an exception: a bad
         regex or an unparsable byte pattern is something the user typed, and
         the palette wants to say so without unwinding.
         """
-        op = "search_bytes" if mode == "bytes" else "search_text"
+        operation = (
+            remote_ops.search_bytes if mode == "bytes" else remote_ops.search_text
+        )
         args: dict = {"limit": int(limit), "case": bool(case)}
         if mode == "bytes":
             # Validate HERE, not just in the UI: IDA's find_bytes answers a
             # malformed pattern with zero hits and no error, which reads as
             # "not present" -- the most misleading answer a search can give.
             from .search import normalise_pattern, pattern_problem
+
             problem = pattern_problem(query)
             if problem:
                 return ([], problem, False)
@@ -2148,29 +2308,32 @@ class Program:
             args["query"] = query
             args["regex"] = bool(regex)
         try:
-            payload = self.client.invoke(op, **args)
+            payload = self.client.call(operation, **args)
         except IDAToolError as e:
             return ([], str(e), False)
         if not isinstance(payload, dict):
             return ([], "the backend returned nothing searchable", False)
         hits = [
-            SearchHit(addr=_as_int(r.get("addr", 0)),
-                      head=_as_int(r.get("head", r.get("addr", 0))),
-                      line=str(r.get("line", "") or ""),
-                      func=(r.get("func") or None),
-                      func_addr=(_as_int(r["func_addr"]) if r.get("func_addr")
-                                 else None),
-                      seg=str(r.get("seg", "") or ""))
-            for r in payload.get("hits", []) if isinstance(r, dict)]
+            SearchHit(
+                addr=_as_int(r.get("addr", 0)),
+                head=_as_int(r.get("head", r.get("addr", 0))),
+                line=str(r.get("line", "") or ""),
+                func=(r.get("func") or None),
+                func_addr=(_as_int(r["func_addr"]) if r.get("func_addr") else None),
+                seg=str(r.get("seg", "") or ""),
+            )
+            for r in payload.get("hits", [])
+            if isinstance(r, dict)
+        ]
         return (hits, payload.get("error") or None, bool(payload.get("truncated")))
 
     def journal_get(self) -> str:
         """The findings journal blob stored in this database ('' if none)."""
-        payload = self.client.invoke("journal_get")
+        payload = self.client.call(remote_ops.journal_get)
         return str(payload.get("data", "")) if isinstance(payload, dict) else ""
 
     def journal_put(self, data: str) -> None:
-        self.client.invoke("journal_put", data=str(data))
+        self.client.call(remote_ops.journal_put, data=str(data))
 
     def decomp_map(self, ea: int) -> list[list[int]]:
         """Per-pseudocode-line instruction coverage for the split-view region
@@ -2183,12 +2346,15 @@ class Program:
         if hit is not None and hit[1] == gen:
             return hit[0]
         try:
-            payload = self.client.invoke("decomp_map", addr=hex(ea))
+            payload = self.client.call(remote_ops.decomp_map, addr=hex(ea))
         except IDAToolError:
             return []
         lines = payload.get("lines", []) if isinstance(payload, dict) else []
-        out = [[_as_int(e) for e in (ln.get("eas") or [])]
-               for ln in lines if isinstance(ln, dict)]
+        out = [
+            [_as_int(e) for e in (ln.get("eas") or [])]
+            for ln in lines
+            if isinstance(ln, dict)
+        ]
         with self._lock:
             self._decomp_maps[ea] = (out, gen)
         return out
@@ -2213,7 +2379,7 @@ class Program:
         if hit is not None and hit[1] == gen:
             return hit[0]
         try:
-            payload = self.client.invoke("flowchart", addr=hex(ea))
+            payload = self.client.call(remote_ops.flowchart, addr=hex(ea))
         except IDAToolError:
             return None
         if not isinstance(payload, dict) or payload.get("error"):
@@ -2224,10 +2390,14 @@ class Program:
         blocks = []
         for b in raw:
             try:
-                blocks.append(BasicBlock(
-                    id=int(b["id"]), start=_as_int(b["start"]),
-                    end=_as_int(b["end"]),
-                    succs=[(int(d), str(k)) for d, k in (b.get("succs") or [])]))
+                blocks.append(
+                    BasicBlock(
+                        id=int(b["id"]),
+                        start=_as_int(b["start"]),
+                        end=_as_int(b["end"]),
+                        succs=[(int(d), str(k)) for d, k in (b.get("succs") or [])],
+                    )
+                )
             except (KeyError, ValueError, TypeError):
                 continue
         if not blocks:
@@ -2239,8 +2409,9 @@ class Program:
         for b in blocks:
             # bisect, not a scan per block: a 400-block function against a few
             # thousand rows is a million comparisons done for nothing.
-            b.rows = rows[bisect.bisect_left(eas, b.start):
-                          bisect.bisect_left(eas, b.end)]
+            b.rows = rows[
+                bisect.bisect_left(eas, b.start) : bisect.bisect_left(eas, b.end)
+            ]
         fcv = Flowchart(
             func_ea=_as_int(f.get("addr", lo)),
             name=str(f.get("name") or f"sub_{lo:X}"),
@@ -2283,11 +2454,12 @@ class Program:
         operand marks for free."""
         out: list[Head] = []
         addr = lo
-        for _ in range(64):                      # bounded: ~128k heads
+        for _ in range(64):  # bounded: ~128k heads
             if addr >= hi:
                 break
-            payload = self.client.invoke("heads", addr=hex(addr), end=hex(hi),
-                                       count=2000)
+            payload = self.client.call(
+                remote_ops.heads, addr=hex(addr), end=hex(hi), count=2000
+            )
             rows = payload.get("heads", []) if isinstance(payload, dict) else []
             if not rows:
                 break
@@ -2315,27 +2487,34 @@ class Program:
     # -- cross-references & containing function --------------------------- #
     def function_of(self, ea: int) -> Func | None:
         """Return the function containing ``ea`` (resolves mid-function addrs)."""
-        payload = self.client.invoke("lookup_funcs", queries=[hex(ea)])
+        payload = self.client.call(remote_ops.lookup_funcs, queries=[hex(ea)])
         res = payload.get("result", []) if isinstance(payload, dict) else []
         fn = res[0].get("fn") if res and isinstance(res[0], dict) else None
         return Func.from_raw(fn) if fn else None
 
     def xrefs_from(self, ea: int) -> list[Xref]:
-        payload = self.client.invoke(
-            "xref_query",
+        payload = self.client.call(
+            remote_ops.xref_query,
             queries=[{"addr": hex(ea), "direction": "from", "include_fn": True}],
         )
         return _parse_xrefs(payload)
 
     def xrefs_to(self, ea: int, limit: int = 2000) -> list[Xref]:
-        q = [{"addr": hex(ea), "direction": "to", "include_fn": True,
-              "dedup": True, "count": limit}]
+        q = [
+            {
+                "addr": hex(ea),
+                "direction": "to",
+                "include_fn": True,
+                "dedup": True,
+                "count": limit,
+            }
+        ]
         try:
             # xref_types adds a fine-grained `kind` (call/read/write/...) for the
             # xref dialog; fall back to xref_query (code/data only) if absent.
-            payload = self.client.invoke("xref_types", queries=q)
+            payload = self.client.call(remote_ops.xref_types, queries=q)
         except IDAToolError:
-            payload = self.client.invoke("xref_query", queries=q)
+            payload = self.client.call(remote_ops.xref_query, queries=q)
         return _parse_xrefs(payload)
 
     # -- address resolution ------------------------------------------------ #
@@ -2353,7 +2532,7 @@ class Program:
         # (loc_/locret_): lookup_funcs would map a label to its *containing*
         # function's entry, so double-clicking a label jumped to the wrong place.
         try:
-            payload = self.client.invoke("resolve_names", queries=[s])
+            payload = self.client.call(remote_ops.resolve_names, queries=[s])
             res = payload.get("result", []) if isinstance(payload, dict) else []
             ea = res[0].get("ea") if res and isinstance(res[0], dict) else None
             if ea:
@@ -2363,7 +2542,7 @@ class Program:
         # Fall back to function-name resolution (also drives the 'did you mean'
         # suggestion when the name is unknown).
         try:
-            payload = self.client.invoke("lookup_funcs", queries=[s])
+            payload = self.client.call(remote_ops.lookup_funcs, queries=[s])
         except IDAToolError as e:
             raise KeyError(f"cannot resolve {target!r}: {e}") from e
         res = payload.get("result", []) if isinstance(payload, dict) else []
@@ -2389,8 +2568,10 @@ class Program:
         except Exception:  # noqa: BLE001 -- suggestions are strictly optional
             return ""
         if not cands:
-            return (" (no function name contains it; it may be a data symbol or "
-                    "not a function — pass an address like 0x1234)")
+            return (
+                " (no function name contains it; it may be a data symbol or "
+                "not a function — pass an address like 0x1234)"
+            )
         shown = cands[:5]
         names = ", ".join(f"{c.name} @ {c.addr:#x}" for c in shown)
         more = " …" if len(cands) > len(shown) else ""
@@ -2401,7 +2582,9 @@ class Program:
         """Set (empty text clears) the comment at ``ea``; affects both the disasm
         and decompiler views. Returns the raw payload so the caller can surface a
         soft per-item error. The caller must invalidate/recompile to see it."""
-        return self.client.invoke("set_comments", items=[{"addr": hex(ea), "comment": text}])
+        return self.client.call(
+            remote_ops.set_comments, items=[{"addr": hex(ea), "comment": text}]
+        )
 
     # -- invalidation (after edits) --------------------------------------- #
     def invalidate(self, ea: int) -> None:
@@ -2430,14 +2613,16 @@ def _parse_xrefs(payload) -> list[Xref]:
         fn = d.get("fn") or {}
         frm = d.get("from", d.get("addr"))
         to = d.get("to")
-        out.append(Xref(
-            frm=_as_int(frm) if frm is not None else 0,
-            to=_as_int(to) if to is not None else None,
-            type=d.get("type", "?"),
-            fn_name=fn.get("name"),
-            fn_addr=_as_int(fn["addr"]) if fn.get("addr") else None,
-            kind=d.get("kind"),
-        ))
+        out.append(
+            Xref(
+                frm=_as_int(frm) if frm is not None else 0,
+                to=_as_int(to) if to is not None else None,
+                type=d.get("type", "?"),
+                fn_name=fn.get("name"),
+                fn_addr=_as_int(fn["addr"]) if fn.get("addr") else None,
+                kind=d.get("kind"),
+            )
+        )
     return out
 
 
@@ -2447,13 +2632,15 @@ def _parse_decompilation(ea: int, payload) -> Decompilation:
     code = payload.get("code")
     error = payload.get("error")
     if not code:
-        return Decompilation(ea, None, True, error or "decompilation failed",
-                             False, None)
+        return Decompilation(
+            ea, None, True, error or "decompilation failed", False, None
+        )
     m = _TRUNC_RE.search(code)
     truncated = m is not None
     total_chars = int(m.group(1)) if m else len(code)
     refs = [
         Ref(addr=_as_int(r["addr"]), name=r.get("name", ""), string=r.get("string"))
-        for r in payload.get("refs", []) if isinstance(r, dict) and "addr" in r
+        for r in payload.get("refs", [])
+        if isinstance(r, dict) and "addr" in r
     ]
     return Decompilation(ea, code, False, error, truncated, total_chars, refs)

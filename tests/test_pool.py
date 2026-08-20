@@ -33,11 +33,14 @@ def check(name, cond, detail=""):
 class FakeClient:
     """Stands in for a CodeModeClient lease and records saves/closes."""
 
-    def __init__(self, ref, mem=100, backend="idalib"):
+    def __init__(self, ref, mem=100, backend="idalib",
+                 discardable=True):
         self.ref = ref
         self.mem = mem
         self.backend = backend
         self.saved = 0
+        self.discarded = 0
+        self.discardable = discardable
         self.closed = False
         self.connected = False
 
@@ -48,6 +51,10 @@ class FakeClient:
     def save_database(self):
         self.saved += 1
         return {"saved": True}
+
+    def discard_database(self):
+        self.discarded += 1
+        return self.discardable
 
     def close(self, grace=None):
         self.closed = True
@@ -152,6 +159,36 @@ def main() -> int:
             check("an unknown label raises KeyError", False, "no raise")
         except KeyError:
             check("an unknown label raises KeyError", True)
+
+        # -- discard delegates shared/GUI finalization ------------------------ #
+        discard_made = {}
+
+        def spawn_discard(ref, ttl):
+            client = FakeClient(
+                ref, discardable=ref.label != "bin1")
+            discard_made[ref.label] = client
+            return client
+
+        discard_pool = DatabasePool(
+            proj, spawn=spawn_discard, mem_fn=lambda c: c.mem)
+        discard_pool.get("bin0")
+        discard_pool.get("bin1")
+        delegated = discard_pool.discard_changes(["bin0", "bin1"])
+        check("discard asks every dirty resident database",
+              discard_made["bin0"].discarded == 1
+              and discard_made["bin1"].discarded == 1,
+              {k: c.discarded for k, c in discard_made.items()})
+        check("discard reports leases whose finalization transferred",
+              delegated == ["bin1"], delegated)
+        old = discard_made["bin0"]
+        replacement = FakeClient(proj.by_label("bin0"))
+        check("replace_client refuses a stale lease generation",
+              discard_pool.replace_client("bin0", object(), replacement) is False
+              and discard_pool.get("bin0") is old)
+        check("replace_client installs the reattached lease",
+              discard_pool.replace_client("bin0", old, replacement) is True
+              and discard_pool.get("bin0") is replacement)
+        discard_pool.close_all(save=False)
 
         # -- default budget comes from the project's memory_pct ------------------- #
         pool3 = DatabasePool(proj, spawn=spawn, mem_fn=lambda c: c.mem)

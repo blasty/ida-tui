@@ -27,6 +27,7 @@ ida-codemode is installed **editable** into both venvs, so checking that repo ou
 swaps the backend under the TUI with no reinstall -- which is what makes this A/B
 cheap.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -34,6 +35,7 @@ import os
 import statistics
 import time
 
+from idatui import remote_ops
 from idatui.codemode_client import CodeModeClient
 
 
@@ -59,7 +61,7 @@ def main() -> int:
 
     # Work on the biggest function we can find, so the payload-heavy operations
     # are actually payload-heavy.
-    index = client.invoke("list_funcs", queries=[{"offset": 0, "count": 60}])
+    index = client.call(remote_ops.list_funcs, queries=[{"offset": 0, "count": 60}])
     funcs = (index.get("result") or [{}])[0].get("data") or []
     if not funcs:
         print("VERDICT: FAIL - no functions")
@@ -71,19 +73,30 @@ def main() -> int:
         # Synthetic: isolates the per-operation floor (execute_sync marshalling).
         ("empty round trip", lambda: handle.execute_python("result = 1")),
         # Payload-dominated: what _PACK_EPILOGUE was written for.
-        ("list_funcs 500", lambda: client.invoke(
-            "list_funcs", queries=[{"offset": 0, "count": 500}])),
-        ("heads 200 (listing page)", lambda: client.invoke(
-            "heads", addr=ea, count=200, annotate=True)),
+        (
+            "list_funcs 500",
+            lambda: client.call(
+                remote_ops.list_funcs, queries=[{"offset": 0, "count": 500}]
+            ),
+        ),
+        (
+            "heads 200 (listing page)",
+            lambda: client.call(remote_ops.heads, addr=ea, count=200, annotate=True),
+        ),
         # IDA-work-dominated: Hex-Rays, nothing upstream can move.
-        ("decompile (warm)", lambda: client.invoke("decompile", addr=ea)),
-        ("flowchart (graph)", lambda: client.invoke("flowchart", addr=ea)),
+        ("decompile (warm)", lambda: client.call(remote_ops.decompile, addr=ea)),
+        ("flowchart (graph)", lambda: client.call(remote_ops.flowchart, addr=ea)),
         # Round-trip-dominated: small payload, so only the floor matters.
-        ("xrefs_to", lambda: client.invoke("xref_query", direction="to", addr=ea)),
+        (
+            "xrefs_to",
+            lambda: client.call(remote_ops.xref_query, direction="to", addr=ea),
+        ),
     ]
 
-    print(f"# target={os.path.basename(args.target)} func={ea} reps={args.reps} "
-          f"backend={client.backend}")
+    print(
+        f"# target={os.path.basename(args.target)} func={ea} reps={args.reps} "
+        f"backend={client.backend}"
+    )
     results = {}
     for name, fn in ops:
         try:

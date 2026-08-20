@@ -10,6 +10,7 @@ nothing else here can see it.
 Time spent in `invoke` is the backend + transport; everything below it in the
 `tottime` list is ours and is what this file is for.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -19,6 +20,7 @@ import os
 import pstats
 import time
 
+from idatui import remote_ops
 from idatui.codemode_client import CodeModeClient
 from idatui.domain import Program
 
@@ -28,14 +30,15 @@ def main() -> int:
     ap.add_argument("binary", nargs="?", default="targets/bash")
     ap.add_argument("--pages", type=int, default=60)
     ap.add_argument("--lines", type=int, default=16)
-    ap.add_argument("--text", action="store_true",
-                    help="load full pages instead of skeletons")
+    ap.add_argument(
+        "--text", action="store_true", help="load full pages instead of skeletons"
+    )
     args = ap.parse_args()
 
     client = CodeModeClient(os.path.abspath(args.binary))
     client.connect()
     program = Program(client)
-    regions = client.invoke("file_regions")
+    regions = client.call(remote_ops.file_regions)
     rows = regions.get("regions") or regions.get("result") or []
     text_seg = next((r for r in rows if ".text" in str(r.get("name", ""))), rows[0])
     model = program.listing(int(str(text_seg["start"]), 16))
@@ -57,8 +60,10 @@ def main() -> int:
     pr.disable()
     wall = (time.perf_counter() - started) * 1000
 
-    print(f"# {os.path.basename(args.binary)}  pages={loaded}  "
-          f"text={want_text}  {wall:.0f}ms  ({wall/max(loaded,1):.2f}ms/page)")
+    print(
+        f"# {os.path.basename(args.binary)}  pages={loaded}  "
+        f"text={want_text}  {wall:.0f}ms  ({wall / max(loaded, 1):.2f}ms/page)"
+    )
     buf = io.StringIO()
     pstats.Stats(pr, stream=buf).sort_stats("tottime").print_stats(args.lines)
     print(buf.getvalue())

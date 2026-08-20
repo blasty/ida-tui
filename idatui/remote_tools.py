@@ -23,6 +23,7 @@ imported here, because the ida_* modules do not exist in the TUI's interpreter.
 `codemode_client` reads it and prepends it to the relevant snippets. Keep it
 self-contained: no relative imports, nothing beyond what Code Mode provides.
 """
+
 # ruff: noqa
 import re as _re
 
@@ -134,7 +135,7 @@ def _idatui_head_row(ea, flags=None, text=True):
     """
 
     f = ida_bytes.get_flags(ea) if flags is None else flags
-    cls = f & _MS_CLS          # == is_code(f) / is_data(f), without the calls
+    cls = f & _MS_CLS  # == is_code(f) / is_data(f), without the calls
     if cls == _FF_CODE:
         kind = "code"
     elif cls == _FF_DATA:
@@ -211,10 +212,20 @@ _IDATUI_SPAN_KINDS = {
     # NB the real constant names: DATNAME/CODNAME, not "DNAME". Guessing here
     # fails silently — an unmapped tag renders as plain body text, so symbols
     # just quietly aren't blue and nothing tells you why.
-    "name": ("SCOLOR_DATNAME", "SCOLOR_CODNAME", "SCOLOR_LOCNAME",
-             "SCOLOR_IMPNAME", "SCOLOR_DEMNAME", "SCOLOR_LIBNAME",
-             "SCOLOR_CNAME", "SCOLOR_DNAME",
-             "SCOLOR_CREF", "SCOLOR_DREF", "SCOLOR_CREFTAIL", "SCOLOR_DREFTAIL"),
+    "name": (
+        "SCOLOR_DATNAME",
+        "SCOLOR_CODNAME",
+        "SCOLOR_LOCNAME",
+        "SCOLOR_IMPNAME",
+        "SCOLOR_DEMNAME",
+        "SCOLOR_LIBNAME",
+        "SCOLOR_CNAME",
+        "SCOLOR_DNAME",
+        "SCOLOR_CREF",
+        "SCOLOR_DREF",
+        "SCOLOR_CREFTAIL",
+        "SCOLOR_DREFTAIL",
+    ),
     "seg": ("SCOLOR_SEGNAME",),
     "cmt": ("SCOLOR_AUTOCMT", "SCOLOR_REGCMT", "SCOLOR_RPTCMT", "SCOLOR_VOIDOP"),
     "punct": ("SCOLOR_SYMBOL", "SCOLOR_ALTOP", "SCOLOR_HIDNAME"),
@@ -241,7 +252,7 @@ _IDATUI_TAGS = None
 _IDATUI_OPND_TAGS = None
 
 
-_IDATUI_CTL = None   # re: a tag = one of three control chars plus its argument
+_IDATUI_CTL = None  # re: a tag = one of three control chars plus its argument
 
 
 _IDATUI_TAGINFO = None
@@ -280,6 +291,7 @@ def _idatui_spans(line):
         _IDATUI_OPND_TAGS = _idatui_opnd_tag_map()
     if _IDATUI_CTL is None:
         import re as _re
+
         # One capturing split gives [text, tag, text, tag, ..., text] in a
         # single C pass. A per-character python loop over the line used to be
         # the most expensive thing the `heads` tool did, and a line is ~54
@@ -289,17 +301,18 @@ def _idatui_spans(line):
     if _IDATUI_TAGINFO is None:
         _IDATUI_TAGINFO = {
             tag: (_IDATUI_TAGS.get(tag, "text"), _IDATUI_OPND_TAGS.get(tag))
-            for tag in set(_IDATUI_TAGS) | set(_IDATUI_OPND_TAGS)}
+            for tag in set(_IDATUI_TAGS) | set(_IDATUI_OPND_TAGS)
+        }
     taginfo = _IDATUI_TAGINFO
     plain_tag = ("text", None)
     on, off, esc = "\x01", "\x02", "\x03"
     addr_tag = chr(getattr(ida_lines, "COLOR_ADDR", 0x28))
     addr_len = int(getattr(ida_lines, "COLOR_ADDR_SIZE", 16))
     parts = _IDATUI_CTL.split(line)
-    spans, stack = [], []            # stack entries: (kind, operand index|None)
-    kind, opnd = "text", None        # state the current run of text belongs to
+    spans, stack = [], []  # stack entries: (kind, operand index|None)
+    kind, opnd = "text", None  # state the current run of text belongs to
     pend = ""
-    skip = 0                         # characters of an address payload still due
+    skip = 0  # characters of an address payload still due
     i, n = 0, len(parts)
     while i < n:
         txt = parts[i]
@@ -317,11 +330,11 @@ def _idatui_spans(line):
             break
         pair = parts[i]
         i += 1
-        if skip:                     # a tag INSIDE an address payload: 2 chars
+        if skip:  # a tag INSIDE an address payload: 2 chars
             skip = skip - 2 if skip > 2 else 0
             continue
         ch = pair[0]
-        if ch == esc:                # escaped literal: keep the char it guards
+        if ch == esc:  # escaped literal: keep the char it guards
             pend += pair[1]
             continue
         tag = pair[1]
@@ -337,7 +350,7 @@ def _idatui_spans(line):
             stack.append((kind, opnd))
             kind, o = taginfo.get(tag, plain_tag)
             if o is not None:
-                opnd = o     # operands nest: an inner colour keeps the operand
+                opnd = o  # operands nest: an inner colour keeps the operand
         elif stack:
             kind, opnd = stack.pop()
         else:
@@ -359,7 +372,7 @@ def _idatui_spans(line):
             prev_space = False
             out.append([kind, txt, opnd])
             continue
-        if not core:                 # the span is nothing but padding
+        if not core:  # the span is nothing but padding
             if not prev_space:
                 prev_space = True
                 out.append([kind, " ", opnd])
@@ -396,7 +409,7 @@ def _idatui_spans(line):
         ops.append([start, pos, cur])
     text = "".join(t for _k, t, _o in out)
     trimmed = []
-    for lo, hi, k in ops:                 # don't let a range own trailing space
+    for lo, hi, k in ops:  # don't let a range own trailing space
         while hi > lo and text[hi - 1].isspace():
             hi -= 1
         while lo < hi and text[lo].isspace():
@@ -435,8 +448,17 @@ def _idatui_rows_digest(rows):
             sh = seen.get(key)
             if sh is None:
                 sh = seen[key] = hash(tuple(map(tuple, sp)))
-        acc = hash((acc, r.get("ea"), r.get("kind"), r.get("size"),
-                    r.get("text"), r.get("name"), sh))
+        acc = hash(
+            (
+                acc,
+                r.get("ea"),
+                r.get("kind"),
+                r.get("size"),
+                r.get("text"),
+                r.get("name"),
+                sh,
+            )
+        )
     return acc
 
 
@@ -448,8 +470,12 @@ def _idatui_unknown_row(ea, size):
 
     if size <= 1:
         return _idatui_head_row(ea)
-    row = {"ea": hex(ea), "kind": "unknown", "size": int(size),
-           "text": f"db {size} dup(?)"}
+    row = {
+        "ea": hex(ea),
+        "kind": "unknown",
+        "size": int(size),
+        "text": f"db {size} dup(?)",
+    }
     nm = ida_name.get_ea_name(ea)
     if nm:
         row["name"] = nm
@@ -481,8 +507,7 @@ def _idatui_struct_member_rows(ea):
             sz = 0
         name = m.name or ""
         text = f"+{off:X} {name}" + (f" {mtype}" if mtype else "")
-        rows.append({"ea": hex(ea + off), "kind": "member", "size": sz,
-                     "text": text})
+        rows.append({"ea": hex(ea + off), "kind": "member", "size": sz, "text": text})
     return rows
 
 
@@ -494,8 +519,13 @@ def _idatui_func_header_rows(ea):
     return [
         {"ea": hex(ea), "kind": "sep", "size": 0, "text": ""},
         {"ea": hex(ea), "kind": "sep", "size": 0, "text": "; " + bar},
-        {"ea": hex(ea), "kind": "funchdr", "size": 0,
-         "text": name + " proc", "name": name},
+        {
+            "ea": hex(ea),
+            "kind": "funchdr",
+            "size": 0,
+            "text": name + " proc",
+            "name": name,
+        },
     ]
 
 
@@ -504,8 +534,13 @@ def _idatui_func_footer_rows(ea, func):
 
     name = ida_funcs.get_func_name(func.start_ea) or "sub_%X" % func.start_ea
     return [
-        {"ea": hex(ea), "kind": "funchdr", "size": 0,
-         "text": name + " endp", "name": name},
+        {
+            "ea": hex(ea),
+            "kind": "funchdr",
+            "size": 0,
+            "text": name + " endp",
+            "name": name,
+        },
         {"ea": hex(ea), "kind": "sep", "size": 0, "text": "; " + "-" * 60},
     ]
 
@@ -543,9 +578,12 @@ def _idatui_segment_detail(addr, end, page_rows):
         except Exception:
             pass
 
-    K_CODE = _IDATUI_KIND_ID["code"]; K_DATA = _IDATUI_KIND_ID["data"]
-    K_UNK = _IDATUI_KIND_ID["unknown"]; K_SEP = _IDATUI_KIND_ID["sep"]
-    K_FUNC = _IDATUI_KIND_ID["funchdr"]; K_LABEL = _IDATUI_KIND_ID["label"]
+    K_CODE = _IDATUI_KIND_ID["code"]
+    K_DATA = _IDATUI_KIND_ID["data"]
+    K_UNK = _IDATUI_KIND_ID["unknown"]
+    K_SEP = _IDATUI_KIND_ID["sep"]
+    K_FUNC = _IDATUI_KIND_ID["funchdr"]
+    K_LABEL = _IDATUI_KIND_ID["label"]
     K_MEMBER = _IDATUI_KIND_ID["member"]
 
     eas = array.array("Q")
@@ -569,8 +607,8 @@ def _idatui_segment_detail(addr, end, page_rows):
     # are the same number until a segment contains an undefined run) and then
     # silently yields pages that do not line up with a refetch.
     anchors = []
-    page_phys = 0          # physical rows emitted into the page being filled
-    rows = 0               # logical rows so far (what the scrollbar counts)
+    page_phys = 0  # physical rows emitted into the page being filled
+    rows = 0  # logical rows so far (what the scrollbar counts)
     fn = None
     ea = ida_bytes.get_item_head(lo)
     while ea != BAD and ea < hi:
@@ -584,7 +622,9 @@ def _idatui_segment_detail(addr, end, page_rows):
             nh = next_head(ea, hi)
             stop = nh if (nh != BAD and ea < nh <= hi) else hi
             run = stop - ea
-            ea_ap(ea); kind_ap(K_UNK); size_ap(run)
+            ea_ap(ea)
+            kind_ap(K_UNK)
+            size_ap(run)
             rows += run if run > 1 else 1
             page_phys += len(eas) - before
             ea = stop
@@ -593,23 +633,32 @@ def _idatui_segment_detail(addr, end, page_rows):
             fn = get_func(ea)
         at_start = fn is not None and fn.start_ea == ea
         if at_start:
-            for k in (K_SEP, K_SEP, K_FUNC):      # blank, banner, `name proc`
-                ea_ap(ea); kind_ap(k); size_ap(0)
+            for k in (K_SEP, K_SEP, K_FUNC):  # blank, banner, `name proc`
+                ea_ap(ea)
+                kind_ap(k)
+                size_ap(0)
             rows += 3
         elif cls == _FF_CODE and get_ea_name(ea):
-            ea_ap(ea); kind_ap(K_LABEL); size_ap(0)
+            ea_ap(ea)
+            kind_ap(K_LABEL)
+            size_ap(0)
             rows += 1
-        ea_ap(ea); kind_ap(K_CODE if cls == _FF_CODE else K_DATA)
-        size_ap(int(get_item_size(ea))); rows += 1
+        ea_ap(ea)
+        kind_ap(K_CODE if cls == _FF_CODE else K_DATA)
+        size_ap(int(get_item_size(ea)))
+        rows += 1
         if cls == _FF_DATA:
             for m in _idatui_struct_member_rows(ea):
                 ea_ap(int(m["ea"], 16) if isinstance(m["ea"], str) else m["ea"])
                 kind_ap(_IDATUI_KIND_ID.get(m.get("kind", "member"), K_MEMBER))
-                size_ap(int(m.get("size", 0) or 0)); rows += 1
+                size_ap(int(m.get("size", 0) or 0))
+                rows += 1
         item_end = get_item_end(ea)
         if fn is not None and item_end >= fn.end_ea:
-            for k in (K_FUNC, K_SEP):             # `name endp`, separator
-                ea_ap(ea); kind_ap(k); size_ap(0)
+            for k in (K_FUNC, K_SEP):  # `name endp`, separator
+                ea_ap(ea)
+                kind_ap(k)
+                size_ap(0)
             rows += 2
         page_phys += len(eas) - before
         ea = item_end if item_end > ea else ea + 1
@@ -618,19 +667,28 @@ def _idatui_segment_detail(addr, end, page_rows):
     # which turns a bytes object into its repr -- 4 characters per byte and
     # unparseable at the other end. Learned by watching 2.97MB arrive as 11.26MB.
     import base64
+
     b64 = base64.b64encode
-    return {"addr": hex(lo), "end": hex(hi), "rows": rows, "heads": len(eas),
-            "anchors": anchors, "kind_names": list(_IDATUI_KINDS),
-            "eas": b64(eas.tobytes()).decode(),
-            "kinds": b64(kinds.tobytes()).decode(),
-            "sizes": b64(sizes.tobytes()).decode()}
+    return {
+        "addr": hex(lo),
+        "end": hex(hi),
+        "rows": rows,
+        "heads": len(eas),
+        "anchors": anchors,
+        "kind_names": list(_IDATUI_KINDS),
+        "eas": b64(eas.tobytes()).decode(),
+        "kinds": b64(kinds.tobytes()).decode(),
+        "sizes": b64(sizes.tobytes()).decode(),
+    }
 
 
 def segment_index(
     addr: Annotated[str, "Any address in the segment to index"],
     end: Annotated[str, "Optional exclusive end address; default = segment end"] = "",
     page_rows: Annotated[int, "Rows between anchors (default 500)"] = 500,
-    detail: Annotated[bool, "Also return every row's ea/kind/size as packed arrays"] = False,
+    detail: Annotated[
+        bool, "Also return every row's ea/kind/size as packed arrays"
+    ] = False,
 ) -> dict:
     """How many listing rows a segment has, and where to seek into it.
 
@@ -662,6 +720,7 @@ def segment_index(
     if detail:
         return _idatui_segment_detail(addr, end, count)
     import ida_segment
+
     seg = ida_segment.getseg(start)
     if not seg:
         return {"addr": str(addr), "error": "no segment", "rows": 0, "anchors": []}
@@ -703,19 +762,24 @@ def segment_index(
             fn = get_func(ea)
         n = 1
         if fn is not None and fn.start_ea == ea:
-            n += 3                                   # blank, banner, `proc`
+            n += 3  # blank, banner, `proc`
         elif cls == _FF_CODE and get_ea_name(ea):
-            n += 1                                   # loc_XXX label on its own row
+            n += 1  # loc_XXX label on its own row
         if cls == _FF_DATA:
             n += len(_idatui_struct_member_rows(ea))
         item_end = get_item_end(ea)
         if fn is not None and item_end >= fn.end_ea:
-            n += 2                                   # `endp` + separator
+            n += 2  # `endp` + separator
         rows += n
         n_heads += 1
         ea = item_end if item_end > ea else ea + 1
-    return {"addr": hex(lo), "end": hex(hi), "rows": rows,
-            "heads": n_heads, "anchors": anchors}
+    return {
+        "addr": hex(lo),
+        "end": hex(hi),
+        "rows": rows,
+        "heads": n_heads,
+        "anchors": anchors,
+    }
 
 
 def heads(
@@ -723,10 +787,21 @@ def heads(
     count: Annotated[int, "Max heads to return (default 200, max 2000)"] = 200,
     offset: Annotated[int, "Skip first N heads from addr (default 0)"] = 0,
     end: Annotated[str, "Optional exclusive end address; default = segment end"] = "",
-    back: Annotated[bool, "Walk backwards: return the count heads ENDING just before addr, in forward order"] = False,
-    annotate: Annotated[bool, "Emit IDA-style function boundary banner rows (kind sep/funchdr)"] = False,
-    expect: Annotated[str, "Digest a caller already holds: the rows are omitted when they still hash to it"] = "",
-    text: Annotated[bool, "Render each row's disassembly text (default true). False = a skeleton page: same rows, same addresses, no text"] = True,
+    back: Annotated[
+        bool,
+        "Walk backwards: return the count heads ENDING just before addr, in forward order",
+    ] = False,
+    annotate: Annotated[
+        bool, "Emit IDA-style function boundary banner rows (kind sep/funchdr)"
+    ] = False,
+    expect: Annotated[
+        str,
+        "Digest a caller already holds: the rows are omitted when they still hash to it",
+    ] = "",
+    text: Annotated[
+        bool,
+        "Render each row's disassembly text (default true). False = a skeleton page: same rows, same addresses, no text",
+    ] = True,
 ) -> dict:
     """Walk item heads from ``addr`` as a flat listing: every head is rendered
     (code OR data OR undefined) via generate_disasm_line and stepped with
@@ -740,10 +815,20 @@ def heads(
     try:
         start = parse_address(addr)
     except Exception as e:
-        return {"addr": str(addr), "error": str(e), "heads": [], "cursor": {"done": True}}
+        return {
+            "addr": str(addr),
+            "error": str(e),
+            "heads": [],
+            "cursor": {"done": True},
+        }
     seg = ida_segment.getseg(start)
     if not seg:
-        return {"addr": str(addr), "error": "no segment", "heads": [], "cursor": {"done": True}}
+        return {
+            "addr": str(addr),
+            "error": "no segment",
+            "heads": [],
+            "cursor": {"done": True},
+        }
     lo, hi = seg.start_ea, seg.end_ea
     if end:
         try:
@@ -766,7 +851,9 @@ def heads(
         rows = [_idatui_head_row(e) for e in chosen]
         first = chosen[0] if chosen else start
         pea = ida_bytes.prev_head(first, lo)
-        cursor = {"done": True} if pea == idaapi.BADADDR or pea < lo else {"prev": hex(pea)}
+        cursor = (
+            {"done": True} if pea == idaapi.BADADDR or pea < lo else {"prev": hex(pea)}
+        )
         return {"addr": str(addr), "heads": rows, "cursor": cursor}
 
     # Walk by item END (not next_head): next_head SKIPS undefined bytes, but a
@@ -823,8 +910,9 @@ def heads(
             # A code label (loc_XXX/jump target) gets its OWN line at depth 0,
             # like IDA; strip it from the instruction row below.
             nm = row["name"]
-            out.append({"ea": hex(e), "kind": "label", "size": 0,
-                        "text": nm + ":", "name": nm})
+            out.append(
+                {"ea": hex(e), "kind": "label", "size": 0, "text": nm + ":", "name": nm}
+            )
             row = dict(row)
             row["name"] = None
         out.append(row)
@@ -845,7 +933,7 @@ def heads(
         if len(rows) >= count:
             more = True
             break
-        f = get_flags(ea)            # once per head, not once per consumer
+        f = get_flags(ea)  # once per head, not once per consumer
         rows.extend(_rows_for(ea, f))  # a struct head expands into member rows
         ea = _advance(ea, f)
     cursor = {"next": hex(ea)} if more else {"done": True}
@@ -871,8 +959,18 @@ def heads(
 _IDATUI_FMT_CYCLE = ("hex", "dec", "bin", "char", "offset", "default")
 
 
-_IDATUI_FMT_SETTABLE = ("hex", "dec", "oct", "bin", "char", "offset", "seg",
-                        "float", "stack", "default")
+_IDATUI_FMT_SETTABLE = (
+    "hex",
+    "dec",
+    "oct",
+    "bin",
+    "char",
+    "offset",
+    "seg",
+    "float",
+    "stack",
+    "default",
+)
 
 
 def _idatui_fmt_nibbles():
@@ -880,13 +978,20 @@ def _idatui_fmt_nibbles():
     this module is injected into a file that is imported before a database is
     open."""
     return {
-        "default": ida_bytes.FF_N_VOID, "hex": ida_bytes.FF_N_NUMH,
-        "dec": ida_bytes.FF_N_NUMD, "char": ida_bytes.FF_N_CHAR,
-        "seg": ida_bytes.FF_N_SEG, "offset": ida_bytes.FF_N_OFF,
-        "bin": ida_bytes.FF_N_NUMB, "oct": ida_bytes.FF_N_NUMO,
-        "enum": ida_bytes.FF_N_ENUM, "forced": ida_bytes.FF_N_FOP,
-        "stroff": ida_bytes.FF_N_STRO, "stack": ida_bytes.FF_N_STK,
-        "float": ida_bytes.FF_N_FLT, "custom": ida_bytes.FF_N_CUST,
+        "default": ida_bytes.FF_N_VOID,
+        "hex": ida_bytes.FF_N_NUMH,
+        "dec": ida_bytes.FF_N_NUMD,
+        "char": ida_bytes.FF_N_CHAR,
+        "seg": ida_bytes.FF_N_SEG,
+        "offset": ida_bytes.FF_N_OFF,
+        "bin": ida_bytes.FF_N_NUMB,
+        "oct": ida_bytes.FF_N_NUMO,
+        "enum": ida_bytes.FF_N_ENUM,
+        "forced": ida_bytes.FF_N_FOP,
+        "stroff": ida_bytes.FF_N_STRO,
+        "stack": ida_bytes.FF_N_STK,
+        "float": ida_bytes.FF_N_FLT,
+        "custom": ida_bytes.FF_N_CUST,
     }
 
 
@@ -932,8 +1037,12 @@ def _idatui_op_value(ea, n):
             size = 0
         return int(v), size
     size = int(ida_bytes.get_item_size(ea))
-    read = {1: ida_bytes.get_byte, 2: ida_bytes.get_word,
-            4: ida_bytes.get_dword, 8: ida_bytes.get_qword}.get(size)
+    read = {
+        1: ida_bytes.get_byte,
+        2: ida_bytes.get_word,
+        4: ida_bytes.get_dword,
+        8: ida_bytes.get_qword,
+    }.get(size)
     if read is None:
         return None, size
     try:
@@ -991,9 +1100,9 @@ def _idatui_op_candidates(ea):
 
     F = ida_bytes.get_flags(ea)
     if ida_bytes.is_data(F):
-        return [0]              # a data item's value is operand 0
+        return [0]  # a data item's value is operand 0
     if not ida_bytes.is_code(F):
-        return []               # undefined bytes: IDA refuses a format outright
+        return []  # undefined bytes: IDA refuses a format outright
     insn = ida_ua.insn_t()
     if ida_ua.decode_insn(insn, ea) <= 0:
         return []
@@ -1037,7 +1146,7 @@ def _idatui_op_spans(ea, text):
         if not op:
             continue
         i = text.find(op, pos)
-        if i < 0:                      # duplicated operand text (mov eax, eax)
+        if i < 0:  # duplicated operand text (mov eax, eax)
             i = text.find(op)
         if i < 0:
             continue
@@ -1070,21 +1179,34 @@ def _idatui_apply_fmt(ea, n, fmt):
         if base in (idaapi.BADADDR, None) or base < 0:
             base = 0
         return bool(ida_offset.op_plain_offset(ea, n, base)), ""
-    fn = {"hex": ida_bytes.op_hex, "dec": ida_bytes.op_dec,
-          "oct": ida_bytes.op_oct, "bin": ida_bytes.op_bin,
-          "char": ida_bytes.op_chr, "seg": ida_bytes.op_seg,
-          "float": ida_bytes.op_flt, "stack": ida_bytes.op_stkvar}.get(fmt)
+    fn = {
+        "hex": ida_bytes.op_hex,
+        "dec": ida_bytes.op_dec,
+        "oct": ida_bytes.op_oct,
+        "bin": ida_bytes.op_bin,
+        "char": ida_bytes.op_chr,
+        "seg": ida_bytes.op_seg,
+        "float": ida_bytes.op_flt,
+        "stack": ida_bytes.op_stkvar,
+    }.get(fmt)
     if fn is None:
-        return False, (f"can't set {fmt!r} from a name alone"
-                       if fmt in _idatui_fmt_nibbles() else
-                       f"unknown format {fmt!r}")
+        return False, (
+            f"can't set {fmt!r} from a name alone"
+            if fmt in _idatui_fmt_nibbles()
+            else f"unknown format {fmt!r}"
+        )
     return bool(fn(ea, n)), ""
 
 
 def op_format(
     addr: Annotated[str, "Address of the instruction or data item"],
-    mode: Annotated[str, "cycle | back | show | hex | dec | oct | bin | char | offset | stack | default"] = "cycle",
-    col: Annotated[int, "Cursor column inside the rendered line (-1: first literal)"] = -1,
+    mode: Annotated[
+        str,
+        "cycle | back | show | hex | dec | oct | bin | char | offset | stack | default",
+    ] = "cycle",
+    col: Annotated[
+        int, "Cursor column inside the rendered line (-1: first literal)"
+    ] = -1,
     n: Annotated[int, "Operand index; -1 derives it from ``col``"] = -1,
 ) -> dict:
     """Change how a literal is DISPLAYED (IDA's 'o' family): hex, decimal,
@@ -1126,19 +1248,27 @@ def op_format(
                 # a different operand would make that highlight a lie -- say
                 # which one can be changed instead.
                 where = before[lo:hi].strip()
-                alt = (f"; the literal on this line is operand {cands[0]} "
-                       f"({_idatui_op_text(ea, before, cands[0])})"
-                       if cands else "")
-                return {"addr": hex(ea), "n": i, "text": before,
-                        "error": f"operand {i} ({where}) has no format to "
-                                 f"change{alt}"}
+                alt = (
+                    f"; the literal on this line is operand {cands[0]} "
+                    f"({_idatui_op_text(ea, before, cands[0])})"
+                    if cands
+                    else ""
+                )
+                return {
+                    "addr": hex(ea),
+                    "n": i,
+                    "text": before,
+                    "error": f"operand {i} ({where}) has no format to change{alt}",
+                }
         if n < 0:
             if not cands:
                 F = ida_bytes.get_flags(ea)
-                why = ("no literal on this line to reformat"
-                       if ida_bytes.is_code(F) or ida_bytes.is_data(F) else
-                       "undefined bytes have no format to change -- define "
-                       "them first ('d' makes data, 'c' makes code)")
+                why = (
+                    "no literal on this line to reformat"
+                    if ida_bytes.is_code(F) or ida_bytes.is_data(F)
+                    else "undefined bytes have no format to change -- define "
+                    "them first ('d' makes data, 'c' makes code)"
+                )
                 return {"addr": hex(ea), "text": before, "error": why}
             n = cands[0]
 
@@ -1148,9 +1278,12 @@ def op_format(
     # The ring is a property of the OPERAND, not of what you last pressed: every
     # stop is one that changes what you see for this value, and it is the same
     # ring at every step, so a lap always comes home.
-    choices = [f for f in _IDATUI_FMT_CYCLE
-               if (f != "char" or _idatui_printable(value))
-               and (f != "offset" or _idatui_offset_worth(value))]
+    choices = [
+        f
+        for f in _IDATUI_FMT_CYCLE
+        if (f != "char" or _idatui_printable(value))
+        and (f != "offset" or _idatui_offset_worth(value))
+    ]
     # A stack variable is deliberately NOT a stop: ``[rbp+var_40]`` is a frame
     # member, not a way of writing a number, and IDA's own "is this a stack
     # variable" test isn't exposed to Python here (calc_stkvar_struc_offset
@@ -1160,10 +1293,18 @@ def op_format(
 
     mode = str(mode or "cycle").lower()
     if mode == "show":
-        return {"addr": hex(ea), "n": n, "format": cur, "prev": cur,
-                "choices": choices, "text": before, "before": before,
-                "value": None if value is None else hex(value),
-                "width": width, "applied": False}
+        return {
+            "addr": hex(ea),
+            "n": n,
+            "format": cur,
+            "prev": cur,
+            "choices": choices,
+            "text": before,
+            "before": before,
+            "value": None if value is None else hex(value),
+            "width": width,
+            "applied": False,
+        }
     if mode in ("cycle", "back"):
         step = 1 if mode == "cycle" else -1
         if cur in choices:
@@ -1176,31 +1317,51 @@ def op_format(
     else:
         want = mode
         if want not in _idatui_fmt_nibbles():
-            return {"addr": hex(ea), "n": n, "text": before,
-                    "error": f"unknown format {mode!r}; one of "
-                             + ", ".join(_IDATUI_FMT_SETTABLE)}
+            return {
+                "addr": hex(ea),
+                "n": n,
+                "text": before,
+                "error": f"unknown format {mode!r}; one of "
+                + ", ".join(_IDATUI_FMT_SETTABLE),
+            }
         if want == "offset" and not mapped:
-            return {"addr": hex(ea), "n": n, "text": before, "format": cur,
-                    "error": (f"{'0x%x' % value if value is not None else 'this operand'}"
-                              " isn't a mapped address -- an offset to it would"
-                              " invent a name for nothing")}
+            return {
+                "addr": hex(ea),
+                "n": n,
+                "text": before,
+                "format": cur,
+                "error": (
+                    f"{'0x%x' % value if value is not None else 'this operand'}"
+                    " isn't a mapped address -- an offset to it would"
+                    " invent a name for nothing"
+                ),
+            }
 
     ok, err = _idatui_apply_fmt(ea, n, want)
     if err:
-        return {"addr": hex(ea), "n": n, "text": before, "format": cur,
-                "error": err}
+        return {"addr": hex(ea), "n": n, "text": before, "format": cur, "error": err}
     got = _idatui_op_fmt(ea, n)
-    out = {"addr": hex(ea), "n": n, "prev": cur, "format": got,
-           "requested": want, "applied": bool(ok), "choices": choices,
-           "before": before, "text": _idatui_line_text(ea),
-           "value": None if value is None else hex(value), "width": width}
+    out = {
+        "addr": hex(ea),
+        "n": n,
+        "prev": cur,
+        "format": got,
+        "requested": want,
+        "applied": bool(ok),
+        "choices": choices,
+        "before": before,
+        "text": _idatui_line_text(ea),
+        "value": None if value is None else hex(value),
+        "width": width,
+    }
     if not ok:
         out["error"] = f"IDA refused {want} on operand {n}"
     elif lossy:
-        out["warn"] = (
-            f"operand {n} was {cur} and the ring has no stop there -- "
-            + (f"'{cur}' sets it again" if cur in _IDATUI_FMT_SETTABLE else
-               f"{cur} names a type this can't put back, reassign it by hand"))
+        out["warn"] = f"operand {n} was {cur} and the ring has no stop there -- " + (
+            f"'{cur}' sets it again"
+            if cur in _IDATUI_FMT_SETTABLE
+            else f"{cur} names a type this can't put back, reassign it by hand"
+        )
     return out
 
 
@@ -1267,13 +1428,18 @@ def _idatui_lit_extent(plain, x):
     around the column, which cannot reach a ``)`` or a space."""
     if x >= len(plain):
         return None
-    if plain[x] == "'":                       # a character constant: '-'
+    if plain[x] == "'":  # a character constant: '-'
         end = plain.find("'", x + 1)
         return (x, end + 1) if end > x else None
     lo = plain.rfind("'", 0, x)
-    if lo >= 0 and plain.find("'", x) > x and "'" in plain[lo:x] and \
-            plain[lo:x].count("'") == 1 and " " not in plain[lo:x]:
-        return (lo, plain.find("'", x) + 1)   # inside 'c'
+    if (
+        lo >= 0
+        and plain.find("'", x) > x
+        and "'" in plain[lo:x]
+        and plain[lo:x].count("'") == 1
+        and " " not in plain[lo:x]
+    ):
+        return (lo, plain.find("'", x) + 1)  # inside 'c'
     if plain[x] not in _IDATUI_LIT_CHARS:
         return None
     lo = x
@@ -1282,7 +1448,7 @@ def _idatui_lit_extent(plain, x):
     hi = x
     while hi < len(plain) and plain[hi] in _IDATUI_LIT_CHARS:
         hi += 1
-    if lo > 0 and plain[lo - 1] == "-":       # a unary minus is part of it
+    if lo > 0 and plain[lo - 1] == "-":  # a unary minus is part of it
         lo -= 1
     return (lo, hi)
 
@@ -1321,26 +1487,36 @@ def _idatui_pc_nums(cf, sl):
             continue
         nf = e.n.nf
         opnum = ord(nf.opnum) if isinstance(nf.opnum, str) else int(nf.opnum)
-        nbytes = (ord(nf.org_nbytes) if isinstance(nf.org_nbytes, str)
-                  else int(nf.org_nbytes))
+        nbytes = (
+            ord(nf.org_nbytes) if isinstance(nf.org_nbytes, str) else int(nf.org_nbytes)
+        )
         ea = int(e.ea)
         if ea == idaapi.BADADDR:
             x = extent[1]
-            continue                      # synthesised: nothing to key on
+            continue  # synthesised: nothing to key on
         nib = (nf.flags >> ida_bytes.get_operand_type_shift(opnum)) & 0xF
         # Whether this format is the USER's or Hex-Rays' own guess. The nibble
         # can't say: an untouched number reads back as whatever it happens to
         # be printed as, and cycling from there would skip that stop forever
         # (default already looks like it) and never come back to it.
         loc = ida_hexrays.operand_locator_t(ea, opnum)
-        user = (ida_hexrays.user_numforms_find(cf.numforms, loc)
-                != ida_hexrays.user_numforms_end(cf.numforms))
-        out.append({"x0": extent[0], "x1": extent[1], "ea": ea,
-                    "opnum": opnum, "value": int(e.n._value),
-                    "nbytes": nbytes, "user": user,
-                    "fmt": _idatui_fmt_name(nib) if user else "default",
-                    "shown": _idatui_fmt_name(nib)})
-        x = extent[1]                     # past this literal, not into it
+        user = ida_hexrays.user_numforms_find(
+            cf.numforms, loc
+        ) != ida_hexrays.user_numforms_end(cf.numforms)
+        out.append(
+            {
+                "x0": extent[0],
+                "x1": extent[1],
+                "ea": ea,
+                "opnum": opnum,
+                "value": int(e.n._value),
+                "nbytes": nbytes,
+                "user": user,
+                "fmt": _idatui_fmt_name(nib) if user else "default",
+                "shown": _idatui_fmt_name(nib),
+            }
+        )
+        x = extent[1]  # past this literal, not into it
     return out
 
 
@@ -1367,31 +1543,36 @@ def pc_nums(
     try:
         cf = ida_hexrays.decompile(f.start_ea)
     except Exception as e:
-        return {"addr": hex(f.start_ea), "error": f"decompile failed: {e}",
-                "nums": []}
+        return {"addr": hex(f.start_ea), "error": f"decompile failed: {e}", "nums": []}
     if cf is None:
-        return {"addr": hex(f.start_ea), "error": "decompilation failed",
-                "nums": []}
+        return {"addr": hex(f.start_ea), "error": "decompilation failed", "nums": []}
     sv = cf.get_pseudocode()
     out = []
     for i in range(len(sv)):
         plain = ida_lines.tag_remove(sv[i].line)
         compact = _idatui_compact(plain)
         for rec in _idatui_pc_nums(cf, sv[i]):
-            out.append({
-                "line": i,
-                "x0": _idatui_compact_col(plain, compact, rec["x0"]),
-                "x1": _idatui_compact_col(plain, compact, rec["x1"]),
-                "ea": hex(rec["ea"]), "opnum": rec["opnum"],
-                "value": hex(rec["value"]), "fmt": rec["fmt"],
-                "shown": rec["shown"], "user": bool(rec["user"]),
-            })
+            out.append(
+                {
+                    "line": i,
+                    "x0": _idatui_compact_col(plain, compact, rec["x0"]),
+                    "x1": _idatui_compact_col(plain, compact, rec["x1"]),
+                    "ea": hex(rec["ea"]),
+                    "opnum": rec["opnum"],
+                    "value": hex(rec["value"]),
+                    "fmt": rec["fmt"],
+                    "shown": rec["shown"],
+                    "user": bool(rec["user"]),
+                }
+            )
     return {"addr": hex(f.start_ea), "nums": out, "lines": len(sv)}
 
 
 def pc_num_format(
     addr: Annotated[str, "Function address (or any address inside it)"],
-    mode: Annotated[str, "cycle | back | show | hex | dec | oct | char | default"] = "cycle",
+    mode: Annotated[
+        str, "cycle | back | show | hex | dec | oct | char | default"
+    ] = "cycle",
     line: Annotated[int, "0-based pseudocode line index"] = -1,
     col: Annotated[int, "Cursor column in the DISPLAYED line (-1: first literal)"] = -1,
     ea: Annotated[str, "Address of the number instead of line/col"] = "",
@@ -1431,8 +1612,9 @@ def pc_num_format(
             return {"addr": hex(f.start_ea), "error": str(e)}
         for i in range(len(sv)):
             for rec in _idatui_pc_nums(cf, sv[i]):
-                if rec["ea"] == want_ea and (int(opnum) < 0
-                                             or rec["opnum"] == int(opnum)):
+                if rec["ea"] == want_ea and (
+                    int(opnum) < 0 or rec["opnum"] == int(opnum)
+                ):
                     target, line = rec, i
                     break
             if target:
@@ -1446,26 +1628,42 @@ def pc_num_format(
                 target = next((r for r in nums if r["x0"] <= x < r["x1"]), None)
             target = target or nums[0]
     else:
-        return {"addr": hex(f.start_ea),
-                "error": f"line {line} is outside the {len(sv)}-line decompilation"}
+        return {
+            "addr": hex(f.start_ea),
+            "error": f"line {line} is outside the {len(sv)}-line decompilation",
+        }
     if target is None:
-        return {"addr": hex(f.start_ea), "line": line,
-                "text": (ida_lines.tag_remove(sv[line].line).strip()
-                         if 0 <= line < len(sv) else ""),
-                "error": "no number literal on this line"}
+        return {
+            "addr": hex(f.start_ea),
+            "line": line,
+            "text": (
+                ida_lines.tag_remove(sv[line].line).strip()
+                if 0 <= line < len(sv)
+                else ""
+            ),
+            "error": "no number literal on this line",
+        }
 
     cur, value = target["fmt"], target["value"]
-    choices = [c for c in _IDATUI_PC_FMT_CYCLE
-               if c != "char" or _idatui_printable(value)]
+    choices = [
+        c for c in _IDATUI_PC_FMT_CYCLE if c != "char" or _idatui_printable(value)
+    ]
     # Same rule as the listing: one ring per literal, every step. A format the
     # ring can't hold (an enum set in the GUI) is reported on the way out
     # instead of being kept for one lap and then lost.
     lossy = cur not in choices and cur != "default"
-    out = {"addr": hex(f.start_ea), "ea": hex(target["ea"]),
-           "opnum": target["opnum"], "line": line, "prev": cur,
-           "format": cur, "shown": target["shown"], "choices": choices,
-           "value": hex(value),
-           "before": ida_lines.tag_remove(sv[line].line).strip()}
+    out = {
+        "addr": hex(f.start_ea),
+        "ea": hex(target["ea"]),
+        "opnum": target["opnum"],
+        "line": line,
+        "prev": cur,
+        "format": cur,
+        "shown": target["shown"],
+        "choices": choices,
+        "value": hex(value),
+        "before": ida_lines.tag_remove(sv[line].line).strip(),
+    }
 
     mode = str(mode or "cycle").lower()
     if mode == "show":
@@ -1481,13 +1679,16 @@ def pc_num_format(
     else:
         want = mode
         if want in ("bin", "offset", "stack", "seg", "float"):
-            out["error"] = (f"Hex-Rays has no {want} format for a number "
-                            f"-- set it on the listing instead")
+            out["error"] = (
+                f"Hex-Rays has no {want} format for a number "
+                f"-- set it on the listing instead"
+            )
             out["text"] = out["before"]
             return out
         if want not in ("hex", "dec", "oct", "char", "default"):
-            out["error"] = (f"unknown format {mode!r}; one of hex, dec, oct, "
-                            f"char, default")
+            out["error"] = (
+                f"unknown format {mode!r}; one of hex, dec, oct, char, default"
+            )
             out["text"] = out["before"]
             return out
 
@@ -1499,8 +1700,9 @@ def pc_num_format(
         ida_hexrays.user_numforms_erase(cf.numforms, it)
     if want != "default":
         nf = ida_hexrays.number_format_t(target["opnum"])
-        nf.flags = ida_bytes.get_operand_flag(_idatui_fmt_nibbles()[want],
-                                              target["opnum"])
+        nf.flags = ida_bytes.get_operand_flag(
+            _idatui_fmt_nibbles()[want], target["opnum"]
+        )
         try:
             nf.org_nbytes = target["nbytes"]
         except Exception:
@@ -1515,14 +1717,18 @@ def pc_num_format(
     out["format"] = want
     out["applied"] = True
     if lossy:
-        out["warn"] = (f"this number was {cur}, which names a type a radix "
-                       f"can't put back -- reassign it in IDA")
+        out["warn"] = (
+            f"this number was {cur}, which names a type a radix "
+            f"can't put back -- reassign it in IDA"
+        )
     try:
-        cf2 = ida_hexrays.decompile(f.start_ea,
-                                    flags=ida_hexrays.DECOMP_NO_CACHE)
+        cf2 = ida_hexrays.decompile(f.start_ea, flags=ida_hexrays.DECOMP_NO_CACHE)
         sv2 = cf2.get_pseudocode() if cf2 is not None else None
-        out["text"] = (ida_lines.tag_remove(sv2[line].line).strip()
-                       if sv2 is not None and line < len(sv2) else out["before"])
+        out["text"] = (
+            ida_lines.tag_remove(sv2[line].line).strip()
+            if sv2 is not None and line < len(sv2)
+            else out["before"]
+        )
     except Exception as e:
         out["text"] = out["before"]
         out["warn"] = f"re-render failed: {e}"
@@ -1557,11 +1763,17 @@ def decompile(addr, include_addresses=True):
     try:
         cfunc = ida_hexrays.decompile_func(fn, failure)
     except Exception as e:
-        return {"addr": hex(int(fn.start_ea)), "code": None,
-                "error": f"Decompilation failed at {ea:#x}: {e}"}
+        return {
+            "addr": hex(int(fn.start_ea)),
+            "code": None,
+            "error": f"Decompilation failed at {ea:#x}: {e}",
+        }
     if cfunc is None:
-        return {"addr": hex(int(fn.start_ea)), "code": None,
-                "error": failure.desc() or f"Decompilation failed at {ea:#x}"}
+        return {
+            "addr": hex(int(fn.start_ea)),
+            "code": None,
+            "error": failure.desc() or f"Decompilation failed at {ea:#x}",
+        }
 
     lines = []
     for sl in cfunc.get_pseudocode():
@@ -1569,7 +1781,9 @@ def decompile(addr, include_addresses=True):
         item = ida_hexrays.ctree_item_t()
         tail = ida_hexrays.ctree_item_t()
         line_ea = None
-        if include_addresses and cfunc.get_line_item(sl.line, 0, False, head, item, tail):
+        if include_addresses and cfunc.get_line_item(
+            sl.line, 0, False, head, item, tail
+        ):
             parts = (item.dstr() or "").split(": ")
             if len(parts) == 2:
                 try:
@@ -1595,9 +1809,13 @@ def decompile(addr, include_addresses=True):
                         text = raw.decode("utf-8", "replace") if raw else None
                     except Exception:
                         text = None
-                    refs.append({"addr": hex(target),
-                                 "name": ida_name.get_name(target) or "",
-                                 "string": text})
+                    refs.append(
+                        {
+                            "addr": hex(target),
+                            "name": ida_name.get_name(target) or "",
+                            "string": text,
+                        }
+                    )
             return 0
 
     try:
@@ -1615,6 +1833,7 @@ def decomp_map(
     swept across the line's columns via get_line_item. Shape:
     {addr, lines:[{ea: primary|None, eas:[hex,...]}, ...]}."""
     import ida_hexrays
+
     try:
         ea = int(str(addr), 16)
     except ValueError:
@@ -1691,3 +1910,32 @@ def decomp_map(
                 eas.append(hex(e))
         lines.append({"ea": eas[0] if eas else None, "eas": eas})
     return {"addr": hex(func.start_ea), "lines": lines}
+
+
+def profile_remote(operation, args, reps=5):
+    """Profile one persistent remote tool entirely inside IDA."""
+    import cProfile
+    import io
+    import pstats
+
+    functions = {
+        "heads": heads,
+        "segment_index": segment_index,
+        "op_format": op_format,
+        "pc_nums": pc_nums,
+        "decompile": decompile,
+        "decomp_map": decomp_map,
+        "pc_num_format": pc_num_format,
+    }
+    function = functions.get(str(operation))
+    if function is None:
+        raise ValueError(f"unknown profile operation: {operation!r}")
+    profiler = cProfile.Profile()
+    for _ in range(max(1, int(reps))):
+        profiler.runcall(function, **dict(args))
+    stats = pstats.Stats(profiler)
+    output = io.StringIO()
+    stats.stream = output
+    stats.sort_stats("tottime")
+    stats.print_stats(80)
+    return {"stats": output.getvalue(), "total": stats.total_tt, "reps": reps}

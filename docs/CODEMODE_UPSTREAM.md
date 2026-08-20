@@ -11,17 +11,18 @@ unnecessary.
 **Environment:** ida-codemode 0.3.1, IDA 9.4 (idalib), Linux, single managed
 worker backend, quiet box. Target for timings: `targets/echo` unless stated.
 
-> **Status against 0.6.1 (upstream `439289f`) — every item re-checked.**
+> **Status against the protocol-6 event-stream development tree, based on 0.6.1
+> (upstream `439289f`) — every item re-checked.**
 >
 > | item | verdict |
 > |---|---|
 > | 1 `timeout_trace` line tracing | ✅ **fixed in 0.3.2** — no `settrace` in the runtime at all |
 > | 2 `to_jsonable` on large results | ✅ **fixed in 0.3.2** — `dumps_json` C fast path |
 > | 3 2 ms `execute_sync` floor | ✅ **fixed in 0.3.2, 7.0x** — 2.055 ms → 0.294 ms |
-> | 4 loader switches fatal on reopen | ✅ **fixed in 0.5.x** — see the caveat in §4 |
-> | 5 IDB replaced under a live lease | ❌ open |
-> | 6 no close-without-save | ❌ open |
-> | 7 no change notification | ⚠️ partial — `DatabaseEventCallback` exists on `DatabaseManager`, but there is still no revision counter for an *external* caching client |
+> | 4 loader switches fatal on reopen | **partial** — normal reopen fixed in 0.5.x; direct `.i64` paths remain [issue #36](https://github.com/HexRaysSA/ida-codemode/issues/36) |
+> | 5 IDB replaced under a live lease | **stale** — out-of-band replacement is outside the supported lifecycle, as it is for the IDA GUI |
+> | 6 close without save | **fixed in protocol 6** — the final managed-worker lease can choose `shutdown_database(save=False)` |
+> | 7 no change notification | ✅ **fixed in protocol 6** — `DatabaseHandle.subscribe_idb_events()` streams revisioned, operation-attributed IDB changes |
 > | 8 package exports | ✅ **fixed in 0.5.x** — a real `__all__` on the package root |
 > | 9 no `py.typed` / handle Protocol | ✅ **fixed in 0.5.x** — `ida_codemode/py.typed` ships |
 >
@@ -38,9 +39,10 @@ worker backend, quiet box. Target for timings: `targets/echo` unless stated.
 > between those two releases. 0.6.1 only collapses the six console scripts into a
 > single `ida-codemode` command.
 >
-> Both of our client-side workarounds re-measured at **0.99x and 0.97x** on 0.3.2
-> — i.e. nothing. The settrace strip has been deleted; `_PACK_EPILOGUE` is kept
-> only for encoder determinism. Harness: `experiments/bench_pack_trace.py`.
+> Both client-side workarounds re-measured at **0.99x and 0.97x** on 0.3.2 —
+> i.e. nothing — and are deleted. Remote code is now ordinary typed Python,
+> installed as content-addressed modules by ida-codemode. Harness:
+> `experiments/bench_pack_trace.py`.
 
 **What the client does**, for scale: it renders a continuous disassembly listing,
 pseudocode, a CFG graph view and a hex view, paging over the database as the user
@@ -108,10 +110,10 @@ and do the same, which is an argument for fixing it in the runtime.
 
 ## 2. `to_jsonable` dominates any large result
 
-✅ **FIXED in 0.3.2**, via the first suggested fix below: `serialization.dumps_json`
-calls `json.dumps(value, default=to_jsonable)`, so a JSON-safe result never enters
-the Python walker. Our packing workaround now measures 0.97x and is retained only
-to pin encoder settings, not for speed.
+**FIXED in 0.3.2**, via the first suggested fix below:
+`serialization.dumps_json` calls `json.dumps(value, default=to_jsonable)`, so a
+JSON-safe result never enters the Python walker. Our packing workaround measured
+0.97x and has been deleted.
 
 `execute_python` runs `to_jsonable()` over whatever the snippet returns. Our
 answers are already JSON-safe and they are big — a 200-row listing page is
@@ -133,10 +135,10 @@ That is 114x, and it was 72% of the page's total cost before we changed it.
   envelope such as `{"__json__": "<...>"}`, or simply passing `str`/`bytes`
   through untouched.
 
-**Our workaround:** snippets `json.dumps` inside the database process and return
-one string, which the client parses. `to_jsonable` then walks a single scalar.
-Cost went 66.2 ms → ~0.6 ms. It works, but every client with a large result set
-has to discover and re-implement it.
+**Retired workaround:** snippets used to `json.dumps` inside the database process
+and return one string, which the client parsed. The typed remote API now owns
+strict argument/result encoding, and ida-tui contains no generated script
+strings or packing envelope.
 
 ---
 
@@ -181,7 +183,7 @@ would let chatty clients amortise it without redesigning around it.
 
 ---
 
-## 4. Loader switches on an existing database are a FATAL, not an error
+## 4. Loader switches on an existing database are a FATAL, not an error — one edge remains
 
 Opening a target that already has an `.i64`, while passing spawn-only options,
 kills the worker:
@@ -226,57 +228,74 @@ Our workaround is therefore deleted. **One narrow case remains**: the strip need
 `input_path != source`, so passing an `.i64` path *directly* together with load
 options (`ida-tui foo.i64 --processor arm`) still forwards the switches and still
 fatals. Our old guard keyed on "the target IDB exists" and so covered it. It is a
-nonsense invocation and no idatui code path generates it — the project layer
+nonsense invocation and no ida-tui code path generates it — the project layer
 always passes `output_database`, and `_needs_load_options` bails when an `.i64`
-exists — but if this ever resurfaces as "worker exited with status 1", that is
-where it comes from.
+exists — but the library boundary should still reject or normalize it rather
+than launch a known-fatal IDA command. Tracked upstream as
+[issue #36](https://github.com/HexRaysSA/ida-codemode/issues/36).
 
 ---
 
-## 5. Deleting or replacing an IDB under a live lease fails silently
+## 5. Deleting or replacing an IDB under a live lease — STALE
 
-A suite that did "delete the `.i64`, reopen the same path" (safe when it owned a
-private worker) now races the previous worker's lease grace. The reopen produced
-a handle that never became usable, with no error — just a database with no
-listing, and every wait timing out.
+The original suite deleted an `.i64` while a private worker still had it open,
+then immediately reopened the same path. That ownership model no longer applies:
+Code Mode databases are shared resources, and the IDA GUI itself does not survive
+out-of-band replacement of its open database. Detecting arbitrary filesystem
+replacement is therefore not part of the supported lifecycle.
 
-**Suggested fixes**
+The actionable lifecycle gaps that originally forced private-registry access are
+fixed. `find_database_owner()` and `wait_database_released()` are public exports;
+`DatabaseHandle.close(wait_for_database=True)` can wait for a final managed close;
+a draining owner remains registered until the IDB is actually closed; and
+`new_database=True` refuses to replace a live owner.
 
-- Detect that the IDB backing a registered instance has been removed or replaced
-  and fail loudly (the registry already holds `idb_key`).
-- Expose a **public** "wait until this database is released" primitive. We needed
-  one and ended up reaching into `registry.REGISTRY_DIR` and `FileLock` to build
-  it, which is not an API we should be depending on.
-- Document the lease-grace window as part of the lifecycle contract.
-
----
-
-## 6. No close-without-save, and no rollback
-
-A managed worker saves when its final lease closes. A GUI handle leaves GUI state
-as-is. Neither gives a client a way to say "discard what I did".
-
-ida-tui had a "discard & quit" that we could not port; it is now "leave as-is &
-quit", and we cannot honestly promise the user their edits are not persisted.
-
-**Suggested fixes:** a close policy on a lease the client created
-(`close(save=False)`), or a transaction/rollback API, or a documented
-disposable-copy pattern that clients can follow.
+ida-tui now uses the public owner/release API while recreating a database and no
+longer reaches into registry locks. Owner loss is attach-only: ida-tui will
+rediscover a replacement GUI or worker, but will never turn a
+user-closing-the-GUI action into an implicit headless reopen. There is no
+remaining upstream request in this section.
 
 ---
 
-## 7. No change notification for shared databases
+## 6. Close without save — FIXED in protocol 6
 
-The lease reports liveness, not mutations. If a GUI user or another Code Mode
-client renames or retypes while we are attached, our materialised caches (name
-generation, decompilation, listing pages) are silently stale. Our own edits
-invalidate correctly; someone else's cannot.
+`DatabaseHandle.shutdown_database(save=False)` can discard a managed idalib
+worker when the requesting handle is its only active lease and no other operation
+is running. The server rejects GUI databases and shared workers.
 
-**Suggested fix — cheap and sufficient:** a monotonic database revision counter,
-bumped on any mutating operation and exposed on `/health` (and ideally on the
-lease event stream). Clients can then invalidate by comparing one integer. A full
-change feed would be better but is much more work; the counter alone would make
-shared editing safe for every caching client.
+The coherent ownership model is the **final lease**, not necessarily the lease
+that spawned the worker. Releasing a non-final lease makes no whole-database save
+decision; responsibility transfers to the leases that remain. The final client
+can save or discard the shared session. A client that needs its work to survive
+regardless of that later decision must call `save_database()` before releasing
+its lease.
+
+This does not claim to provide per-client rollback. Discard applies to all
+changes since the last database save, and attempting it while another lease is
+active is correctly rejected. That is the same ref-counted lifetime model used
+by other shared resources and requires no separate starter capability.
+
+The upstream gap is therefore closed. ida-tui now routes its discard action
+through `shutdown_database(save=False)`: a final managed-worker lease discards,
+while GUI-backed and still-shared sessions transfer finalization to their owner
+or remaining leases.
+
+---
+
+## 7. No change notification for shared databases — FIXED in protocol 6
+
+`DatabaseHandle.subscribe_idb_events()` now returns a closeable iterator over
+structured IDB changes. Each event carries a monotonic revision plus
+`operation_id`/`operation_label` attribution and an opaque `origin_id`.
+`DatabaseHandle.owns_event()` compares that origin with the handle's lease, so a
+caching client does not need to generate, retain, or race operation IDs itself.
+
+ida-tui keeps one subscription for its active database, asks the handle to drop
+its own events, and batches peer events behind a 200 ms quiet period. One batch
+invalidates the function, listing, decompiler, graph, strings, linkage, segment
+and byte caches, then reloads the visible view in place. Closing or switching
+databases closes the subscription, so the blocking event reader does not leak.
 
 ---
 
@@ -340,10 +359,10 @@ dataclass fields), because the offline contract suite must keep running with no
 | ~~1~~ | ~~`timeout_trace` line tracing~~ | ~~52x on IDA calls~~ | ✅ fixed in 0.3.2 |
 | ~~2~~ | ~~`to_jsonable` on large results~~ | ~~114x on serialisation~~ | ✅ fixed in 0.3.2 |
 | ~~3~~ | ~~2 ms `execute_sync` floor~~ | ~~shapes client design~~ | ✅ fixed in 0.3.2, 7.0x |
-| 7 | no change/revision counter | correctness for shared editing | yes, cheap |
-| ~~4~~ | ~~loader switches fatal on reopen~~ | ~~crashes, hard to diagnose~~ | ✅ fixed in 0.5.x (one edge, §4) |
-| 5 | replaced/deleted IDB under lease | silent hang | yes |
-| 6 | no close-without-save | a feature we had to drop | design question |
+| ~~7~~ | ~~no change/revision counter~~ | ~~correctness for shared editing~~ | ✅ fixed in protocol 6 |
+| 4 | direct `.i64` forwards loader-only options | fatal worker startup | [issue #36](https://github.com/HexRaysSA/ida-codemode/issues/36) |
+| ~~5~~ | ~~replaced/deleted IDB under lease~~ | ~~out-of-contract filesystem mutation~~ | **stale** |
+| ~~6~~ | ~~no close without save~~ | ~~could not discard a managed session~~ | **fixed in protocol 6: final lease decides** |
 | ~~8~~ | ~~package exports~~ | ~~forces internal imports~~ | ✅ fixed in 0.5.x |
 | ~~9~~ | ~~typed handle for fakes~~ | ~~catches a whole bug class~~ | ✅ fixed in 0.5.x (`py.typed` + options dataclass) |
 
@@ -356,13 +375,11 @@ worth fixing centrally rather than leaving each client to rediscover.
 fixed upstream, and both client-side workarounds could be measured at parity and
 retired. That is the outcome this document was written for.
 
-**What is left is entirely non-performance**: 0.5.x then fixed the API-surface
-items (4, 8, 9) — the package root is a real public API, `py.typed` ships, and
-the loader-switch fatal is handled in the resolver. What remains open is
-lifecycle: **5** (replacing an IDB under a live lease), **6** (close without
-save) and **7** — a monotonic revision counter on `/health`, still the cheapest
-large win for any caching client, and still the one thing an *external* client
-cannot build for itself.
+**What is left is entirely non-performance.** Items 6 through 9 are fixed, and
+item 5 is stale because out-of-band replacement is not a supported lifecycle for
+either Code Mode or the IDA GUI. One narrow piece remains: **4**, normalize or
+reject loader-only options when the source is itself an existing `.i64`
+([issue #36](https://github.com/HexRaysSA/ida-codemode/issues/36)).
 
 Happy to supply the benchmark harness (it is backend-agnostic and runs against
 both our old worker and Code Mode), or to test a patch.

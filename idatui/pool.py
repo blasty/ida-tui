@@ -225,6 +225,28 @@ class DatabasePool:
             self.evict(label, save=save, save_gui=save)
         self.active = None
 
+    def discard_changes(self, labels: list[str]) -> list[str]:
+        """Discard final managed sessions; return labels whose owner remains.
+
+        A returned label is not an error: its client is attached to a GUI or a
+        still-shared worker, so releasing our lease transfers finalization to
+        that session's owner or remaining clients.
+        """
+        transferred: list[str] = []
+        for label in labels:
+            client = self._clients.get(label)
+            if client is not None and not client.discard_database():
+                transferred.append(label)
+        return transferred
+
+    def replace_client(self, label: str, old, new) -> bool:
+        """Replace one disconnected lease without changing residency policy."""
+        if self._clients.get(label) is not old:
+            return False
+        self._clients[label] = new
+        self._touch(label)
+        return True
+
     # -- introspection ------------------------------------------------------ #
     def status(self) -> list[dict]:
         """Per-binary residency for the switcher UI."""
