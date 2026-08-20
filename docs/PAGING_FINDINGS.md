@@ -3,9 +3,9 @@
 Measured against a real target: `libcrypto.so.3` (5.7 MB, **10,092 functions**,
 biggest function **52,120 instructions**). These constraints drive the domain /
 paging layer. The measurements below came from the former ida-pro-mcp tool
-backend. The Code Mode port preserves the adapter response shapes and conservative
+backend. The IDA Nexus port preserves the adapter response shapes and conservative
 page sizes, but executes enumeration through ida-domain; old server caps and RTT
-numbers are historical rather than Code Mode constraints.
+numbers are historical rather than IDA Nexus constraints.
 
 ## Response shape (list_* / *_query tools)
 
@@ -93,17 +93,17 @@ disasm totals are **top-level** fields, not under `asm`:
 (correct). The pseudocode view must handle "decompilation failed" gracefully —
 fall back to the disassembly view or show an error panel.
 
-Code Mode returns the complete execution result directly; ida-tui no longer
+IDA Nexus returns the complete execution result directly; ida-tui no longer
 needs MCP structured-content/download-URL recovery for large pseudocode bodies.
 
-## Code Mode lifecycle
+## IDA Nexus lifecycle
 
-`CodeModeClient` owns an authenticated SSE lease on a registered database:
+`NexusClient` owns an authenticated SSE lease on a registered database:
 
 * A matching GUI is preferred and remains open when the TUI exits.
-* Otherwise Code Mode reuses or starts a shared managed idalib worker.
+* Otherwise IDA Nexus reuses or starts a shared managed idalib worker.
 * Releasing one lease never terminates another client's session. A managed
-  worker saves and exits after its final lease under Code Mode's grace policy.
+  worker saves and exits after its final lease under IDA Nexus's grace policy.
 * Lease loss surfaces as `IDAConnectionError`; reconnect performs discovery
   again and may bind a newly-created instance. It does not silently swap the
   handle underneath an operation.

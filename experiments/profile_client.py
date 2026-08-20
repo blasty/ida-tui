@@ -21,7 +21,7 @@ import pstats
 import time
 
 from idatui import remote_ops
-from idatui.codemode_client import CodeModeClient
+from idatui.nexus_client import NexusClient
 from idatui.domain import Program
 
 
@@ -35,7 +35,7 @@ def main() -> int:
     )
     args = ap.parse_args()
 
-    client = CodeModeClient(os.path.abspath(args.binary))
+    client = NexusClient(os.path.abspath(args.binary))
     client.connect()
     program = Program(client)
     regions = client.call(remote_ops.file_regions)

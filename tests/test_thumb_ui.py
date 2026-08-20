@@ -50,7 +50,7 @@ def check(name, ok, detail=""):
 #:
 #: This suite used to delete <BIN>.i64 and reopen the SAME path for each phase.
 #: That was safe when the TUI owned a private worker that died with it; under
-#: Code Mode the database is leased and the previous phase's worker can still
+#: IDA Nexus the database is leased and the previous phase's worker can still
 #: hold it through its lease grace, so the delete raced a live owner and the
 #: next open never produced a listing (the crash this fixed). Separate paths
 #: cannot collide, and nothing has to wait for anyone else to let go.

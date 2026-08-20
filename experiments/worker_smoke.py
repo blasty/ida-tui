@@ -1,6 +1,6 @@
-"""Exercise the real domain.Program through an IDA Code Mode lease.
+"""Exercise the real domain.Program through an IDA Nexus lease.
 
-A matching registered GUI is reused; otherwise Code Mode starts a managed
+A matching registered GUI is reused; otherwise IDA Nexus starts a managed
 idalib worker. Usage: ``uv run python experiments/worker_smoke.py FILE``.
 """
 from __future__ import annotations
@@ -9,15 +9,15 @@ import os
 import sys
 import time
 
-from idatui.codemode_client import CodeModeClient
+from idatui.nexus_client import NexusClient
 from idatui.domain import Program
 
 
 def main() -> int:
     target = os.path.abspath(sys.argv[1] if len(sys.argv) > 1 else "experiments/fibonacci.elf")
-    print(f"attaching Code Mode to {target}…", flush=True)
+    print(f"attaching IDA Nexus to {target}…", flush=True)
     started = time.time()
-    client = CodeModeClient(target)
+    client = NexusClient(target)
     client.connect(progress=lambda message: print(f"  {message}", flush=True))
     print(
         f"  ready in {time.time() - started:.2f}s; backend={client.backend}; "

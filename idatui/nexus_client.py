@@ -1,4 +1,4 @@
-"""Client adapter from ida-tui's domain operations to IDA Code Mode.
+"""Client adapter from ida-tui's domain operations to IDA Nexus.
 
 ``DatabaseHandle`` is the lifecycle boundary: it discovers an already-registered
 GUI database, reuses a shared managed idalib worker, or starts one when needed.
@@ -6,9 +6,9 @@ The TUI never owns or terminates an IDA process.  Closing this client releases
 only its lease.
 
 Remote operations are ordinary typed Python functions declared in
-``idatui.remote_ops``. Code Mode installs their content-addressed modules once
-per handle; subsequent calls send only encoded arguments. The optimized
-IDAPython listing/decompiler implementation remains real source in
+``idatui.remote_ops``. IDA Nexus installs their content-addressed modules once
+per IDA Python interpreter; subsequent calls send only encoded arguments. The
+optimized IDAPython listing/decompiler implementation remains real source in
 ``idatui.remote_tools`` and is installed through the same module interface.
 """
 
@@ -23,55 +23,55 @@ from typing import Any
 
 from .errors import IDAConnectionError, IDATimeoutError, IDAToolError, Session
 
-# ida_codemode is imported EAGERLY-IF-PRESENT but never at hard import cost.
+# ida_nexus is imported EAGERLY-IF-PRESENT but never at hard import cost.
 #
 # The paging/graph/trace layers and their offline test suites must keep importing
-# `idatui` on a machine with no IDA and no Code Mode installed -- that is the
+# `idatui` on a machine with no IDA and no IDA Nexus installed -- that is the
 # house rule the stdlib-only worker client used to satisfy for free, and
 # `tests/run.py --fast` (380 checks, any python3) depends on it. A hard top-level
 # import here makes the whole package unimportable, so the failure is deferred to
 # the first operation that genuinely needs the library.
-_CODEMODE_ERROR: Exception | None = None
+_NEXUS_ERROR: Exception | None = None
 try:
-    from ida_codemode import (
-        CodeModeConnectionError,
+    from ida_nexus import (
         DatabaseBusyError,
         DatabaseDisconnectedError,
         DatabaseHandle,
         DatabaseInstance,
         DatabaseOpenOptions,
+        NexusConnectionError,
         RemoteError,
         find_database_owner,
         wait_database_released,
     )
 except ImportError as _exc:  # library absent: usable only for offline layers
-    _CODEMODE_ERROR = _exc
+    _NEXUS_ERROR = _exc
     # Bound to None rather than left undefined so the names stay patchable: the
     # offline contract tests inject a fake DatabaseHandle here.
-    CodeModeConnectionError = DatabaseDisconnectedError = RemoteError = None  # type: ignore[assignment,misc]
+    NexusConnectionError = DatabaseDisconnectedError = RemoteError = None  # type: ignore[assignment,misc]
     DatabaseBusyError = DatabaseHandle = DatabaseInstance = None  # type: ignore[assignment,misc]
     DatabaseOpenOptions = find_database_owner = wait_database_released = None  # type: ignore[assignment]
 
 
-def _require_codemode() -> None:
-    """Raise an actionable error when the Code Mode library is missing.
+def _require_nexus() -> None:
+    """Raise an actionable error when the IDA Nexus library is missing.
 
     Gated on the binding, not on the original import result, so a test that
     injects a fake ``DatabaseHandle`` exercises the real adapter logic.
     """
     if DatabaseHandle is None:
         raise IDAConnectionError(
-            "ida-codemode is not installed in this environment "
-            f"({_CODEMODE_ERROR}). Install it (e.g. `uv sync`, or "
-            "`pip install ida-codemode`) so ida-tui can lease a "
+            "ida-nexus is not installed in this environment "
+            f"({_NEXUS_ERROR}). Install it (e.g. `uv sync`, or "
+            "`pip install ida-nexus`) so ida-tui can lease a "
             "database."
-        ) from _CODEMODE_ERROR
+        ) from _NEXUS_ERROR
 
 
 def database_owner(idb_path: str, staged_path: str | None = None):
-    """The Code Mode instance that owns ``idb_path``/``staged_path``, else None.
+    """The IDA Nexus instance that owns ``idb_path``/``staged_path``, else None.
 
-    Returns None when the Code Mode library is absent: with no library there is
+    Returns None when the IDA Nexus library is absent: with no library there is
     no client in this environment that could be holding the database, and the
     IDA-free layers (project staging) must keep working. Discovery errors with
     the library installed still propagate because unknown ownership is unsafe.
@@ -89,8 +89,8 @@ def database_owner(idb_path: str, staged_path: str | None = None):
 
 
 def registered_database(path: str, output_database: str | None = None) -> bool:
-    """Whether a live/lock-held Code Mode instance owns this target."""
-    _require_codemode()
+    """Whether a live/lock-held IDA Nexus instance owns this target."""
+    _require_nexus()
     return (
         find_database_owner(
             path,
@@ -115,9 +115,9 @@ class _NoopKeepAlive:
 
 
 def _parse_load_args(value: str) -> tuple[str | None, int | None, str | None]:
-    """Translate ida-tui's legacy first-open switches to Code Mode options.
+    """Translate ida-tui's legacy first-open switches to IDA Nexus options.
 
-    Code Mode has typed options for processor, natural loading address and file
+    IDA Nexus has typed options for processor, natural loading address and file
     type.  It deliberately has no arbitrary command-line escape hatch; reject
     switches we cannot represent instead of silently loading a blob wrongly.
     """
@@ -146,7 +146,7 @@ def _parse_load_args(value: str) -> tuple[str | None, int | None, str | None]:
     if unsupported:
         joined = " ".join(unsupported)
         raise ValueError(
-            "ida-codemode cannot represent arbitrary IDA load options: "
+            "ida-nexus cannot represent arbitrary IDA load options: "
             f"{joined!r}; use processor/base/file type options instead"
         )
     return processor, loading_address, file_type
@@ -155,7 +155,7 @@ def _parse_load_args(value: str) -> tuple[str | None, int | None, str | None]:
 class IDBEventListener:
     """Debounced, closeable delivery of another client's IDB changes.
 
-    Code Mode's subscription is a blocking iterator, so one daemon thread reads
+    IDA Nexus's subscription is a blocking iterator, so one daemon thread reads
     it and a second waits for a quiet period before handing a batch to the UI.
     Keeping the debounce here avoids a permanent Textual worker (which would
     make the app's worker-idle contract impossible) and bounds refresh work to
@@ -164,7 +164,7 @@ class IDBEventListener:
 
     def __init__(
         self,
-        client: "CodeModeClient",
+        client: "NexusClient",
         callback: Callable[[tuple[dict[str, Any], ...]], None],
         *,
         on_error: Callable[[BaseException], None] | None = None,
@@ -267,8 +267,8 @@ class IDBEventListener:
             subscription.close()
 
 
-class CodeModeClient:
-    """A leased GUI/idalib database accessed through ``ida_codemode``."""
+class NexusClient:
+    """A leased GUI/idalib database accessed through ``ida_nexus``."""
 
     def __init__(
         self,
@@ -298,23 +298,23 @@ class CodeModeClient:
         self._last_instance: DatabaseInstance | None = None
         self._connect_lock = threading.Lock()
 
-    def connect(self, timeout: float = 1800.0, progress=None) -> "CodeModeClient":
-        _require_codemode()
+    def connect(self, timeout: float = 1800.0, progress=None) -> "NexusClient":
+        _require_nexus()
         with self._connect_lock:
             handle = self._handle
             if handle is not None:
                 if handle.connected:
                     return self
                 raise IDAConnectionError(
-                    "Code Mode database disconnected; explicit rediscovery required"
+                    "IDA Nexus database disconnected; explicit rediscovery required"
                 )
             if progress:
                 progress(
-                    f"discovering Code Mode database for {os.path.basename(self._path)}…"
+                    f"discovering IDA Nexus database for {os.path.basename(self._path)}…"
                 )
             try:
                 # A Ctrl+L reload releases its current managed-worker lease, but
-                # that worker remains registered during Code Mode's final-lease
+                # that worker remains registered during IDA Nexus's final-lease
                 # grace period. Retry only that known handoff window. A GUI or
                 # another long-lived client remains busy and yields a clear
                 # failure rather than being modified underneath its owner.
@@ -329,7 +329,7 @@ class CodeModeClient:
                                 output_database=self._output_database,
                                 processor=self._processor,
                                 # The natural byte address is converted to IDA's
-                                # paragraph-based -b value by Code Mode.
+                                # paragraph-based -b value by IDA Nexus.
                                 image_base=self._loading_address,
                                 file_type=self._file_type,
                                 new_database=self._new_database,
@@ -341,7 +341,7 @@ class CodeModeClient:
                             raise
                         if progress:
                             progress(
-                                "waiting for the previous Code Mode lease to close…"
+                                "waiting for the previous IDA Nexus lease to close…"
                             )
                         owner = find_database_owner(
                             self._path,
@@ -389,15 +389,15 @@ class CodeModeClient:
         return handle is not None and handle.owns_event(event)
 
     def subscribe_idb_events(self):
-        """Open Code Mode's closeable IDB-change iterator."""
+        """Open IDA Nexus's closeable IDB-change iterator."""
         if not self.connected:
             self.connect()
         handle = self._handle
         if handle is None:
-            raise IDAConnectionError("Code Mode database is not connected")
+            raise IDAConnectionError("IDA Nexus database is not connected")
         try:
             return handle.subscribe_idb_events()
-        except (DatabaseDisconnectedError, CodeModeConnectionError) as exc:
+        except (DatabaseDisconnectedError, NexusConnectionError) as exc:
             raise self._connection_error(exc) from exc
 
     def watch_idb_events(
@@ -425,7 +425,7 @@ class CodeModeClient:
             self.connect()
         handle = self._handle
         if handle is None:
-            raise IDAConnectionError("Code Mode database is not connected")
+            raise IDAConnectionError("IDA Nexus database is not connected")
         try:
             return remote(handle, **args)
         except RemoteError as exc:
@@ -435,7 +435,7 @@ class CodeModeClient:
             if exc.code == "operation_timeout":
                 raise IDATimeoutError(message) from exc
             raise IDAToolError(name, message) from exc
-        except (DatabaseDisconnectedError, CodeModeConnectionError) as exc:
+        except (DatabaseDisconnectedError, NexusConnectionError) as exc:
             raise self._connection_error(exc) from exc
 
     def save_database(self) -> dict[str, Any]:
@@ -443,12 +443,12 @@ class CodeModeClient:
             self.connect()
         handle = self._handle
         if handle is None:
-            raise IDAConnectionError("Code Mode database is not connected")
+            raise IDAConnectionError("IDA Nexus database is not connected")
         try:
             return handle.save_database()
         except RemoteError as exc:
             raise IDAToolError("save_database", str(exc)) from exc
-        except (DatabaseDisconnectedError, CodeModeConnectionError) as exc:
+        except (DatabaseDisconnectedError, NexusConnectionError) as exc:
             raise self._connection_error(exc) from exc
 
     def discard_database(self, timeout: float = 5.0) -> bool:
@@ -477,7 +477,7 @@ class CodeModeClient:
                     time.sleep(0.05)
                     continue
                 raise IDAToolError("shutdown_database", str(exc)) from exc
-            except (DatabaseDisconnectedError, CodeModeConnectionError) as exc:
+            except (DatabaseDisconnectedError, NexusConnectionError) as exc:
                 raise self._connection_error(exc) from exc
 
     def health(self) -> dict[str, Any]:
@@ -544,7 +544,7 @@ class CodeModeClient:
             return False
         return wait_database_released(instance, timeout)
 
-    def __enter__(self) -> "CodeModeClient":
+    def __enter__(self) -> "NexusClient":
         return self.connect()
 
     def __exit__(self, *exc) -> None:

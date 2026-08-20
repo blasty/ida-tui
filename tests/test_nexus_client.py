@@ -1,4 +1,4 @@
-"""IDA-free contract tests for the Code Mode client adapter."""
+"""IDA-free contract tests for the IDA Nexus client adapter."""
 
 from __future__ import annotations
 
@@ -13,10 +13,10 @@ from dataclasses import dataclass
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from idatui.errors import IDAConnectionError, IDAToolError  # noqa: E402
 from idatui import remote_ops  # noqa: E402
-import idatui.codemode_client as module  # noqa: E402
-from idatui.codemode_client import CodeModeClient, _parse_load_args  # noqa: E402
+import idatui.nexus_client as module  # noqa: E402
+from idatui.nexus_client import NexusClient, _parse_load_args  # noqa: E402
 
-#: Pure: fakes the DatabaseHandle, never touches IDA or the Code Mode library.
+#: Pure: fakes the DatabaseHandle, never touches IDA or the IDA Nexus library.
 NEEDS_IDA = False
 
 PASS = FAIL = 0
@@ -180,13 +180,13 @@ class FakeDisconnected(Exception):
 def _open_kwargs_are_real(sent: dict):
     """(ok, detail) for the kwargs the adapter passes to DatabaseHandle.open.
 
-    Skips (passes) when ida_codemode is not installed, so the file stays pure.
+    Skips (passes) when ida_nexus is not installed, so the file stays pure.
     """
     try:
         import inspect
-        from ida_codemode import DatabaseHandle as Real
+        from ida_nexus import DatabaseHandle as Real
     except ImportError:
-        return True, "ida_codemode not installed - signature not checked"
+        return True, "ida_nexus not installed - signature not checked"
     accepted = set(inspect.signature(Real.open).parameters)
     unknown = sorted(set(sent) - accepted)
     return not unknown, f"open() rejects {unknown}"
@@ -201,9 +201,9 @@ def _option_fields_are_real(options):
     """
     try:
         import dataclasses
-        from ida_codemode import DatabaseOpenOptions as Real
+        from ida_nexus import DatabaseOpenOptions as Real
     except ImportError:
-        return True, "ida_codemode not installed - fields not checked"
+        return True, "ida_nexus not installed - fields not checked"
     accepted = {field.name for field in dataclasses.fields(Real)}
     unknown = sorted({f.name for f in dataclasses.fields(options)} - accepted)
     return not unknown, f"DatabaseOpenOptions rejects {unknown}"
@@ -212,7 +212,7 @@ def _option_fields_are_real(options):
 def main() -> int:
     proc, base, file_type = _parse_load_args("-parm:ARMv7-M -b800000 -TRaw")
     check(
-        "legacy switches map to typed Code Mode options",
+        "legacy switches map to typed IDA Nexus options",
         (proc, base, file_type) == ("arm:ARMv7-M", 0x8000000, "Raw"),
         (proc, base, file_type),
     )
@@ -238,7 +238,7 @@ def main() -> int:
             path = os.path.join(tmp, "sample.bin")
             with open(path, "wb") as file:
                 file.write(b"sample")
-            client = CodeModeClient(path, load_args="-parm:ARMv7-A -b100")
+            client = NexusClient(path, load_args="-parm:ARMv7-A -b100")
             notes = []
             client.connect(timeout=42, progress=notes.append)
             handle = client._handle
@@ -266,7 +266,7 @@ def main() -> int:
                 *_open_kwargs_are_real(FakeDatabaseHandle.kwargs),
             )
             check(
-                "connect waits for Code Mode autoanalysis",
+                "connect waits for IDA Nexus autoanalysis",
                 handle.waited == 42,
                 getattr(handle, "waited", None),
             )
@@ -337,7 +337,7 @@ def main() -> int:
                 client.health()["record_id"] == "123-abcdef",
             )
             client.save_database()
-            check("save uses the public Code Mode save route", handle.saved == 1)
+            check("save uses the public IDA Nexus save route", handle.saved == 1)
             check(
                 "GUI leases transfer rather than claiming discard",
                 client.discard_database() is False and handle.shutdown_calls == [],
@@ -389,7 +389,7 @@ def main() -> int:
                 "GUI lifetime is never claimed by the client",
                 client.wait_released(0) is False,
             )
-            disconnected = CodeModeClient(path).connect()
+            disconnected = NexusClient(path).connect()
             stream_errors = []
             stream_failed = threading.Event()
 
@@ -417,7 +417,7 @@ def main() -> int:
         module.DatabaseBusyError = original_busy
         module.DatabaseDisconnectedError = original_disconnected
 
-    client = CodeModeClient(__file__)
+    client = NexusClient(__file__)
 
     def unknown_operation():
         pass

@@ -17,7 +17,7 @@ import statistics
 import time
 
 from idatui import remote_ops
-from idatui.codemode_client import CodeModeClient
+from idatui.nexus_client import NexusClient
 
 
 def timed(function, reps: int = 1) -> tuple[object, float]:
@@ -37,7 +37,7 @@ def main() -> int:
     parser.add_argument("--rows", type=int, default=200)
     args = parser.parse_args()
 
-    client = CodeModeClient(os.path.abspath(args.target)).connect()
+    client = NexusClient(os.path.abspath(args.target)).connect()
 
     index, operations_cold = timed(
         lambda: client.call(remote_ops.list_funcs, queries=[{"offset": 0, "count": 40}])

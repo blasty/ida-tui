@@ -5272,7 +5272,7 @@ async def run(binary, only=None):
 
 
 async def _run_on(binary, only=None):
-    # Code Mode attaches a registered GUI or starts/reuses a managed worker.
+    # IDA Nexus attaches a registered GUI or starts/reuses a managed worker.
     app = IdaTui(open_path=binary, keepalive=False)
     async with app.run_test(size=(140, 44)) as pilot:
         c = Ctx(app, pilot)

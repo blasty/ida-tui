@@ -1,4 +1,4 @@
-"""Typed remote operations executed through ida-codemode."""
+"""Typed remote operations executed through ida-nexus."""
 
 from __future__ import annotations
 # ruff: noqa
@@ -1655,7 +1655,7 @@ def _bindings() -> dict[Callable[..., Any], Any]:
     with _BIND_LOCK:
         if _BOUND is not None:
             return _BOUND
-        from ida_codemode import RemoteModule
+        from ida_nexus import RemoteModule
 
         operations_module = RemoteModule(
             Path(__file__), operation_label=operation_label, codec="json"

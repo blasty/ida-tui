@@ -1,4 +1,4 @@
-"""idatui — a keyboard-first TUI using shared IDA Code Mode databases."""
+"""idatui — a keyboard-first TUI using shared IDA Nexus databases."""
 
 from .errors import (
     IDAError,
@@ -10,7 +10,7 @@ from .errors import (
     IDASessionError,
     Session,
 )
-from .codemode_client import CodeModeClient
+from .nexus_client import NexusClient
 from .domain import (
     Program,
     FunctionIndex,
@@ -25,7 +25,7 @@ from .domain import (
 )
 
 __all__ = [
-    "CodeModeClient",
+    "NexusClient",
     "Program",
     "FunctionIndex",
     "DisasmModel",

@@ -1,14 +1,14 @@
-# Findings from porting a real client to IDA Code Mode
+# Findings from porting a real client to IDA Nexus
 
-Notes for the `ida-codemode` maintainers, gathered while porting **ida-tui** (a
+Notes for the `ida-nexus` maintainers, gathered while porting **ida-tui** (a
 Textual TUI frontend for IDA) from a private idalib worker to
-`ida_codemode.DatabaseHandle`.
+`ida_nexus.DatabaseHandle`.
 
 Everything below is measured, not inferred. Where we worked around something, the
 workaround is named so you can judge whether the library should make it
 unnecessary.
 
-**Environment:** ida-codemode 0.3.1, IDA 9.4 (idalib), Linux, single managed
+**Environment:** ida-nexus 0.3.1, IDA 9.4 (idalib), Linux, single managed
 worker backend, quiet box. Target for timings: `targets/echo` unless stated.
 
 > **Status against the protocol-6 event-stream development tree, based on 0.6.1
@@ -19,12 +19,12 @@ worker backend, quiet box. Target for timings: `targets/echo` unless stated.
 > | 1 `timeout_trace` line tracing | ✅ **fixed in 0.3.2** — no `settrace` in the runtime at all |
 > | 2 `to_jsonable` on large results | ✅ **fixed in 0.3.2** — `dumps_json` C fast path |
 > | 3 2 ms `execute_sync` floor | ✅ **fixed in 0.3.2, 7.0x** — 2.055 ms → 0.294 ms |
-> | 4 loader switches fatal on reopen | **partial** — normal reopen fixed in 0.5.x; direct `.i64` paths remain [issue #36](https://github.com/HexRaysSA/ida-codemode/issues/36) |
+> | 4 loader switches fatal on reopen | **partial** — normal reopen fixed in 0.5.x; direct `.i64` paths remain [issue #36](https://github.com/HexRaysSA/ida-nexus/issues/36) |
 > | 5 IDB replaced under a live lease | **stale** — out-of-band replacement is outside the supported lifecycle, as it is for the IDA GUI |
 > | 6 close without save | **fixed in protocol 6** — the final managed-worker lease can choose `shutdown_database(save=False)` |
 > | 7 no change notification | ✅ **fixed in protocol 6** — `DatabaseHandle.subscribe_idb_events()` streams revisioned, operation-attributed IDB changes |
 > | 8 package exports | ✅ **fixed in 0.5.x** — a real `__all__` on the package root |
-> | 9 no `py.typed` / handle Protocol | ✅ **fixed in 0.5.x** — `ida_codemode/py.typed` ships |
+> | 9 no `py.typed` / handle Protocol | ✅ **fixed in 0.5.x** — `ida_nexus/py.typed` ships |
 >
 > **0.5.x restructured the package**, which is why the old "these files are
 > byte-identical" re-check recipe no longer works: `client.py` → `handle.py`,
@@ -32,16 +32,16 @@ worker backend, quiet box. Target for timings: `targets/echo` unless stated.
 > and the loader options moved into a frozen `DatabaseOpenOptions` dataclass.
 > Everything private is now underscore-prefixed, so the cheap re-check after an
 > upstream pull is simply: does anything we import still appear in
-> `ida_codemode.__all__`?
+> `ida_nexus.__all__`?
 >
 > 0.5.3 → 0.6.1 changed **nothing** we depend on: `__init__.py`, `handle.py`,
 > `instances.py`, `options.py`, `errors.py` and `models.py` are byte-identical
 > between those two releases. 0.6.1 only collapses the six console scripts into a
-> single `ida-codemode` command.
+> single `ida-nexus` command.
 >
 > Both client-side workarounds re-measured at **0.99x and 0.97x** on 0.3.2 —
 > i.e. nothing — and are deleted. Remote code is now ordinary typed Python,
-> installed as content-addressed modules by ida-codemode. Harness:
+> installed as content-addressed modules by ida-nexus. Harness:
 > `experiments/bench_pack_trace.py`.
 
 **What the client does**, for scale: it renders a continuous disassembly listing,
@@ -232,7 +232,7 @@ nonsense invocation and no ida-tui code path generates it — the project layer
 always passes `output_database`, and `_needs_load_options` bails when an `.i64`
 exists — but the library boundary should still reject or normalize it rather
 than launch a known-fatal IDA command. Tracked upstream as
-[issue #36](https://github.com/HexRaysSA/ida-codemode/issues/36).
+[issue #36](https://github.com/HexRaysSA/ida-nexus/issues/36).
 
 ---
 
@@ -240,7 +240,7 @@ than launch a known-fatal IDA command. Tracked upstream as
 
 The original suite deleted an `.i64` while a private worker still had it open,
 then immediately reopened the same path. That ownership model no longer applies:
-Code Mode databases are shared resources, and the IDA GUI itself does not survive
+IDA Nexus databases are shared resources, and the IDA GUI itself does not survive
 out-of-band replacement of its open database. Detecting arbitrary filesystem
 replacement is therefore not part of the supported lifecycle.
 
@@ -301,7 +301,7 @@ databases closes the subscription, so the blocking event reader does not leak.
 
 ## 8. Package exports and API surface stability — FIXED in 0.5.x
 
-`ida_codemode/__init__.py` used to export nothing, so a library consumer had to
+`ida_nexus/__init__.py` used to export nothing, so a library consumer had to
 import from submodules, including things that were clearly internals (`FileLock`,
 `REGISTRY_DIR`, `canonical_path`, `idb_key`, `scan_instances`) that we only
 touched because no public equivalent existed.
@@ -313,9 +313,9 @@ the package root, and mark the intended-public registry helpers explicitly.
 the internals moved behind an underscore:
 
 ```python
-from ida_codemode import DatabaseHandle, DatabaseOpenOptions, DatabaseInstance
-from ida_codemode import RemoteError, DatabaseBusyError, DatabaseDisconnectedError
-from ida_codemode import discover_databases, find_database_owner, wait_database_released
+from ida_nexus import DatabaseHandle, DatabaseOpenOptions, DatabaseInstance
+from ida_nexus import RemoteError, DatabaseBusyError, DatabaseDisconnectedError
+from ida_nexus import discover_databases, find_database_owner, wait_database_released
 ```
 
 The two lock-poking helpers we had reimplemented client-side
@@ -342,13 +342,13 @@ can be checked against the real signature and a typo is caught statically. (We
 added a test asserting our kwargs are a subset of
 `inspect.signature(DatabaseHandle.open).parameters`, which is a poor substitute.)
 
-**0.5.x ships `ida_codemode/py.typed`**, and the 30 keyword-only options became a
+**0.5.x ships `ida_nexus/py.typed`**, and the 30 keyword-only options became a
 frozen `DatabaseOpenOptions` dataclass — which is strictly better, because an
 invented option name is now a `TypeError` at construction rather than something a
 `**kwargs` fake swallows. Our subset test survives in two halves
 (`_open_kwargs_are_real` for `open()`, `_option_fields_are_real` for the
 dataclass fields), because the offline contract suite must keep running with no
-`ida_codemode` installed at all and therefore still fakes both.
+`ida_nexus` installed at all and therefore still fakes both.
 
 ---
 
@@ -360,7 +360,7 @@ dataclass fields), because the offline contract suite must keep running with no
 | ~~2~~ | ~~`to_jsonable` on large results~~ | ~~114x on serialisation~~ | ✅ fixed in 0.3.2 |
 | ~~3~~ | ~~2 ms `execute_sync` floor~~ | ~~shapes client design~~ | ✅ fixed in 0.3.2, 7.0x |
 | ~~7~~ | ~~no change/revision counter~~ | ~~correctness for shared editing~~ | ✅ fixed in protocol 6 |
-| 4 | direct `.i64` forwards loader-only options | fatal worker startup | [issue #36](https://github.com/HexRaysSA/ida-codemode/issues/36) |
+| 4 | direct `.i64` forwards loader-only options | fatal worker startup | [issue #36](https://github.com/HexRaysSA/ida-nexus/issues/36) |
 | ~~5~~ | ~~replaced/deleted IDB under lease~~ | ~~out-of-contract filesystem mutation~~ | **stale** |
 | ~~6~~ | ~~no close without save~~ | ~~could not discard a managed session~~ | **fixed in protocol 6: final lease decides** |
 | ~~8~~ | ~~package exports~~ | ~~forces internal imports~~ | ✅ fixed in 0.5.x |
@@ -377,9 +377,9 @@ retired. That is the outcome this document was written for.
 
 **What is left is entirely non-performance.** Items 6 through 9 are fixed, and
 item 5 is stale because out-of-band replacement is not a supported lifecycle for
-either Code Mode or the IDA GUI. One narrow piece remains: **4**, normalize or
+either IDA Nexus or the IDA GUI. One narrow piece remains: **4**, normalize or
 reject loader-only options when the source is itself an existing `.i64`
-([issue #36](https://github.com/HexRaysSA/ida-codemode/issues/36)).
+([issue #36](https://github.com/HexRaysSA/ida-nexus/issues/36)).
 
 Happy to supply the benchmark harness (it is backend-agnostic and runs against
-both our old worker and Code Mode), or to test a patch.
+both our old worker and IDA Nexus), or to test a patch.

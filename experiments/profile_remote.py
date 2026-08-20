@@ -15,7 +15,7 @@ import argparse
 import os
 
 from idatui import remote_ops
-from idatui.codemode_client import CodeModeClient
+from idatui.nexus_client import NexusClient
 
 CALLS = {
     "heads": ("heads", {"count": 500, "annotate": True}),
@@ -36,7 +36,7 @@ def main() -> int:
     parser.add_argument("--addr", default=None, help="default: the .text start")
     args = parser.parse_args()
 
-    client = CodeModeClient(os.path.abspath(args.binary)).connect()
+    client = NexusClient(os.path.abspath(args.binary)).connect()
     addr = args.addr
     if addr is None:
         regions = client.call(remote_ops.file_regions)

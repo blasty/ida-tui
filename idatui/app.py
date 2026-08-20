@@ -10,7 +10,7 @@ Design notes:
   without ever materializing 52k lines in a widget.
 * All network/domain work runs in Textual worker threads; the UI never blocks.
 * An address-history stack backs Enter (follow) / Esc (back), IDA-style.
-* Database lifecycle is lease-based through ida_codemode: matching GUI sessions
+* Database lifecycle is lease-based through ida_nexus: matching GUI sessions
   are reused, otherwise a shared managed idalib worker is opened on demand.
 """
 
@@ -55,7 +55,7 @@ from .highlight import CTextArea, highlight_c
 from .journal import Journal
 
 from .errors import IDAConnectionError
-from .codemode_client import CodeModeClient, registered_database
+from .nexus_client import NexusClient, registered_database
 from .domain import Func, Head, ListingModel, Program, Struct
 
 # Styles for the disassembly listing.
@@ -1087,7 +1087,7 @@ class ListingView(SearchMixin, NavMixin, ColumnCursor, ScrollView, can_focus=Tru
     def _span_segments(h: Head, fallback: Style):
         """Segments for a row's disassembly text.
 
-        Uses IDA's own token classification when Code Mode supplies it; falls
+        Uses IDA's own token classification when IDA Nexus supplies it; falls
         back to the mnemonic/rest split when spans are absent or disagree with
         the plain text.
         """
@@ -5238,7 +5238,7 @@ class IdaTui(App):
         self._open_path = open_path
         self._ttl = ttl
         self._load_args = load_args or ""   # first-open options for a headerless blob
-        self._new_database = False           # Ctrl+L asks Code Mode for a fresh IDB
+        self._new_database = False           # Ctrl+L asks IDA Nexus for a fresh IDB
         self._title = (os.path.basename(open_path) if open_path else "")
         #: Where we are in the execution trace, and everything that moves us.
         #: Owns the trace state; the _trace/_t/_trail_* properties below
@@ -5247,7 +5247,7 @@ class IdaTui(App):
         self._do_keepalive = keepalive
         self._rpc_path = rpc_path
         self._rpc = None
-        self.client: CodeModeClient | None = None
+        self.client: NexusClient | None = None
         self.program: Program | None = None
         self._loading_screen: LoadingScreen | None = None
         self._ka = None
@@ -5288,7 +5288,7 @@ class IdaTui(App):
         self.journal = Journal()
         self._xref_focus_name: str | None = None
         self._dirty = False
-        # One subscription for the active database. CodeModeClient debounces
+        # One subscription for the active database. NexusClient debounces
         # bursts off the Textual worker pool; the callback re-enters here on the
         # UI thread to invalidate and reload the visible models.
         self._idb_event_watch = None
@@ -5362,7 +5362,7 @@ class IdaTui(App):
         if self._rpc_path:
             self._start_rpc()
         # A file no loader recognises has to be described before it can be
-        # opened, so ask BEFORE Code Mode creates it — once IDA has made a database
+        # opened, so ask BEFORE IDA Nexus creates it — once IDA has made a database
         # the answer is baked in and changing it requires a fresh-IDB reopen.
         if self._project is not None:
             ref = self._pending_load_ref()
@@ -5435,7 +5435,7 @@ class IdaTui(App):
             ref = self._project.by_label(self._binary)
             if ref is not None:
                 path, label = ref.source, ref.label
-        # Release our lease first. Code Mode waits for a managed worker's final
+        # Release our lease first. IDA Nexus waits for a managed worker's final
         # lease grace, then creates the replacement IDB atomically. A GUI-backed
         # database is rejected by _can_reload(): the TUI must never close it.
         self._release_database()
@@ -5634,7 +5634,7 @@ class IdaTui(App):
         return len(text)
 
     # -- live refresh from shared IDB changes ----------------------------- #
-    def _start_idb_event_watch(self, client: CodeModeClient) -> None:
+    def _start_idb_event_watch(self, client: NexusClient) -> None:
         self._stop_idb_event_watch()
         watch = getattr(client, "watch_idb_events", None)
         if watch is None:  # IDA-free test doubles and pre-event adapters
@@ -5661,7 +5661,7 @@ class IdaTui(App):
             watcher.close()
 
     def _idb_event_watch_failed(
-        self, client: CodeModeClient, error: BaseException
+        self, client: NexusClient, error: BaseException
     ) -> None:
         if client is not self.client:
             return
@@ -5685,7 +5685,7 @@ class IdaTui(App):
         return anchor
 
     def _refresh_idb_events(
-        self, client: CodeModeClient, events: tuple[dict, ...]
+        self, client: NexusClient, events: tuple[dict, ...]
     ) -> None:
         """Invalidate once per external edit burst and reload the active surface."""
         program = self.program
@@ -5768,7 +5768,7 @@ class IdaTui(App):
 
     # -- connection loss / recovery --------------------------------------- #
     def _handle_exception(self, error: BaseException) -> None:
-        """Intercept a lost Code Mode lease so the app can rediscover the DB.
+        """Intercept a lost IDA Nexus lease so the app can rediscover the DB.
 
         Everything unrelated to database connectivity crashes as usual.
         """
@@ -5812,11 +5812,11 @@ class IdaTui(App):
                 return
             if self._project is not None and self._binary is not None:
                 ref = self._project.by_label(self._binary)
-                client = CodeModeClient(
+                client = NexusClient(
                     ref.staged, ttl=self._ttl, load_args=ref.load_args,
                     output_database=ref.db, spawn=False)
             else:
-                client = CodeModeClient(
+                client = NexusClient(
                     self._open_path, ttl=self._ttl,
                     load_args=self._load_args, spawn=False)
             client.connect(progress=lambda m: self.app.call_from_thread(
@@ -5826,7 +5826,7 @@ class IdaTui(App):
             return
         self.app.call_from_thread(self._after_reconnect, client, Program(client))
 
-    def _after_reconnect(self, client: "CodeModeClient", program: "Program") -> None:
+    def _after_reconnect(self, client: "NexusClient", program: "Program") -> None:
         old_client, old_program = self.client, self.program
         self._stop_idb_event_watch()
         if old_program is not None:
@@ -5886,7 +5886,7 @@ class IdaTui(App):
         self._load_functions()
 
     def _open_database_client(self):  # type: ignore[no-untyped-def]
-        """Attach through Code Mode, reusing a GUI or managed idalib database."""
+        """Attach through IDA Nexus, reusing a GUI or managed idalib database."""
         if self._pool is not None:  # project mode: the pool owns the leases
             label = self._binary or self._project.refs[0].label
             client = self._pool.get(label, progress=lambda m:
@@ -5898,13 +5898,13 @@ class IdaTui(App):
             return client
         if not self._open_path:
             self.app.call_from_thread(
-                self._status, "Code Mode needs a database or executable path")
+                self._status, "IDA Nexus needs a database or executable path")
             self.app.call_from_thread(self._dismiss_loading)
             return None
         base = os.path.basename(self._open_path)
         self.app.call_from_thread(
-            self._status, f"discovering Code Mode database for {base}…")
-        client = CodeModeClient(self._open_path, ttl=self._ttl,
+            self._status, f"discovering IDA Nexus database for {base}…")
+        client = NexusClient(self._open_path, ttl=self._ttl,
                                 load_args=self._load_args,
                                 new_database=self._new_database)
         client.connect(progress=lambda m: self.app.call_from_thread(
@@ -5978,7 +5978,7 @@ class IdaTui(App):
     @work(thread=True, exclusive=True, group="index")
     def _index_binary(self) -> None:
         """Fold this binary's symbols + strings into the project index, so it can
-        be searched later even when its Code Mode lease is gone."""
+        be searched later even when its IDA Nexus lease is gone."""
         if self._index is None or self._project is None or self._binary is None:
             return
         ref = self._project.by_label(self._binary)
@@ -6081,7 +6081,7 @@ class IdaTui(App):
                       cursor=0, push=True, is_region=True)
 
     def _can_reload(self) -> bool:
-        """Whether Code Mode can replace this IDB with different options.
+        """Whether IDA Nexus can replace this IDB with different options.
 
         A GUI database is owned by the user and has no remote close/rollback
         route. Managed idalib databases can be released and reopened fresh.

@@ -1,7 +1,7 @@
 """Count backend round-trips per user action.
 
 Answers "are we batching, or paying a round-trip per item?" with numbers rather
-than intent. Wraps ``CodeModeClient.invoke`` on the live app, drives a headless
+than intent. Wraps ``NexusClient.invoke`` on the live app, drives a headless
 Pilot through realistic actions, and reports calls + wall time + which
 operations were used for each.
 
@@ -25,7 +25,7 @@ from _fixtures import fast_keys, staged  # noqa: E402
 fast_keys()
 
 from idatui.app import IdaTui, ListingView  # noqa: E402
-from idatui.codemode_client import CodeModeClient  # noqa: E402
+from idatui.nexus_client import NexusClient  # noqa: E402
 
 
 class Census:
@@ -34,18 +34,18 @@ class Census:
     def __init__(self) -> None:
         self.ops: collections.Counter = collections.Counter()
         self.n = 0
-        original = CodeModeClient.invoke
+        original = NexusClient.invoke
 
         def counting(client, operation, *a, **kw):
             self.n += 1
             self.ops[operation] += 1
             return original(client, operation, *a, **kw)
 
-        CodeModeClient.invoke = counting
+        NexusClient.invoke = counting
         self._original = original
 
     def restore(self) -> None:
-        CodeModeClient.invoke = self._original
+        NexusClient.invoke = self._original
 
     def span(self, label: str):
         return _Span(self, label)

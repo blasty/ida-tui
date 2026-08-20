@@ -4,7 +4,7 @@
 #     ./ida-tui foo.elf        # open a binary and drive it — that's it
 #
 # The launcher leases a registered IDA GUI or shared managed idalib worker
-# through ida_codemode. The selected Python must have ida-tui's dependencies;
+# through ida_nexus. The selected Python must have ida-tui's dependencies;
 # override it with $IDATUI_PYTHON.
 set -eu
 

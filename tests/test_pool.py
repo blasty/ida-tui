@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Unit tests for idatui.pool (Code Mode lease residency and LRU budget).
+"""Unit tests for idatui.pool (IDA Nexus lease residency and LRU budget).
 
 A fake client keeps the policy testable without IDA or Textual.
 
@@ -31,7 +31,7 @@ def check(name, cond, detail=""):
 
 
 class FakeClient:
-    """Stands in for a CodeModeClient lease and records saves/closes."""
+    """Stands in for a NexusClient lease and records saves/closes."""
 
     def __init__(self, ref, mem=100, backend="idalib",
                  discardable=True):

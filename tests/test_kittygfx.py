@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Cross-platform checks for the optional kitty-graphics startup splash.
 
-Pure: stdlib only, no terminal, Textual, Code Mode, or IDA.
+Pure: stdlib only, no terminal, Textual, IDA Nexus, or IDA.
 """
 from __future__ import annotations
 

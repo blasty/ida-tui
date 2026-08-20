@@ -1,4 +1,4 @@
-"""Domain / paging layer: address-centric models over IDA Code Mode.
+"""Domain / paging layer: address-centric models over IDA Nexus.
 
 This is where the "millions of lines" problem is solved, so the TUI widgets only
 ever see a viewport-sized slice. Every hard-won constraint from
@@ -7,7 +7,7 @@ ever see a viewport-sized slice. Every hard-won constraint from
 * Page sizes remain bounded so remote execution returns viewport-scale JSON.
 * Pagination advances by the number of rows actually returned.
 * Deep head walks are block-cached (revisits are free) and neighboring blocks
-  prefetch through the thread-safe Code Mode client.
+  prefetch through the thread-safe IDA Nexus client.
 * Expensive function totals are fetched once and cached.
 * Decompilation failures are surfaced as data, not application crashes.
 
@@ -31,7 +31,7 @@ from . import remote_ops
 from .errors import IDAToolError
 
 if TYPE_CHECKING:  # type hint only
-    from .codemode_client import CodeModeClient
+    from .nexus_client import NexusClient
 
 # Clamps derived from measured caps (list ~700, disasm ~500). Margin included.
 LIST_PAGE = 500
@@ -90,7 +90,7 @@ class Line:
 
 
 class Head(NamedTuple):
-    """One flat-listing item (from the Code Mode ``heads`` operation): a code
+    """One flat-listing item (from the IDA Nexus ``heads`` operation): a code
     instruction, a data item, or an undefined byte run.
 
     A ``NamedTuple`` rather than a dataclass because this is by far the
@@ -111,7 +111,7 @@ class Head(NamedTuple):
     name: str | None = None
     raw: bytes | None = None  # opcode/item bytes (filled in for code by the model)
     #: [(kind, text)] from IDA's own colour tags — mnem/reg/num/name/str/punct/…
-    #: None when Code Mode didn't provide them (or the spans
+    #: None when IDA Nexus didn't provide them (or the spans
     #: disagreed with the plain text, in which case the text wins).
     #:
     #: Held exactly as it came off the wire, and **read-only**. The worker
@@ -693,7 +693,7 @@ class ListingModel:
     """A flat, IDA-style disassembly *listing* over one segment: code, data and
     undefined heads interleaved, unlike ``DisasmModel`` (one function, code only).
 
-    Backed by the Code Mode adapter's ``heads`` operation, which walks item heads
+    Backed by the IDA Nexus adapter's ``heads`` operation, which walks item heads
     and renders each via ``generate_disasm_line``. The segment is walked lazily in
     forward pages (``FunctionIndex`` style); line index == position in the walked
     head list. Random access to an address is O(distance-from-seg-start) the
@@ -701,7 +701,7 @@ class ListingModel:
     on demand as the viewport scrolls. Synchronous + thread-safe.
     """
 
-    PAGE = 500  # viewport-scale heads per Code Mode execution
+    PAGE = 500  # viewport-scale heads per IDA Nexus execution
     #: Generation marker for a skeleton (text-less) page. Never equals a real
     #: _text_gen, which counts up from 0, so such a page always reads as stale.
     _SKELETON_GEN = -1
@@ -1434,7 +1434,7 @@ class HexModel:
 class Program:
     """The bound analysis session: models, caches, and a small prefetch pool."""
 
-    def __init__(self, client: "CodeModeClient", prefetch_workers: int = 2):
+    def __init__(self, client: "NexusClient", prefetch_workers: int = 2):
         self.client = client
         self._pool = ThreadPoolExecutor(
             max_workers=prefetch_workers, thread_name_prefix="idatui-prefetch"
@@ -1485,7 +1485,7 @@ class Program:
         """Sorted raw segment map [(start, end, file_off, name)] — the single
         source for sections()/file_regions()/image_range. Cached.
 
-        Uses the Code Mode adapter's ``file_regions`` operation (a plain segment
+        Uses the IDA Nexus adapter's ``file_regions`` operation (a plain segment
         walk, ~ms), avoiding broad binary surveys on the hex-pane open path.
         """
         if self._segments_cache is not None:
@@ -1573,7 +1573,7 @@ class Program:
     def read_bytes(self, ea: int, n: int) -> bytes:
         """Raw bytes [ea, ea+n) from IDA (gaps read as zero).
 
-        The Code Mode adapter returns one contiguous hex string (C-speed in IDA).
+        The IDA Nexus adapter returns one contiguous hex string (C-speed in IDA).
         A legacy ``get_bytes`` decoding fallback remains for alternate clients.
         """
         if n <= 0:
@@ -1778,7 +1778,7 @@ class Program:
         except IDAToolError as e:
             msg = e.message
             if "not found" in msg.lower() and "del_type" in msg:
-                return "the connected Code Mode runtime cannot delete local types"
+                return "the connected IDA Nexus runtime cannot delete local types"
             return msg
 
     # -- disassembly ------------------------------------------------------- #
@@ -1795,7 +1795,7 @@ class Program:
         """Drop local and Hex-Rays caches before an explicit view refresh.
 
         Normal edit paths use generation-based invalidation. Ctrl+R is also for
-        changes made by another Code Mode/IDA client, for which this Program has
+        changes made by another IDA Nexus/IDA client, for which this Program has
         seen no generation bump, so it must explicitly ask Hex-Rays to discard
         its cached cfunc.
         """
@@ -1809,7 +1809,7 @@ class Program:
             pass
 
     def decompile(self, ea: int, refresh: bool = False) -> Decompilation:
-        """Full pseudocode for a function, returned directly by Code Mode."""
+        """Full pseudocode for a function, returned directly by IDA Nexus."""
         if not refresh:
             with self._lock:
                 hit = self._decomp.get(ea)
@@ -2011,7 +2011,7 @@ class Program:
     def define_func(self, ea: int) -> dict:
         """Create a function starting at ``ea`` (IDA's 'p').
 
-        Prefers the Code Mode operation, which works out the end when IDA can't;
+        Prefers the IDA Nexus operation, which works out the end when IDA can't;
         falls back to a plain create for alternate clients.
         """
         try:

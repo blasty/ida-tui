@@ -12,20 +12,6 @@ wheels = [
 ]
 
 [[package]]
-name = "ida-codemode"
-version = "0.6.1"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "ida-domain" },
-    { name = "packaging" },
-    { name = "zeromcp" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/5d/55/b9b72626e371bb36b712659b567ad1d890947c237bfbcaeccfb30f12fe80/ida_codemode-0.6.1.tar.gz", hash = "sha256:44df2a986d24a7e35e64b92c910a21eb485dc4c47d1e9db1e572e8fc1aa08a44", size = 188081, upload-time = "2026-08-13T16:46:35.504Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/05/20/2397e9b34cefe7ce01945cc2299a01459b9371c48027f61bfdbd4bfcf677/ida_codemode-0.6.1-py3-none-any.whl", hash = "sha256:69a39e25f7441aab794f6737133f8c6155fd794c77924e46e83cb938acf8944f", size = 104728, upload-time = "2026-08-13T16:46:34.265Z" },
-]
-
-[[package]]
 name = "ida-domain"
 version = "0.5.1"
 source = { registry = "https://pypi.org/simple" }
@@ -37,6 +23,20 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/80/34/be087d3ea1c3a6573e0660cb5b40f0c4ade9ae5772cf1c5d98d52472d28b/ida_domain-0.5.1.tar.gz", hash = "sha256:c49f2c417047d882e954f651b50a709a3f27903b33ba533b794aa54d6536d16f", size = 396413, upload-time = "2026-08-10T13:32:48.45Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/27/78/9c698d818b0fddc6648f703a0821edeeb65b18404b43f556d249c5446c96/ida_domain-0.5.1-py3-none-any.whl", hash = "sha256:bfbb17c7d0cb2ed7d3f21342e1c8787f9018d5c2a94cdfd29e06537dd026a06d", size = 201275, upload-time = "2026-08-10T13:32:46.955Z" },
+]
+
+[[package]]
+name = "ida-nexus"
+version = "0.7.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "ida-domain" },
+    { name = "packaging" },
+    { name = "zeromcp" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/b6/93/2f87cbd64ffc45e181542f133ba8db101c9049155b5f015d9d318f32dcfb/ida_nexus-0.7.0.tar.gz", hash = "sha256:838698c6a2456d474da833b2f4955da9f1fca4a488c95a157539a3c663a919ba", size = 220190, upload-time = "2026-08-20T21:52:18.228Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/a5/c2/58704fc74618c7867cf7542d3150a75a7678aae2fff7960fa8e5cc67d934/ida_nexus-0.7.0-py3-none-any.whl", hash = "sha256:a5006c7170a0a758a598b864d6fa248bf4eccbea848a30fc6a3eeeadf638d07a", size = 127656, upload-time = "2026-08-20T21:52:19.395Z" },
 ]
 
 [[package]]
@@ -53,7 +53,7 @@ name = "idatui"
 version = "0.0.1"
 source = { editable = "." }
 dependencies = [
-    { name = "ida-codemode" },
+    { name = "ida-nexus" },
     { name = "pygments" },
     { name = "textual" },
 ]
@@ -65,7 +65,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "ida-codemode", specifier = ">=0.5.3" },
+    { name = "ida-nexus", specifier = ">=0.7.0" },
     { name = "pygments", specifier = ">=2" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8" },
     { name = "textual", specifier = ">=8" },

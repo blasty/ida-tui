@@ -1,8 +1,8 @@
-"""The IDAPython ida-tui runs inside the Code Mode sandbox.
+"""The IDAPython ida-tui runs inside the IDA Nexus sandbox.
 
 Two features have no ida-domain surface at all and are carried over VERBATIM
 from the tools ida-tui was developed against (`server/patch_server.py`'s
-injected BODY, which the Code Mode port deletes):
+injected BODY, which the IDA Nexus port deletes):
 
 * `heads` -- the continuous listing. ida-domain enumerates defined heads and
   renders plain disassembly; the listing also needs coalesced undefined runs,
@@ -20,8 +20,8 @@ what you see). A re-implementation drifts from it silently.
 
 This file is SOURCE SHIPPED AS TEXT to the database process; it is never
 imported here, because the ida_* modules do not exist in the TUI's interpreter.
-`codemode_client` reads it and prepends it to the relevant snippets. Keep it
-self-contained: no relative imports, nothing beyond what Code Mode provides.
+`nexus_client` reads it and prepends it to the relevant snippets. Keep it
+self-contained: no relative imports, nothing beyond what IDA Nexus provides.
 """
 
 # ruff: noqa
@@ -29,7 +29,7 @@ import re as _re
 
 # IDAPython, imported ONCE at module scope.
 #
-# This file is never imported by the client -- codemode_client reads it as
+# This file is never imported by the client -- nexus_client reads it as
 # TEXT and installs it as a module inside the database process -- so the
 # no-IDA house rule that keeps idatui importable without IDA does not apply
 # here, and these need not be function-local.
@@ -1740,7 +1740,7 @@ def decompile(addr, include_addresses=True):
 
     Faithful to the tool ida-tui was written against, and in particular to its
     COST: the per-line address anchor comes from ONE ``get_line_item`` at column
-    0 per line. The Code Mode port asked for the full per-column line map (what
+    0 per line. The IDA Nexus port asked for the full per-column line map (what
     ``decomp_map`` is for) purely to fill in that anchor, which is thousands of
     ``get_line_item``+``dstr()`` calls per function instead of one per line, and
     made every pseudocode open cost the same as opening the split view.

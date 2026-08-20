@@ -7,7 +7,7 @@ search across all of them, and (later) follow calls from one into another.
 
 ## The constraint that shapes everything
 
-IDA still exposes one active database per GUI/idalib process. Code Mode makes
+IDA still exposes one active database per GUI/idalib process. IDA Nexus makes
 those instances discoverable and shareable: each project entry retains one
 `DatabaseHandle` lease, which may target a registered GUI or a managed idalib
 worker. N resident project databases can therefore mean up to N processes, but
@@ -32,13 +32,13 @@ crypto library.
 
 Two capabilities that feel like one, but aren't:
 
-1. **Switching** to a binary needs a *live Code Mode lease*.
+1. **Switching** to a binary needs a *live IDA Nexus lease*.
 2. **Searching across** binaries does *not* — if a per-binary index (functions,
    strings, imports/exports) is cached on disk.
 
 That split is the unlock: project-wide search stays instant across every binary,
 including ones never opened this session, and only *jumping* to a hit costs a
-Code Mode attach/open.
+IDA Nexus attach/open.
 
 ## Layout
 
@@ -85,11 +85,11 @@ basename and must be unique (it names the staged file).
 
 ## Runtime
 
-- **`DatabasePool`** — one `CodeModeClient` lease per resident binary, attached
+- **`DatabasePool`** — one `NexusClient` lease per resident binary, attached
   lazily on first switch and LRU-released when the advisory memory budget is
   exceeded. Eviction explicitly saves managed IDBs but never implicitly saves a
   GUI. Closing a lease never kills a GUI or another client's managed worker;
-  Code Mode owns final worker shutdown.
+  IDA Nexus owns final worker shutdown.
 - **`BinaryState`** — per binary: `client, program, nav, cur, func_index,
   pref/active/split, filter`. Switching snapshots the current state and restores
   the target's. `_after_reconnect` provides the client/program swap seam.
