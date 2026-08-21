@@ -585,14 +585,15 @@ async def s_reprime_is_free(c: Ctx):
     await c.wait(lambda: lv.model.complete, 30)
 
     client = app.program.client
-    original = type(client).invoke
+    original = type(client).call
     seen: list[str] = []
 
     def counting(self, operation, *a, **kw):
-        seen.append(operation)
+        # call() takes the remote_ops declaration itself; count by its name.
+        seen.append(getattr(operation, "__name__", str(operation)))
         return original(self, operation, *a, **kw)
 
-    type(client).invoke = counting
+    type(client).call = counting
     try:
         for _ in range(3):  # decomp and back, three times
             await c.press("tab")
@@ -600,7 +601,7 @@ async def s_reprime_is_free(c: Ctx):
             await c.press("tab")
             await c.pause(0.05)
     finally:
-        type(client).invoke = original
+        type(client).call = original
 
     rebuilds = seen.count("segment_index")
     c.check(
@@ -1321,18 +1322,19 @@ async def s_split_view(c: Ctx):
     # to count. The bound is loose because the bug was three orders of magnitude
     # out, not a near miss.
     _lookups = {"n": 0}
-    _orig_call = c.prog.client.invoke
+    _orig_call = c.prog.client.call
 
-    def _counting(name, *a, **kw):
-        if name == "lookup_funcs":
+    def _counting(operation, *a, **kw):
+        # call() takes the remote_ops declaration itself; match by its name.
+        if getattr(operation, "__name__", "") == "lookup_funcs":
             _lookups["n"] += 1
-        return _orig_call(name, *a, **kw)
+        return _orig_call(operation, *a, **kw)
 
-    c.prog.client.invoke = _counting
+    c.prog.client.call = _counting
     try:
         await _split_view_body(c, app, lst, dec)
     finally:
-        c.prog.client.invoke = _orig_call
+        c.prog.client.call = _orig_call
     c.check(
         "split view doesn't storm the worker with function lookups",
         _lookups["n"] < 500,

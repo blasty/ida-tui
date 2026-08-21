@@ -11,6 +11,16 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from ida_domain import Database
 
+# Same contract as nexus_client: ida_nexus is imported eagerly-if-present but
+# never at hard import cost, and the name is bound to None rather than left
+# undefined so it stays PATCHABLE -- the offline contract tests inject a fake
+# RemoteModule here and run this module's binding logic under a stdlib-only
+# python3 (tests/run.py --fast).
+try:
+    from ida_nexus import RemoteModule
+except ImportError:  # library absent: bindings fail actionably on first use
+    RemoteModule = None  # type: ignore[assignment,misc]
+
 
 def operation_label() -> str:
     """Display attribution for the current call; ready for per-user context."""
@@ -1655,8 +1665,13 @@ def _bindings() -> dict[Callable[..., Any], Any]:
     with _BIND_LOCK:
         if _BOUND is not None:
             return _BOUND
-        from ida_nexus import RemoteModule
-
+        # Gated on the binding, not a fresh import, so an injected fake is
+        # honoured (see the module docstring on the guarded import above).
+        if RemoteModule is None:
+            raise ImportError(
+                "The 'ida-nexus' package is required to execute remote "
+                "operations but is not installed in this interpreter."
+            )
         operations_module = RemoteModule(
             Path(__file__), operation_label=operation_label, codec="json"
         )

@@ -177,6 +177,54 @@ class FakeDisconnected(Exception):
     """Stand-in for DatabaseDisconnectedError in stdlib-only runs."""
 
 
+class FakeRemoteError(Exception):
+    """Stand-in for RemoteError: (code, message, status, details)."""
+
+    def __init__(self, code, message, status=500, details=None):
+        super().__init__(message)
+        self.code = code
+        self.status = status
+        self.details = details or {}
+
+
+class FakeRemoteModule:
+    """Stand-in for ida_nexus.RemoteModule in stdlib-only runs.
+
+    Speaks the same two-step wire contract FakeHandle.execute_python answers:
+    install the module's real source once, then send each call as a snippet
+    that looks the function up in the installed module registry (the
+    ``.modules.get(`` marker the fake keys on), carrying the operation label.
+    """
+
+    def __init__(self, path, *, operation_label=None, codec="json"):
+        with open(path) as file:
+            self._source = file.read()
+        self._label = operation_label
+        self._installed = False
+
+    def function(self, declaration, timeout=None):
+        name = getattr(declaration, "__name__", str(declaration))
+
+        def remote(handle, **args):
+            label = self._label() if callable(self._label) else self._label
+            if not self._installed:
+                handle.execute_python(self._source, operation_label=label)
+                self._installed = True
+            response = handle.execute_python(
+                f"__mod = __registry.modules.get(...)  # call {name}",
+                operation_label=label,
+            )
+            result = response["result"]
+            if (
+                isinstance(result, dict)
+                and result.get("__remote_ida_status__") == "ok"
+            ):
+                return result.get("__remote_ida_value__")
+            raise module.RemoteError(name, f"remote call failed: {result!r}", 500)
+
+        return remote
+
+
 def _open_kwargs_are_real(sent: dict):
     """(ok, detail) for the kwargs the adapter passes to DatabaseHandle.open.
 
@@ -230,9 +278,17 @@ def main() -> int:
     original_options = module.DatabaseOpenOptions
     original_busy = module.DatabaseBusyError
     original_disconnected = module.DatabaseDisconnectedError
+    original_remote_error = module.RemoteError
     module.DatabaseOpenOptions = original_options or FakeOpenOptions
     module.DatabaseBusyError = original_busy or FakeBusy
     module.DatabaseDisconnectedError = original_disconnected or FakeDisconnected
+    module.RemoteError = original_remote_error or FakeRemoteError
+    # The binding seam in remote_ops, same rule: the real RemoteModule when the
+    # library is installed, this file's fake otherwise -- and the lazy binding
+    # cache reset around it so this run binds through whichever is active.
+    original_remote_module = remote_ops.RemoteModule
+    remote_ops.RemoteModule = original_remote_module or FakeRemoteModule
+    remote_ops._BOUND = None
     try:
         with tempfile.TemporaryDirectory() as tmp:
             path = os.path.join(tmp, "sample.bin")
@@ -416,6 +472,7 @@ def main() -> int:
         module.DatabaseOpenOptions = original_options
         module.DatabaseBusyError = original_busy
         module.DatabaseDisconnectedError = original_disconnected
+        module.RemoteError = original_remote_error
 
     client = NexusClient(__file__)
 
@@ -431,6 +488,9 @@ def main() -> int:
         )
     else:
         check("unknown adapter operations are explicit", False)
+    finally:
+        remote_ops.RemoteModule = original_remote_module
+        remote_ops._BOUND = None
 
     print(f"\n{PASS} passed, {FAIL} failed")
     return 1 if FAIL else 0
