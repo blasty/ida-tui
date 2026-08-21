@@ -31,16 +31,34 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from _fixtures import fast_keys, staged  # noqa: E402
 
-fast_keys()   # ~85ms -> ~2ms per keypress; see _fixtures.fast_keys
+fast_keys()  # ~85ms -> ~2ms per keypress; see _fixtures.fast_keys
+from idatui import remote_ops  # noqa: E402
 from idatui.app import (  # noqa: E402
-    ConfirmScreen, DecompView, FunctionsPanel, GraphView, HexView, IdaTui,
-    HelpScreen, ListingView, QuitScreen, SearchPalette, StringsPalette,
-    StructEditor, SymbolPalette, XrefsScreen, _HELP, _str_display,
+    ConfirmScreen,
+    DecompView,
+    FunctionsPanel,
+    GraphView,
+    HexView,
+    IdaTui,
+    HelpScreen,
+    ListingView,
+    QuitScreen,
+    SearchPalette,
+    StringsPalette,
+    StructEditor,
+    SymbolPalette,
+    XrefsScreen,
+    _HELP,
+    _str_display,
     _word_occurrences,
 )
 from idatui.errors import IDAToolError  # noqa: E402
 from textual.widgets import (  # noqa: E402
-    DataTable, Input, OptionList, Static, TextArea,
+    DataTable,
+    Input,
+    OptionList,
+    Static,
+    TextArea,
 )
 from rich.text import Text  # noqa: E402
 from idatui._sync import settle, wait_for  # noqa: E402
@@ -86,8 +104,10 @@ class _Profile:
             return
         tp, tw = sum(self.paused.values()), sum(self.waited.values())
         tk = sum(self.pressed.values())
-        print(f"\nprofile: {tp:.1f}s settling, {tw:.1f}s in waits, "
-              f"{tk:.1f}s in keystrokes")
+        print(
+            f"\nprofile: {tp:.1f}s settling, {tw:.1f}s in waits, "
+            f"{tk:.1f}s in keystrokes"
+        )
         rows = sorted(self.paused.items(), key=lambda kv: -kv[1])[:8]
         for name, secs in rows:
             print(f"   pause {secs:5.2f}s  {name}")
@@ -98,8 +118,10 @@ class _Profile:
         for name, secs in rows:
             print(f"   keys  {secs:5.2f}s  {name}")
         for name, secs in self.expired:
-            print(f"   EXPIRED wait {secs:5.2f}s in {name}  "
-                  f"(the check after it may have passed vacuously)")
+            print(
+                f"   EXPIRED wait {secs:5.2f}s in {name}  "
+                f"(the check after it may have passed vacuously)"
+            )
 
 
 PROFILE = _Profile()
@@ -113,6 +135,7 @@ def scenario(name):
     def deco(fn):
         SCENARIOS.append((name, fn))
         return fn
+
     return deco
 
 
@@ -149,8 +172,12 @@ class Ctx:
     async def wait(self, pred, t=20.0, step=0.02):
         t0 = asyncio.get_event_loop().time()
         ok = await wait_for(pred, self.pilot.pause, t, step)
-        PROFILE.wait(self.scenario, asyncio.get_event_loop().time() - t0, ok,
-                     sys._getframe(1).f_lineno)
+        PROFILE.wait(
+            self.scenario,
+            asyncio.get_event_loop().time() - t0,
+            ok,
+            sys._getframe(1).f_lineno,
+        )
         return ok
 
     async def press(self, *keys):
@@ -293,8 +320,9 @@ class Ctx:
         # _cur.ea to match: re-opening a function we already navigated to (its
         # _cur.ea is stale-true) schedules an async re-navigation, and proceeding
         # before it lands would leave the cursor parked wherever we last were.
-        await self.wait(lambda: self.lst.total > 0
-                        and self.lst._cursor_ea() == fn.addr, t)
+        await self.wait(
+            lambda: self.lst.total > 0 and self.lst._cursor_ea() == fn.addr, t
+        )
         if view == "decomp":
             # F5/Tab only decompiles from a focused code pane, and the listing
             # may still be settling from the open above — a swallowed Tab used to
@@ -304,8 +332,12 @@ class Ctx:
                 self.lst.focus()
                 await self.pause(0.05)
                 await self.press("tab")
-                if await self.wait(lambda: self.app._active == "decomp"
-                                   and self.dec.loaded_ea == fn.addr, max(t / 3, 5)):
+                if await self.wait(
+                    lambda: (
+                        self.app._active == "decomp" and self.dec.loaded_ea == fn.addr
+                    ),
+                    max(t / 3, 5),
+                ):
                     break
         return fn
 
@@ -332,7 +364,8 @@ class Ctx:
         # Load is done when the index is complete (robust vs the status line,
         # which startup auto-land immediately overwrites with the landed fn).
         await self.wait(
-            lambda: app._func_index is not None and app._func_index.complete, 60)
+            lambda: app._func_index is not None and app._func_index.complete, 60
+        )
         if app._func_index is not None and not app._func_index.complete:
             app._func_index.load_all()
 
@@ -359,7 +392,7 @@ class Ctx:
         app._pref = "decomp"
         if app._active in ("hex", "graph"):
             app._active = "decomp"
-        app._graph_sticky = False   # else every later scenario rebuilds a graph
+        app._graph_sticky = False  # else every later scenario rebuilds a graph
         app._split = False
         await self.pause(0.02)
 
@@ -369,15 +402,26 @@ class Ctx:
 # --------------------------------------------------------------------------- #
 @scenario("startup")
 async def s_startup(c: Ctx):
-    c.check("function list populated", c.table.row_count > 0, f"rows={c.table.row_count}")
+    c.check(
+        "function list populated", c.table.row_count > 0, f"rows={c.table.row_count}"
+    )
     left = c.app.query_one("#left")
-    c.check("names pane starts hidden (overlay-first)", not left.display,
-            f"display={left.display}")
+    c.check(
+        "names pane starts hidden (overlay-first)",
+        not left.display,
+        f"display={left.display}",
+    )
     await c.reveal_pane()
-    c.check("function pane width is capped (doesn't eat the screen)",
-            left.size.width <= 44, f"width={left.size.width}")
-    c.check("function load completed (index complete)",
-            c.app._func_index is not None and c.app._func_index.complete, c.status())
+    c.check(
+        "function pane width is capped (doesn't eat the screen)",
+        left.size.width <= 44,
+        f"width={left.size.width}",
+    )
+    c.check(
+        "function load completed (index complete)",
+        c.app._func_index is not None and c.app._func_index.complete,
+        c.status(),
+    )
     print(f"    {c.table.row_count} functions loaded")
 
 
@@ -398,13 +442,18 @@ async def s_auto_land(c: Ctx):
     await c.pause(0.2)
     if fn is not None:
         await c.wait(lambda: app._cur is not None and app._cur.ea == fn.addr, 20)
-        c.check("auto-land jumps to the entry function (main) when present",
-                app._cur is not None and app._cur.ea == fn.addr,
-                f"entry={fn.name}@{fn.addr:#x} cur={app._cur}")
+        c.check(
+            "auto-land jumps to the entry function (main) when present",
+            app._cur is not None and app._cur.ea == fn.addr,
+            f"entry={fn.name}@{fn.addr:#x} cur={app._cur}",
+        )
     else:
         await c.wait(lambda: isinstance(app.screen, SymbolPalette), 10)
-        c.check("auto-land pops the symbol picker when there's no entry fn",
-                isinstance(app.screen, SymbolPalette), f"screen={app.screen}")
+        c.check(
+            "auto-land pops the symbol picker when there's no entry fn",
+            isinstance(app.screen, SymbolPalette),
+            f"screen={app.screen}",
+        )
         app.pop_screen()
     # guard fires once: a second call is a no-op
     prev = app._cur
@@ -437,17 +486,23 @@ async def s_segment_index(c: Ctx):
         c.check("segment streamed for comparison", False)
         return
 
-    idx = app.program.client.invoke("segment_index", addr=hex(model.seg_start))
-    c.check("segment_index counts exactly what streaming produced",
-            idx.get("rows") == len(model),
-            f"index={idx.get('rows')} streamed={len(model)}")
-    c.check("it reports the same segment",
-            int(str(idx.get("addr")), 16) == model.seg_start,
-            f"{idx.get('addr')} vs {model.seg_start:#x}")
+    idx = app.program.client.call(remote_ops.segment_index, addr=hex(model.seg_start))
+    c.check(
+        "segment_index counts exactly what streaming produced",
+        idx.get("rows") == len(model),
+        f"index={idx.get('rows')} streamed={len(model)}",
+    )
+    c.check(
+        "it reports the same segment",
+        int(str(idx.get("addr")), 16) == model.seg_start,
+        f"{idx.get('addr')} vs {model.seg_start:#x}",
+    )
     anchors = idx.get("anchors") or []
-    c.check("anchors cover the segment",
-            len(anchors) >= max(1, len(model) // 500),
-            f"{len(anchors)} anchors for {len(model)} rows")
+    c.check(
+        "anchors cover the segment",
+        len(anchors) >= max(1, len(model) // 500),
+        f"{len(anchors)} anchors for {len(model)} rows",
+    )
 
     # Every anchor must name the address of the row it claims, or seeking to it
     # would land somewhere else entirely.
@@ -456,8 +511,11 @@ async def s_segment_index(c: Ctx):
         h = model.get(row)
         if h is None or h.ea != int(str(ea), 16):
             bad.append((row, ea, hex(h.ea) if h else None))
-    c.check("every anchor points at the row it claims", not bad,
-            f"{len(bad)} wrong, first={bad[:2]}")
+    c.check(
+        "every anchor points at the row it claims",
+        not bad,
+        f"{len(bad)} wrong, first={bad[:2]}",
+    )
 
     # A model built from the index must be INDISTINGUISHABLE from a streamed
     # one. That is the invariant the whole optimisation rests on: _prime builds
@@ -471,6 +529,7 @@ async def s_segment_index(c: Ctx):
     # rename and define things, so that model describes the database as it was
     # at boot, not as it is now.
     from idatui.domain import ListingModel  # noqa: PLC0415
+
     args = (app.program, model.seg_start, model.seg_end, model.name)
     idx_model, streamed = ListingModel(*args), ListingModel(*args)
     if not idx_model.build_from_index():
@@ -480,16 +539,30 @@ async def s_segment_index(c: Ctx):
         if streamed.load_next_page(text=False) == 0:
             break
     c.check("an index-built model is complete immediately", idx_model.complete)
-    c.check("index-built model has the streamed row count",
-            len(idx_model) == len(streamed), f"{len(idx_model)} vs {len(streamed)}")
-    for field in ("_row_at", "_head_eas", "_by_ea", "_page_head",
-                  "_page_addr", "_page_rows"):
+    c.check(
+        "index-built model has the streamed row count",
+        len(idx_model) == len(streamed),
+        f"{len(idx_model)} vs {len(streamed)}",
+    )
+    for field in (
+        "_row_at",
+        "_head_eas",
+        "_by_ea",
+        "_page_head",
+        "_page_addr",
+        "_page_rows",
+    ):
         a, b = getattr(idx_model, field), getattr(streamed, field)
-        c.check(f"index-built {field} matches streaming", a == b,
-                f"len {len(a)} vs {len(b)}")
-    c.check("index-built rows carry the same ea/kind/size",
-            [(h.ea, h.kind, h.size) for h in idx_model._heads]
-            == [(h.ea, h.kind, h.size) for h in streamed._heads])
+        c.check(
+            f"index-built {field} matches streaming",
+            a == b,
+            f"len {len(a)} vs {len(b)}",
+        )
+    c.check(
+        "index-built rows carry the same ea/kind/size",
+        [(h.ea, h.kind, h.size) for h in idx_model._heads]
+        == [(h.ea, h.kind, h.size) for h in streamed._heads],
+    )
 
 
 @scenario("reprime_is_free")
@@ -521,7 +594,7 @@ async def s_reprime_is_free(c: Ctx):
 
     type(client).invoke = counting
     try:
-        for _ in range(3):                     # decomp and back, three times
+        for _ in range(3):  # decomp and back, three times
             await c.press("tab")
             await c.pause(0.05)
             await c.press("tab")
@@ -530,8 +603,11 @@ async def s_reprime_is_free(c: Ctx):
         type(client).invoke = original
 
     rebuilds = seen.count("segment_index")
-    c.check("switching views never rebuilds the segment index", rebuilds == 0,
-            f"segment_index called {rebuilds}x during 3 view switches: {seen}")
+    c.check(
+        "switching views never rebuilds the segment index",
+        rebuilds == 0,
+        f"segment_index called {rebuilds}x during 3 view switches: {seen}",
+    )
 
 
 @scenario("skeleton_pages")
@@ -561,8 +637,11 @@ async def s_skeleton_pages(c: Ctx):
     if not model.complete or len(model) < 1200:
         # A target smaller than _prime's horizon has no skeleton pages at all,
         # so there is nothing to check rather than something broken.
-        c.check("segment is big enough to have skeleton pages", True,
-                f"skipped: only {len(model)} rows, _prime renders ~1000")
+        c.check(
+            "segment is big enough to have skeleton pages",
+            True,
+            f"skipped: only {len(model)} rows, _prime renders ~1000",
+        )
         return
     c.check("pages were loaded as skeletons", model._skeleton is True)
 
@@ -570,24 +649,32 @@ async def s_skeleton_pages(c: Ctx):
     deep = max(1200, len(model) - 40)
     for row in (1200, len(model) // 2, deep):
         h = model.get(row)
-        c.check(f"row {row} of a skeleton page has real text",
-                h is not None and bool((h.text or "").strip()),
-                f"ea={getattr(h, 'ea', None)} text={getattr(h, 'text', None)!r}")
+        c.check(
+            f"row {row} of a skeleton page has real text",
+            h is not None and bool((h.text or "").strip()),
+            f"ea={getattr(h, 'ea', None)} text={getattr(h, 'text', None)!r}",
+        )
 
     # And through the render path the user actually sees, not just the model.
     lv.cursor = deep
     lv.refresh()
     await c.pause(0.1)
     painted = lv._line_plain(deep)
-    c.check("a deep row RENDERS with text",
-            bool(painted and painted.strip()), f"painted={painted!r}")
+    c.check(
+        "a deep row RENDERS with text",
+        bool(painted and painted.strip()),
+        f"painted={painted!r}",
+    )
 
     # Materialising must not change the row count or move any address: the
     # skeleton's structure is what the scrollbar was sized from.
     before = len(model)
     model.get(deep)
-    c.check("materialising a page does not change the row count",
-            len(model) == before, f"{before} -> {len(model)}")
+    c.check(
+        "materialising a page does not change the row count",
+        len(model) == before,
+        f"{before} -> {len(model)}",
+    )
     c.check("the walk was not disturbed", not model.stale_structure)
 
 
@@ -615,41 +702,58 @@ async def s_palette_paging(c: Ctx):
     # below would pass vacuously against a zero-height page.
     await c.wait(lambda: ol.scrollable_content_region.height >= 1, 10)
     page = ol.scrollable_content_region.height
-    c.check("the palette list has a real viewport to page by", page >= 1,
-            f"height={page}")
+    c.check(
+        "the palette list has a real viewport to page by", page >= 1, f"height={page}"
+    )
     if ol.option_count <= 2:
         c.check("enough symbols to page through", False, f"n={ol.option_count}")
         return
 
-    c.check("the filter Input holds focus (so the list never sees the key)",
-            pal.focused is inp, f"focused={type(pal.focused).__name__}")
+    c.check(
+        "the filter Input holds focus (so the list never sees the key)",
+        pal.focused is inp,
+        f"focused={type(pal.focused).__name__}",
+    )
 
     ol.highlighted = 0
     await c.press("pagedown")
     down = ol.highlighted or 0
     # A page, not a line: the bug this guards against is PgDn falling through to
     # the Input and moving nothing, or degrading to a single-step cursor move.
-    c.check("PgDn moves the symbol list by more than one row", down > 1,
-            f"highlighted={down} page={page} n={ol.option_count}")
-    c.check("PgDn moves by about a viewport (or lands on the last row)",
-            down >= min(page, ol.option_count - 1) - 1,
-            f"highlighted={down} page={page} n={ol.option_count}")
+    c.check(
+        "PgDn moves the symbol list by more than one row",
+        down > 1,
+        f"highlighted={down} page={page} n={ol.option_count}",
+    )
+    c.check(
+        "PgDn moves by about a viewport (or lands on the last row)",
+        down >= min(page, ol.option_count - 1) - 1,
+        f"highlighted={down} page={page} n={ol.option_count}",
+    )
 
     await c.press("pageup")
-    c.check("PgUp comes back to the top", (ol.highlighted or 0) == 0,
-            f"highlighted={ol.highlighted}")
+    c.check(
+        "PgUp comes back to the top",
+        (ol.highlighted or 0) == 0,
+        f"highlighted={ol.highlighted}",
+    )
 
     # Clamping: hammering past the end must settle on the last row, not wrap or
     # raise. 12 pages clears any list this palette will show.
     for _ in range(12):
         await c.press("pagedown")
-    c.check("PgDn clamps at the last row",
-            ol.highlighted == ol.option_count - 1,
-            f"highlighted={ol.highlighted} n={ol.option_count}")
+    c.check(
+        "PgDn clamps at the last row",
+        ol.highlighted == ol.option_count - 1,
+        f"highlighted={ol.highlighted} n={ol.option_count}",
+    )
     for _ in range(12):
         await c.press("pageup")
-    c.check("PgUp clamps at the first row", ol.highlighted == 0,
-            f"highlighted={ol.highlighted}")
+    c.check(
+        "PgUp clamps at the first row",
+        ol.highlighted == 0,
+        f"highlighted={ol.highlighted}",
+    )
 
     await c.press("escape")
     await c.wait(lambda: not isinstance(app.screen, SymbolPalette), 10)
@@ -666,19 +770,28 @@ async def s_xrefs_paging(c: Ctx):
     await c.open_biggest("listing")
     await c.press("x")
     if not await c.wait(lambda: isinstance(app.screen, XrefsScreen), 10):
-        c.check("xrefs popup opens for the paging test", True,
-                "skipped: no xrefs at this cursor")
+        c.check(
+            "xrefs popup opens for the paging test",
+            True,
+            "skipped: no xrefs at this cursor",
+        )
         return
     scr = app.screen
     ol = scr.query_one(OptionList)
     await c.wait(lambda: ol.scrollable_content_region.height >= 1, 10)
-    c.check("the xrefs list itself has focus", scr.focused is ol,
-            f"focused={type(scr.focused).__name__}")
+    c.check(
+        "the xrefs list itself has focus",
+        scr.focused is ol,
+        f"focused={type(scr.focused).__name__}",
+    )
     if ol.option_count > 2:
         ol.highlighted = 0
         await c.press("pagedown")
-        c.check("PgDn pages the xrefs list natively", (ol.highlighted or 0) > 1,
-                f"highlighted={ol.highlighted} n={ol.option_count}")
+        c.check(
+            "PgDn pages the xrefs list natively",
+            (ol.highlighted or 0) > 1,
+            f"highlighted={ol.highlighted} n={ol.option_count}",
+        )
     await c.press("escape")
     await c.wait(lambda: not isinstance(app.screen, XrefsScreen), 10)
 
@@ -688,40 +801,51 @@ async def s_palette(c: Ctx):
     app, pilot = c.app, c.pilot
     await c.press("ctrl+n")
     pal_open = await c.wait(lambda: isinstance(app.screen, SymbolPalette), 10)
-    c.check("Ctrl+N opens the symbol palette", pal_open,
-            f"screen={type(app.screen).__name__}")
+    c.check(
+        "Ctrl+N opens the symbol palette",
+        pal_open,
+        f"screen={type(app.screen).__name__}",
+    )
     if not pal_open:
         return
     pal = app.screen
     pinp = pal.query_one(Input)
     pinp.value = "main"
     await c.wait(lambda: pal._results and pal._results[0][2] == "main", 10)
-    c.check("palette fuzzy-finds (top result matches the query)",
-            bool(pal._results) and pal._results[0][2] == "main",
-            f"top={pal._results[0][2] if pal._results else None}")
+    c.check(
+        "palette fuzzy-finds (top result matches the query)",
+        bool(pal._results) and pal._results[0][2] == "main",
+        f"top={pal._results[0][2] if pal._results else None}",
+    )
     pinp.value = "eror"  # scattered subsequence of 'error'
     await c.wait(lambda: any(n == "error" for _, _, n in pal._results), 10)
-    c.check("palette matches a fuzzy subsequence",
-            any(n == "error" for _, _, n in pal._results),
-            f"results={[n for _, _, n in pal._results[:4]]}")
+    c.check(
+        "palette matches a fuzzy subsequence",
+        any(n == "error" for _, _, n in pal._results),
+        f"results={[n for _, _, n in pal._results[:4]]}",
+    )
     # Every other query here is lowercase, which is how a case bug hid for so
     # long: the name was lowered but the query wasn't, so ONE capital matched
     # nothing. Invisible on lowercase C symbols, fatal on a library that
     # capitalises (PEM_read_bio found 0 of 10093 functions in libcrypto).
     pinp.value = "MAIN"
     await c.wait(lambda: any(n == "main" for _, _, n in pal._results), 10)
-    c.check("palette matching is case-insensitive in BOTH directions",
-            any(n == "main" for _, _, n in pal._results),
-            f"results={[n for _, _, n in pal._results[:4]]}")
+    c.check(
+        "palette matching is case-insensitive in BOTH directions",
+        any(n == "main" for _, _, n in pal._results),
+        f"results={[n for _, _, n in pal._results[:4]]}",
+    )
     pinp.value = "main"
     await c.wait(lambda: pal._results and pal._results[0][2] == "main", 10)
     want = pal._results[0][1]
     await c.press("enter")
     await c.wait(lambda: not isinstance(app.screen, SymbolPalette), 10)
     await c.wait(lambda: app._cur and app._cur.ea == want, 20)
-    c.check("selecting a palette entry opens that function",
-            bool(app._cur) and app._cur.ea == want,
-            f"cur={app._cur.ea if app._cur else None}")
+    c.check(
+        "selecting a palette entry opens that function",
+        bool(app._cur) and app._cur.ea == want,
+        f"cur={app._cur.ea if app._cur else None}",
+    )
     # Re-open the function we are ALREADY standing on. That used to append an
     # identical nav entry, and the extra Esc it bought popped the stack without
     # changing anything on screen — a dead keypress, which is precisely what
@@ -735,8 +859,11 @@ async def s_palette(c: Ctx):
     await c.press("enter")
     await c.wait(lambda: not isinstance(app.screen, SymbolPalette), 10)
     await c.pause(0.4)
-    c.check("re-opening the current function doesn't stack a duplicate",
-            len(app._nav) == depth, f"nav {depth} -> {len(app._nav)}")
+    c.check(
+        "re-opening the current function doesn't stack a duplicate",
+        len(app._nav) == depth,
+        f"nav {depth} -> {len(app._nav)}",
+    )
     await c.press("ctrl+n")
     await c.wait(lambda: isinstance(app.screen, SymbolPalette), 10)
     await c.press("escape")
@@ -749,43 +876,57 @@ async def s_load_options(c: Ctx):
     """The dialog must never appear for a file IDA can load itself — the whole
     suite runs on an ELF, so a false positive here would block every run."""
     from idatui.app import LoadOptionsScreen
+
     app = c.app
-    c.check("no load dialog for a recognised binary",
-            not isinstance(app.screen, LoadOptionsScreen),
-            f"screen={type(app.screen).__name__}")
-    c.check("and the app agrees it shouldn't ask",
-            not app._should_ask_load_options())
+    c.check(
+        "no load dialog for a recognised binary",
+        not isinstance(app.screen, LoadOptionsScreen),
+        f"screen={type(app.screen).__name__}",
+    )
+    c.check("and the app agrees it shouldn't ask", not app._should_ask_load_options())
     # The dialog itself, driven directly: it has to come back with switches the
     # worker can use, and -b has to be paragraphs.
     from idatui.formats import load_args, needs_load_options, sniff
-    c.check("the running target sniffs as a real format",
-            sniff(app._open_path) is not None and not needs_load_options(app._open_path),
-            f"{sniff(app._open_path)}")
-    c.check("dialog output converts a base to paragraphs",
-            load_args("arm", 0x8000000) == "-parm -b800000")
+
+    c.check(
+        "the running target sniffs as a real format",
+        sniff(app._open_path) is not None and not needs_load_options(app._open_path),
+        f"{sniff(app._open_path)}",
+    )
+    c.check(
+        "dialog output converts a base to paragraphs",
+        load_args("arm", 0x8000000) == "-parm -b800000",
+    )
 
     # Tab is a PRIORITY app binding (disasm<->pseudocode), so it fired even with
     # a modal up and nothing in a dialog could be tabbed to. That is why the load
     # dialog's address field was unreachable — and it was broken in every other
     # modal too.
     from idatui.app import LoadOptionsScreen
+
     app.push_screen(LoadOptionsScreen("/tmp/probe.bin", 1234))
     await c.wait(lambda: isinstance(app.screen, LoadOptionsScreen), 10)
     sc = app.screen
     first = app.focused
     await c.press("tab")
     await c.pause(0.2)
-    c.check("Tab moves focus inside a modal instead of toggling the view",
-            app.focused is not first and isinstance(app.screen, LoadOptionsScreen),
-            f"focus={getattr(app.focused, 'id', None)}")
-    c.check("Tab in the load dialog lands on the address field",
-            getattr(app.focused, "id", None) == "load-base",
-            f"focus={getattr(app.focused, 'id', None)}")
+    c.check(
+        "Tab moves focus inside a modal instead of toggling the view",
+        app.focused is not first and isinstance(app.screen, LoadOptionsScreen),
+        f"focus={getattr(app.focused, 'id', None)}",
+    )
+    c.check(
+        "Tab in the load dialog lands on the address field",
+        getattr(app.focused, "id", None) == "load-base",
+        f"focus={getattr(app.focused, 'id', None)}",
+    )
     await c.press("tab")
     await c.pause(0.2)
-    c.check("Tab again returns to the processor filter",
-            getattr(app.focused, "id", None) == "pal-input",
-            f"focus={getattr(app.focused, 'id', None)}")
+    c.check(
+        "Tab again returns to the processor filter",
+        getattr(app.focused, "id", None) == "pal-input",
+        f"focus={getattr(app.focused, 'id', None)}",
+    )
     await c.press("escape")
     await c.wait(lambda: not isinstance(app.screen, LoadOptionsScreen), 10)
 
@@ -800,6 +941,7 @@ async def s_asm_highlight(c: Ctx):
     with the plain text, carried on the Head, and mapped to a style.
     """
     from idatui.app import _S_SPAN
+
     app = c.app
     await c.open_biggest("listing")
     lst = c.lst
@@ -811,30 +953,40 @@ async def s_asm_highlight(c: Ctx):
     rows = [lst.model.get(i) for i in range(min(lst.model.loaded(), 400))]
     rows = [h for h in rows if h is not None]
     code = [h for h in rows if h.kind == "code"]
-    c.check("code rows carry IDA's token spans",
-            code and sum(1 for h in code if h.spans) > len(code) * 0.9,
-            f"{sum(1 for h in code if h.spans)}/{len(code)} have spans")
+    c.check(
+        "code rows carry IDA's token spans",
+        code and sum(1 for h in code if h.spans) > len(code) * 0.9,
+        f"{sum(1 for h in code if h.spans)}/{len(code)} have spans",
+    )
 
     kinds = {k for h in rows for k, _ in (h.spans or ())}
     # If a tag isn't mapped it renders as body text and nothing says why, so the
     # ones that carry real meaning are worth asserting explicitly.
     for want in ("insn", "reg", "punct"):
         c.check(f"the palette sees {want} tokens", want in kinds, f"{sorted(kinds)}")
-    c.check("every span kind has a style",
-            all(k in _S_SPAN for k in kinds), f"unstyled: {sorted(kinds - set(_S_SPAN))}")
+    c.check(
+        "every span kind has a style",
+        all(k in _S_SPAN for k in kinds),
+        f"unstyled: {sorted(kinds - set(_S_SPAN))}",
+    )
 
     # Spans must describe the SAME text the row shows, or the row renders
     # different characters than search/width calculations think it has.
-    bad = [h for h in rows if h.spans
-           and "".join(t for _k, t in h.spans) != h.text]
-    c.check("spans reconstruct the row text exactly", not bad,
-            f"{[(hex(h.ea), h.text) for h in bad[:2]]}")
+    bad = [h for h in rows if h.spans and "".join(t for _k, t in h.spans) != h.text]
+    c.check(
+        "spans reconstruct the row text exactly",
+        not bad,
+        f"{[(hex(h.ea), h.text) for h in bad[:2]]}",
+    )
 
     # And the mnemonic must be the loudest thing on the line (the column you
     # scan), not just any styled token.
     mn = next((h for h in code if h.spans and h.spans[0][0] == "insn"), None)
-    c.check("the mnemonic is the first span",
-            mn is not None, f"{code[0].spans if code else None}")
+    c.check(
+        "the mnemonic is the first span",
+        mn is not None,
+        f"{code[0].spans if code else None}",
+    )
 
 
 @scenario("status_names_the_file")
@@ -846,26 +998,30 @@ async def s_status_names_the_file(c: Ctx):
     it belongs to.
     """
     from textual.widgets import Static
+
     app = c.app
     await c.open_biggest("listing")
     await c.pause(0.3)
     name = os.path.basename(app._open_path)
     status = str(app.query_one("#status", Static).render())
-    c.check("the status bar names the open file",
-            status.startswith(f"[{name}]"), f"{status[:60]!r} (want [{name}])")
+    c.check(
+        "the status bar names the open file",
+        status.startswith(f"[{name}]"),
+        f"{status[:60]!r} (want [{name}])",
+    )
 
     # It must survive the messages that WRITE the status, not just the idle one.
     c.lst.focus()
     await c.press("down")
     await c.pause(0.3)
     status = str(app.query_one("#status", Static).render())
-    c.check("and keeps naming it as you move",
-            status.startswith(f"[{name}]"), status[:60])
+    c.check(
+        "and keeps naming it as you move", status.startswith(f"[{name}]"), status[:60]
+    )
 
     # The function-count message used to include the module name itself, which
     # would now read "[echo] echo — 128 functions".
-    c.check("without saying the name twice",
-            status.count(name) == 1, status[:70])
+    c.check("without saying the name twice", status.count(name) == 1, status[:70])
 
 
 @scenario("command_palette")
@@ -873,10 +1029,12 @@ async def s_command_palette(c: Ctx):
     app = c.app
     await c.open_biggest("listing")
     await c.press("ctrl+p")
-    opened = await c.wait(
-        lambda: type(app.screen).__name__ == "CommandPalette", 10)
-    c.check("Ctrl+P opens the command palette", opened,
-            f"screen={type(app.screen).__name__}")
+    opened = await c.wait(lambda: type(app.screen).__name__ == "CommandPalette", 10)
+    c.check(
+        "Ctrl+P opens the command palette",
+        opened,
+        f"screen={type(app.screen).__name__}",
+    )
     if not opened:
         return
     inp = app.screen.query_one(Input)
@@ -884,8 +1042,9 @@ async def s_command_palette(c: Ctx):
     await c.pause(0.5)  # let the async search + option list settle
     await c.press("enter")
     landed = await c.wait(lambda: app._active == "hex", 10)
-    c.check("a palette command executes (Hex view opens)", landed,
-            f"active={app._active}")
+    c.check(
+        "a palette command executes (Hex view opens)", landed, f"active={app._active}"
+    )
     if landed:
         await c.press("backslash")  # leave hex
         await c.wait(lambda: app._active != "hex", 5)
@@ -894,21 +1053,32 @@ async def s_command_palette(c: Ctx):
 @scenario("quit_guard")
 async def s_quit_guard(c: Ctx):
     app = c.app
-    c.check("a clean database reports nothing unsaved", app._dirty_labels() == [],
-            f"{app._dirty_labels()}")
+    c.check(
+        "a clean database reports nothing unsaved",
+        app._dirty_labels() == [],
+        f"{app._dirty_labels()}",
+    )
     app._dirty = True  # as an edit would
-    c.check("an edited database is reported unsaved",
-            len(app._dirty_labels()) == 1, f"{app._dirty_labels()}")
+    c.check(
+        "an edited database is reported unsaved",
+        len(app._dirty_labels()) == 1,
+        f"{app._dirty_labels()}",
+    )
     await c.press("q")
     asked = await c.wait(lambda: isinstance(app.screen, QuitScreen), 10)
-    c.check("quitting with unsaved changes asks first", asked and app.is_running,
-            f"screen={type(app.screen).__name__} running={app.is_running}")
+    c.check(
+        "quitting with unsaved changes asks first",
+        asked and app.is_running,
+        f"screen={type(app.screen).__name__} running={app.is_running}",
+    )
     if not asked:
         return
     await c.press("escape")
     await c.wait(lambda: not isinstance(app.screen, QuitScreen), 10)
-    c.check("Esc cancels the quit and stays put",
-            app.is_running and not isinstance(app.screen, QuitScreen))
+    c.check(
+        "Esc cancels the quit and stays put",
+        app.is_running and not isinstance(app.screen, QuitScreen),
+    )
     # leave it clean so the rest of the suite (and teardown) isn't affected
     app._dirty = False
     app._save_on_exit = False
@@ -918,13 +1088,16 @@ async def s_quit_guard(c: Ctx):
 async def s_help(c: Ctx):
     app = c.app
     st = app.query_one("#status", Static)
-    c.check("the status line owns the bottom row (no footer cheatsheet)",
-            st.region.y + st.region.height == app.size.height,
-            f"status={st.region} screen={app.size}")
+    c.check(
+        "the status line owns the bottom row (no footer cheatsheet)",
+        st.region.y + st.region.height == app.size.height,
+        f"status={st.region} screen={app.size}",
+    )
     await c.press("f1")
     opened = await c.wait(lambda: isinstance(app.screen, HelpScreen), 10)
-    c.check("F1 opens the key cheatsheet", opened,
-            f"screen={type(app.screen).__name__}")
+    c.check(
+        "F1 opens the key cheatsheet", opened, f"screen={type(app.screen).__name__}"
+    )
     if not opened:
         return
     cards = app.screen.query(".help-card")
@@ -932,16 +1105,26 @@ async def s_help(c: Ctx):
     txt = " ".join(str(w.render()) for w in cards)
     # Derived from _HELP, not hardcoded: adding a group is a normal change and
     # shouldn't fail a test that only meant 'every group is rendered'.
-    c.check("each key group gets its own card",
-            titles == {t for t, _ in _HELP}, f"{titles}")
-    c.check("it documents real bindings",
-            "set type" in txt and "split view" in txt and "cross-references" in txt)
-    c.check("the graph keys are documented",
-            "control-flow graph" in txt and "minimap" in txt)
+    c.check(
+        "each key group gets its own card", titles == {t for t, _ in _HELP}, f"{titles}"
+    )
+    c.check(
+        "it documents real bindings",
+        "set type" in txt
+        and "split view" in txt
+        and "cross-references" in txt
+        and "refresh the current view" in txt,
+    )
+    c.check(
+        "the graph keys are documented",
+        "control-flow graph" in txt and "minimap" in txt,
+    )
     body = app.screen.query_one("#help-body")
-    c.check("the cards fit without a scrollbar at a normal size",
-            body.virtual_size.height <= body.size.height,
-            f"content={body.virtual_size.height} view={body.size.height}")
+    c.check(
+        "the cards fit without a scrollbar at a normal size",
+        body.virtual_size.height <= body.size.height,
+        f"content={body.virtual_size.height} view={body.size.height}",
+    )
     await c.press("escape")
     await c.wait(lambda: not isinstance(app.screen, HelpScreen), 10)
     c.check("Esc closes it", not isinstance(app.screen, HelpScreen))
@@ -949,8 +1132,9 @@ async def s_help(c: Ctx):
     # cheatsheet must not be reachable ONLY through F1.
     await c.press("H")
     opened_h = await c.wait(lambda: isinstance(app.screen, HelpScreen), 10)
-    c.check("H opens the cheatsheet too", opened_h,
-            f"screen={type(app.screen).__name__}")
+    c.check(
+        "H opens the cheatsheet too", opened_h, f"screen={type(app.screen).__name__}"
+    )
     if opened_h:
         await c.press("H")
         await c.wait(lambda: not isinstance(app.screen, HelpScreen), 10)
@@ -962,39 +1146,54 @@ async def s_strings(c: Ctx):
     app = c.app
     await c.open_biggest("listing")
     items = app.program.strings()
-    c.check("program.strings() lists the binary's literals", len(items) > 3,
-            f"n={len(items)}")
+    c.check(
+        "program.strings() lists the binary's literals",
+        len(items) > 3,
+        f"n={len(items)}",
+    )
     if not items:
         return
-    c.check("strings carry addr/text/length",
-            all(s.addr > 0 and s.text and s.length > 0 for s in items[:5]),
-            f"first={items[0]}")
+    c.check(
+        "strings carry addr/text/length",
+        all(s.addr > 0 and s.text and s.length > 0 for s in items[:5]),
+        f"first={items[0]}",
+    )
     await c.press("quotation_mark")
     opened = await c.wait(lambda: isinstance(app.screen, StringsPalette), 25)
-    c.check('\'"\' opens the strings browser', opened,
-            f"screen={type(app.screen).__name__}")
+    c.check(
+        "'\"' opens the strings browser", opened, f"screen={type(app.screen).__name__}"
+    )
     if not opened:
         return
     pal = app.screen
-    c.check("the browser lists strings", len(pal._results) > 0,
-            f"results={len(pal._results)}")
+    c.check(
+        "the browser lists strings",
+        len(pal._results) > 0,
+        f"results={len(pal._results)}",
+    )
     # filter on a fragment of a real (unescaped) literal
-    target = next((s for s in items
-                   if len(s.text) >= 6 and _str_display(s.text) == s.text), None)
+    target = next(
+        (s for s in items if len(s.text) >= 6 and _str_display(s.text) == s.text), None
+    )
     if target is not None:
         frag = target.text[:6]
         pal.query_one(Input).value = frag
         await c.pause(0.2)
-        ok = (pal._results
-              and all(frag.lower() in t.lower() for _, _, t in pal._results))
-        c.check("filtering narrows to matching strings", bool(ok),
-                f"frag={frag!r} n={len(pal._results)}")
+        ok = pal._results and all(frag.lower() in t.lower() for _, _, t in pal._results)
+        c.check(
+            "filtering narrows to matching strings",
+            bool(ok),
+            f"frag={frag!r} n={len(pal._results)}",
+        )
         want = pal._results[0][1]
         await c.press("enter")
         await c.wait(lambda: not isinstance(app.screen, StringsPalette), 10)
         landed = await c.wait(lambda: c.lst._cursor_ea() == want, 20)
-        c.check("Enter jumps to the string in the unified listing", landed,
-                f"cursor={c.lst._cursor_ea()} want={want:#x}")
+        c.check(
+            "Enter jumps to the string in the unified listing",
+            landed,
+            f"cursor={c.lst._cursor_ea()} want={want:#x}",
+        )
     else:
         await c.press("escape")
 
@@ -1013,31 +1212,42 @@ async def s_view_modes_all_handled(c: Ctx):
     the next mode that forgets to appear somewhere.
     """
     from idatui.app import ViewMode
+
     app = c.app
     fn = await c.open_biggest("listing")
     try:
         for mode in ViewMode:
             app._active = mode
-            app._show_active()          # must not raise for any member
+            app._show_active()  # must not raise for any member
             await c.pause(0.05)
             view = app._active_code_view()
             if mode in ViewMode.code_modes():
-                c.check(f"{mode.value}: _active_code_view resolves a widget",
-                        view is not None, f"{mode.value} -> None")
-            c.check(f"{mode.value}: exactly one predicate is true",
-                    sum((app.is_listing, app.is_decomp,
-                         app.is_hex, app.is_graph)) == 1,
-                    f"{mode.value}: listing={app.is_listing} "
-                    f"decomp={app.is_decomp} hex={app.is_hex} graph={app.is_graph}")
-            c.check(f"{mode.value}: in_code agrees with code_modes()",
-                    app.in_code == (mode in ViewMode.code_modes()),
-                    f"in_code={app.in_code} for {mode.value}")
-        c.check("every mode is a plain string over the wire",
-                all(isinstance(m, str) and m == m.value for m in ViewMode),
-                str([repr(m) for m in ViewMode]))
-        c.check("'disasm' is not a mode any more",
-                "disasm" not in {m.value for m in ViewMode},
-                str([m.value for m in ViewMode]))
+                c.check(
+                    f"{mode.value}: _active_code_view resolves a widget",
+                    view is not None,
+                    f"{mode.value} -> None",
+                )
+            c.check(
+                f"{mode.value}: exactly one predicate is true",
+                sum((app.is_listing, app.is_decomp, app.is_hex, app.is_graph)) == 1,
+                f"{mode.value}: listing={app.is_listing} "
+                f"decomp={app.is_decomp} hex={app.is_hex} graph={app.is_graph}",
+            )
+            c.check(
+                f"{mode.value}: in_code agrees with code_modes()",
+                app.in_code == (mode in ViewMode.code_modes()),
+                f"in_code={app.in_code} for {mode.value}",
+            )
+        c.check(
+            "every mode is a plain string over the wire",
+            all(isinstance(m, str) and m == m.value for m in ViewMode),
+            str([repr(m) for m in ViewMode]),
+        )
+        c.check(
+            "'disasm' is not a mode any more",
+            "disasm" not in {m.value for m in ViewMode},
+            str([m.value for m in ViewMode]),
+        )
     finally:
         # Restore through a real navigation, not by poking _active back.
         # _show_active() tears down split state and re-points the panes as a
@@ -1046,6 +1256,56 @@ async def s_view_modes_all_handled(c: Ctx):
         # listing model, which reads as split_view's bug and isn't.
         app._active = ViewMode.LISTING
         await c.open(fn.addr, "listing")
+
+
+@scenario("refresh_view")
+async def s_refresh_view(c: Ctx):
+    """Ctrl+R replaces stale backing data without moving the listing."""
+    fn = await c.open_biggest("listing")
+    await c.press("down", "down", "down")
+    lst = c.lst
+    old_model = lst.model
+    old_ea = lst._cursor_ea()
+    old_top = round(lst.scroll_offset.y)
+    old_head = old_model.get(old_top) if old_model is not None else None
+    old_top_ea = getattr(old_head, "ea", None)
+
+    await c.press("ctrl+r")
+    landed = await c.wait(
+        lambda: lst.model is not old_model and lst._cursor_ea() == old_ea, 25
+    )
+    c.check("Ctrl+R rebuilds the listing model", lst.model is not old_model)
+    c.check(
+        "Ctrl+R preserves the cursor address",
+        landed,
+        f"got={lst._cursor_ea()} want={old_ea}",
+    )
+    new_top = round(lst.scroll_offset.y)
+    new_head = lst.model.get(new_top) if lst.model is not None else None
+    c.check(
+        "Ctrl+R preserves the viewport by address",
+        getattr(new_head, "ea", None) == old_top_ea,
+        f"got={getattr(new_head, 'ea', None)} want={old_top_ea}",
+    )
+
+    await c.open(fn.addr, "decomp")
+    dec = c.dec
+    dec.cursor = min(3, max(len(dec._texts) - 1, 0))
+    old_dec_cursor = dec.cursor
+    await c.press("ctrl+r")
+    refreshed = await c.wait(
+        lambda: c.app.is_decomp and dec.loaded_ea == fn.addr and not dec.loading, 25
+    )
+    c.check(
+        "Ctrl+R reloads pseudocode without changing views",
+        refreshed,
+        f"active={c.app._active} loaded={dec.loaded_ea} want={fn.addr:#x}",
+    )
+    c.check(
+        "Ctrl+R preserves the pseudocode cursor",
+        dec.cursor == old_dec_cursor,
+        f"got={dec.cursor} want={old_dec_cursor}",
+    )
 
 
 @scenario("split_view")
@@ -1073,51 +1333,73 @@ async def s_split_view(c: Ctx):
         await _split_view_body(c, app, lst, dec)
     finally:
         c.prog.client.invoke = _orig_call
-    c.check("split view doesn't storm the worker with function lookups",
-            _lookups["n"] < 500, f"{_lookups['n']} lookup_funcs calls")
+    c.check(
+        "split view doesn't storm the worker with function lookups",
+        _lookups["n"] < 500,
+        f"{_lookups['n']} lookup_funcs calls",
+    )
 
 
 async def _split_view_body(c: Ctx, app, lst, dec):
     await c.open_biggest("listing")
     await c.press("s")
     shown = await c.wait(lambda: app._split and lst.display and dec.display, 20)
-    c.check("'s' enters split view (both panes shown)", shown,
-            f"split={app._split} lst={lst.display} dec={dec.display}")
+    c.check(
+        "'s' enters split view (both panes shown)",
+        shown,
+        f"split={app._split} lst={lst.display} dec={dec.display}",
+    )
     loaded = await c.wait(lambda: dec.loaded_ea == app._cur.ea, 25)
-    c.check("split loads the pseudocode alongside the listing", loaded,
-            f"loaded={dec.loaded_ea} cur={app._cur.ea if app._cur else None}")
+    c.check(
+        "split loads the pseudocode alongside the listing",
+        loaded,
+        f"loaded={dec.loaded_ea} cur={app._cur.ea if app._cur else None}",
+    )
     await c.wait(lambda: "[split" in c.status(), 5)
-    c.check("split view shows a split-aware status", "[split" in c.status(),
-            f"status={c.status()!r}")
+    c.check(
+        "split view shows a split-aware status",
+        "[split" in c.status(),
+        f"status={c.status()!r}",
+    )
     # phase 3: the rich per-line instruction map (decomp_map tool, run on the
     # pilot's real worker) — verify it returns, aligns with the markers, and
     # bands a whole region for a multi-instruction C line.
     m = app.program.decomp_map(app._cur.ea)
     c.check("decomp_map returns per-line ea sets", len(m) > 5, f"lines={len(m)}")
-    aligned = sum(1 for i in range(min(len(m), len(dec._line_eas)))
-                  if m[i] and dec._line_eas[i] is not None
-                  and dec._line_eas[i] in m[i])
-    c.check("decomp_map aligns with the pseudocode markers", aligned >= 3,
-            f"aligned={aligned}/{len(dec._line_eas)}")
+    aligned = sum(
+        1
+        for i in range(min(len(m), len(dec._line_eas)))
+        if m[i] and dec._line_eas[i] is not None and dec._line_eas[i] in m[i]
+    )
+    c.check(
+        "decomp_map aligns with the pseudocode markers",
+        aligned >= 3,
+        f"aligned={aligned}/{len(dec._line_eas)}",
+    )
     multi = next((i for i, eas in enumerate(m) if len(eas) > 1), None)
     if multi is not None:
         app._split_eamap = m
-        dec.focus()          # the decomp must BE the driver for a decomp-driven
+        dec.focus()  # the decomp must BE the driver for a decomp-driven
         app._active = "decomp"  # sync (else its align() re-syncs listing-driven)
         dec.cursor = multi
         dec._scroll_cursor_into_view()  # key-nav always does; the anchor needs it
         await c.pause(0.1)
         app._sync_split("decomp")
         await c.pause(0.1)
-        c.check("a multi-instruction C line bands a region (>1 listing row)",
-                len(lst._link_rows) > 1,
-                f"line={multi} eas={len(m[multi])} rows={sorted(lst._link_rows)[:8]}")
+        c.check(
+            "a multi-instruction C line bands a region (>1 listing row)",
+            len(lst._link_rows) > 1,
+            f"line={multi} eas={len(m[multi])} rows={sorted(lst._link_rows)[:8]}",
+        )
         lst.focus()
         app._active = "listing"
         await c.pause(0.05)
     else:
-        c.check("a multi-instruction C line bands a region (>1 listing row)",
-                True, "no multi-instruction line in this function (skipped)")
+        c.check(
+            "a multi-instruction C line bands a region (>1 listing row)",
+            True,
+            "no multi-instruction line in this function (skipped)",
+        )
     # listing drives: move it, the decomp band must track the covering C line
     lst.focus()
     for _ in range(6):
@@ -1125,48 +1407,60 @@ async def _split_view_body(c: Ctx, app, lst, dec):
     await c.pause(0.2)
     lea = lst._cursor_ea()
     dl = dec._link_line
-    c.check("listing cursor links the covering pseudocode line",
-            dl is not None and lea is not None and dec._line_eas[dl] is not None
-            and dec._line_eas[dl] <= lea,
-            f"link_line={dl} lea={hex(lea) if lea else None}")
+    c.check(
+        "listing cursor links the covering pseudocode line",
+        dl is not None
+        and lea is not None
+        and dec._line_eas[dl] is not None
+        and dec._line_eas[dl] <= lea,
+        f"link_line={dl} lea={hex(lea) if lea else None}",
+    )
     # the companion pane sits LEVEL with the driver's cursor (visual coherence):
     # the linked row lands at the same viewport offset, not merely on-screen.
     deep = [i for i, eas in enumerate(m) if eas][10:]
     row = lst.model.ensure_ea(m[deep[0]][0]) if (deep and lst.model) else None
     if row is not None and row > 12:
         lst.scroll_to(y=row - 10, animate=False)
-        await c.pause(0.2)          # let the deferred scroll land
-        lst.cursor = row            # driver cursor now at viewport offset 10
+        await c.pause(0.2)  # let the deferred scroll land
+        lst.cursor = row  # driver cursor now at viewport offset 10
         app._sync_split("listing")
-        await c.pause(0.2)          # let the companion's scroll land
+        await c.pause(0.2)  # let the companion's scroll land
         drv = lst.cursor - round(lst.scroll_offset.y)
         link, top = dec._link_line, round(dec.scroll_offset.y)
         # exact, modulo the unavoidable clamps (can't scroll above line 0, nor
         # past the end when the pseudocode is shorter than the viewport)
-        want = min(max(0, (link or 0) - drv),
-                   max(0, dec.total - dec._visible_height()))
-        c.check("the companion pane sits level with the driver's cursor",
-                link is not None and top == want,
-                f"driver_row={drv} link={link} dec_top={top} want={want}")
+        want = min(max(0, (link or 0) - drv), max(0, dec.total - dec._visible_height()))
+        c.check(
+            "the companion pane sits level with the driver's cursor",
+            link is not None and top == want,
+            f"driver_row={drv} link={link} dec_top={top} want={want}",
+        )
         # a PURE scroll (wheel/scrollbar) moves no cursor — it must still drag
         # the companion along (anchors on the viewport once the cursor is gone)
         before_cur, before_dec = lst.cursor, round(dec.scroll_offset.y)
         lst.scroll_to(y=round(lst.scroll_offset.y) + 30, animate=False)
         await c.pause(0.35)
-        c.check("a pure scroll in the driver drags the companion along",
-                lst.cursor == before_cur
-                and round(dec.scroll_offset.y) != before_dec,
-                f"cursor {before_cur}->{lst.cursor} "
-                f"dec_top {before_dec}->{round(dec.scroll_offset.y)}")
+        c.check(
+            "a pure scroll in the driver drags the companion along",
+            lst.cursor == before_cur and round(dec.scroll_offset.y) != before_dec,
+            f"cursor {before_cur}->{lst.cursor} "
+            f"dec_top {before_dec}->{round(dec.scroll_offset.y)}",
+        )
     await c.press("tab")
     await c.pause(0.1)
-    c.check("Tab in split focuses the pseudocode pane", app._active == "decomp",
-            f"active={app._active}")
+    c.check(
+        "Tab in split focuses the pseudocode pane",
+        app._active == "decomp",
+        f"active={app._active}",
+    )
     # decomp drives: put the cursor on an addressed pseudocode line (past the
     # variable decls); the listing band must track the covering instruction row.
     target = next((i for i, e in enumerate(dec._line_eas) if e is not None), None)
-    c.check("pseudocode has addressed lines", target is not None,
-            "no /*0xEA*/ markers in the pseudocode")
+    c.check(
+        "pseudocode has addressed lines",
+        target is not None,
+        "no /*0xEA*/ markers in the pseudocode",
+    )
     if target is not None:
         dec.cursor = target
         dec._scroll_cursor_into_view()
@@ -1174,27 +1468,39 @@ async def _split_view_body(c: Ctx, app, lst, dec):
         app._sync_split("decomp")
         await c.pause(0.1)
         want = lst.model.ensure_ea(dec._line_eas[target])
-        c.check("decomp cursor links the instruction row in the listing",
-                want in lst._link_rows,
-                f"link_rows={sorted(lst._link_rows)[:6]} want={want}")
+        c.check(
+            "decomp cursor links the instruction row in the listing",
+            want in lst._link_rows,
+            f"link_rows={sorted(lst._link_rows)[:6]} want={want}",
+        )
         # and that linked row actually paints a background band (base rows have
         # no bg; `want` is a deep code row, never the listing's own cursor row)
         lst.reveal(want)
         await c.pause(0.05)
         y = want - round(lst.scroll_offset.y)
-        banded = (0 <= y < lst.size.height and any(
-            s.style and s.style.bgcolor is not None for s in lst.render_line(y)))
-        c.check("the linked instruction row renders a highlight band", banded,
-                f"y={y} cursor_row={lst.cursor}")
+        banded = 0 <= y < lst.size.height and any(
+            s.style and s.style.bgcolor is not None for s in lst.render_line(y)
+        )
+        c.check(
+            "the linked instruction row renders a highlight band",
+            banded,
+            f"y={y} cursor_row={lst.cursor}",
+        )
     await c.press("tab")
     await c.pause(0.1)
-    c.check("Tab again focuses the listing pane", app._active == "listing",
-            f"active={app._active}")
+    c.check(
+        "Tab again focuses the listing pane",
+        app._active == "listing",
+        f"active={app._active}",
+    )
     # a mouse click on the other pane also makes it the driver (not just Tab)
     await c.pilot.click(DecompView, offset=(10, 5))
     await c.pause(0.15)
-    c.check("clicking the pseudocode pane makes it the driver",
-            app._active == "decomp", f"active={app._active}")
+    c.check(
+        "clicking the pseudocode pane makes it the driver",
+        app._active == "decomp",
+        f"active={app._active}",
+    )
     await c.press("tab")  # restore listing as the driver
     await c.pause(0.1)
     # cross-function follow: the listing cursor leaving the decompiled function
@@ -1210,8 +1516,11 @@ async def _split_view_body(c: Ctx, app, lst, dec):
         await c.pause(0.1)
         app._sync_split("listing")  # cursor now outside the decompiled fn
         followed = await c.wait(lambda: dec.loaded_ea == other.addr, 25)
-        c.check("listing cursor crossing into another function re-syncs the decomp",
-                followed, f"dec={dec.loaded_ea} want={other.addr}")
+        c.check(
+            "listing cursor crossing into another function re-syncs the decomp",
+            followed,
+            f"dec={dec.loaded_ea} want={other.addr}",
+        )
     # navigation in split keeps BOTH panes on the (new) function
     nf = c.find_func(lambda f: f.addr != app._cur.ea and f.size > 80)
     if nf is not None:
@@ -1219,27 +1528,42 @@ async def _split_view_body(c: Ctx, app, lst, dec):
         await c.type(hex(nf.addr))
         await c.press("enter")
         nav = await c.wait(lambda: app._cur and app._cur.ea == nf.addr, 15)
-        c.check("goto in split navigates", nav,
-                f"cur={app._cur.ea if app._cur else None} want={nf.addr}")
-        both = await c.wait(lambda: dec.loaded_ea == nf.addr and app._split
-                            and lst.display and dec.display, 25)
-        c.check("split reloads both panes on navigation", both,
-                f"dec={dec.loaded_ea} split={app._split}")
+        c.check(
+            "goto in split navigates",
+            nav,
+            f"cur={app._cur.ea if app._cur else None} want={nf.addr}",
+        )
+        both = await c.wait(
+            lambda: (
+                dec.loaded_ea == nf.addr and app._split and lst.display and dec.display
+            ),
+            25,
+        )
+        c.check(
+            "split reloads both panes on navigation",
+            both,
+            f"dec={dec.loaded_ea} split={app._split}",
+        )
     await c.press("s")
-    gone = await c.wait(lambda: not app._split and lst.display
-                        and not dec.display, 10)
-    c.check("'s' exits split back to a single view", gone,
-            f"split={app._split} lst={lst.display} dec={dec.display}")
-    c.check("exiting split clears the link bands",
-            not lst._link_rows and dec._link_line is None,
-            f"rows={lst._link_rows} line={dec._link_line}")
+    gone = await c.wait(lambda: not app._split and lst.display and not dec.display, 10)
+    c.check(
+        "'s' exits split back to a single view",
+        gone,
+        f"split={app._split} lst={lst.display} dec={dec.display}",
+    )
+    c.check(
+        "exiting split clears the link bands",
+        not lst._link_rows and dec._link_line is None,
+        f"rows={lst._link_rows} line={dec._link_line}",
+    )
 
 
 @scenario("decomp_fallback")
 async def s_fallback(c: Ctx):
     app = c.app
-    failing = next((f for f in reversed(c.all_funcs())
-                    if c.prog.decompile(f.addr).failed), None)
+    failing = next(
+        (f for f in reversed(c.all_funcs()) if c.prog.decompile(f.addr).failed), None
+    )
     if failing is None:
         c.check("found a decompile-failing function", False)
         return
@@ -1254,15 +1578,23 @@ async def s_fallback(c: Ctx):
     # was pressed, since the function was opened in the listing. It asserted
     # nothing, slowly.
     landed = await c.wait(lambda: _CANNOT_DECOMP in c.status().lower(), 25)
-    c.check("F5/Tab on an undecompilable function says so", landed,
-            f"active={app._active} status={c.status()!r}")
-    c.check("F5/Tab on an undecompilable function falls back to a code view",
-            app.is_listing and c.dis.display,
-            f"active={app._active} status={c.status()!r}")
+    c.check(
+        "F5/Tab on an undecompilable function says so",
+        landed,
+        f"active={app._active} status={c.status()!r}",
+    )
+    c.check(
+        "F5/Tab on an undecompilable function falls back to a code view",
+        app.is_listing and c.dis.display,
+        f"active={app._active} status={c.status()!r}",
+    )
     # a decompilable function F5s into pseudocode
     await c.open("main", "decomp")
-    c.check("a decompilable function F5s into pseudocode",
-            app._active == "decomp" and c.dec.display, f"active={app._active}")
+    c.check(
+        "a decompilable function F5s into pseudocode",
+        app._active == "decomp" and c.dec.display,
+        f"active={app._active}",
+    )
 
 
 @scenario("structs")
@@ -1270,95 +1602,144 @@ async def s_structs(c: Ctx):
     app = c.app
     await c.press("ctrl+t")
     se_open = await c.wait(lambda: isinstance(app.screen, StructEditor), 10)
-    c.check("Ctrl+T opens the struct editor", se_open,
-            f"screen={type(app.screen).__name__}")
+    c.check(
+        "Ctrl+T opens the struct editor", se_open, f"screen={type(app.screen).__name__}"
+    )
     if not se_open:
         return
     se = app.screen
     await c.wait(lambda: bool(se._structs), 15)
-    c.check("struct editor lists existing structs", len(se._structs) > 0,
-            f"n={len(se._structs)}")
+    c.check(
+        "struct editor lists existing structs",
+        len(se._structs) > 0,
+        f"n={len(se._structs)}",
+    )
     ta = se.query_one(TextArea)
-    tname = next((s.name for s in se._structs if s.name == "timespec"),
-                 se._structs[0].name)
+    tname = next(
+        (s.name for s in se._structs if s.name == "timespec"), se._structs[0].name
+    )
     idx = next(i for i, s in enumerate(se._structs) if s.name == tname)
     se.query_one(OptionList).highlighted = idx
     se.on_option_list_option_selected(type("E", (), {"option_index": idx})())
     await c.wait(lambda: tname in ta.text and "{" in ta.text, 15)
-    c.check("selecting a struct shows its C definition",
-            tname in ta.text and "{" in ta.text, f"text={ta.text[:40]!r}")
+    c.check(
+        "selecting a struct shows its C definition",
+        tname in ta.text and "{" in ta.text,
+        f"text={ta.text[:40]!r}",
+    )
     # The definition is C, so it must be coloured as C (no tree-sitter grammar
     # for it: idatui.highlight fills TextArea's highlight map from Pygments).
     names = {n for spans in ta._highlights.values() for _, _, n in spans}
-    c.check("the C definition is syntax-highlighted",
-            {"keyword", "name"} <= names, f"names={sorted(names)}")
-    styled = {s.style.color.name for s in ta.render_line(0)
-              if s.style and s.style.color}
-    c.check("highlight styles reach the rendered line", len(styled) > 1,
-            f"colors={sorted(styled)}")
+    c.check(
+        "the C definition is syntax-highlighted",
+        {"keyword", "name"} <= names,
+        f"names={sorted(names)}",
+    )
+    styled = {
+        s.style.color.name for s in ta.render_line(0) if s.style and s.style.color
+    }
+    c.check(
+        "highlight styles reach the rendered line",
+        len(styled) > 1,
+        f"colors={sorted(styled)}",
+    )
     app._clipboard = ""
     se.query_one(TextArea).focus()
     await c.press("ctrl+y")
     await c.wait(lambda: app._clipboard == ta.text, 10)
-    c.check("Ctrl+Y copies the struct definition to the clipboard",
-            bool(app._clipboard) and app._clipboard == ta.text,
-            f"clip_len={len(app._clipboard)}")
+    c.check(
+        "Ctrl+Y copies the struct definition to the clipboard",
+        bool(app._clipboard) and app._clipboard == ta.text,
+        f"clip_len={len(app._clipboard)}",
+    )
     sname = "TuiEdTest"
     await c.press("ctrl+n")
     await c.pause(0.05)
     ta.text = f"struct {sname} {{ int a; char b[8]; }};"
     await c.press("ctrl+s")
     await c.wait(lambda: any(s.name == sname for s in se._structs), 15)
-    c.check("Ctrl+S declares a new struct",
-            any(s.name == sname for s in se._structs), "not created")
+    c.check(
+        "Ctrl+S declares a new struct",
+        any(s.name == sname for s in se._structs),
+        "not created",
+    )
     await c.wait(lambda: "\n" in ta.text, 10)
-    c.check("editing re-highlights the definition",
-            any(n == "keyword" for spans in ta._highlights.values()
-                for _, _, n in spans),
-            f"rows={len(ta._highlights)}")
-    c.check("save auto-formats the definition in the editor",
-            ta.text.count("\n") >= 3 and f"struct {sname}" in ta.text
-            and not se._is_dirty(), f"text={ta.text[:50]!r}")
+    c.check(
+        "editing re-highlights the definition",
+        any(n == "keyword" for spans in ta._highlights.values() for _, _, n in spans),
+        f"rows={len(ta._highlights)}",
+    )
+    c.check(
+        "save auto-formats the definition in the editor",
+        ta.text.count("\n") >= 3
+        and f"struct {sname}" in ta.text
+        and not se._is_dirty(),
+        f"text={ta.text[:50]!r}",
+    )
     idx = next(i for i, s in enumerate(se._structs) if s.name == sname)
     se.on_option_list_option_selected(type("E", (), {"option_index": idx})())
     await c.wait(lambda: sname in ta.text, 10)
     ta.text = f"struct {sname} {{ int a; char b[8]; long c; }};"
     await c.press("ctrl+s")
-    await c.wait(lambda: next((s.members for s in se._structs if s.name == sname), 0) == 3, 15)
-    c.check("Ctrl+S updates an existing struct in place",
-            next((s.members for s in se._structs if s.name == sname), 0) == 3,
-            "member count not 3")
+    await c.wait(
+        lambda: next((s.members for s in se._structs if s.name == sname), 0) == 3, 15
+    )
+    c.check(
+        "Ctrl+S updates an existing struct in place",
+        next((s.members for s in se._structs if s.name == sname), 0) == 3,
+        "member count not 3",
+    )
     ta.text = f"struct {sname} {{ int a; char b[8]; long c; int __unused; }};"
     await c.press("ctrl+s")
     await c.wait(lambda: "save failed" in str(se.query_one("#se-status").render()), 15)
     st = str(se.query_one("#se-status").render())
-    c.check("a rejected save fails loudly, naming the reserved field",
-            "save failed" in st and "__unused" in st, f"status={st!r}")
-    c.check("a rejected save leaves the struct unchanged",
-            next((s.members for s in se._structs if s.name == sname), 0) == 3, "changed")
+    c.check(
+        "a rejected save fails loudly, naming the reserved field",
+        "save failed" in st and "__unused" in st,
+        f"status={st!r}",
+    )
+    c.check(
+        "a rejected save leaves the struct unchanged",
+        next((s.members for s in se._structs if s.name == sname), 0) == 3,
+        "changed",
+    )
     c.check("a rejected save keeps your edited text", "__unused" in ta.text)
     other = next(i for i, s in enumerate(se._structs) if s.name != sname)
     se.on_option_list_option_selected(type("E", (), {"option_index": other})())
     guard = await c.wait(lambda: isinstance(app.screen, ConfirmScreen), 10)
-    c.check("unsaved edits prompt before switching structs", guard,
-            f"screen={type(app.screen).__name__}")
+    c.check(
+        "unsaved edits prompt before switching structs",
+        guard,
+        f"screen={type(app.screen).__name__}",
+    )
     await c.press("enter")
-    await c.wait(lambda: isinstance(app.screen, StructEditor) and not se._is_dirty(), 15)
+    await c.wait(
+        lambda: isinstance(app.screen, StructEditor) and not se._is_dirty(), 15
+    )
     idx = next(i for i, s in enumerate(se._structs) if s.name == sname)
     se.query_one(OptionList).focus()
     se.query_one(OptionList).highlighted = idx
     await c.press("d")
     confirmed = await c.wait(lambda: isinstance(app.screen, ConfirmScreen), 10)
-    c.check("delete asks for confirmation", confirmed,
-            f"screen={type(app.screen).__name__}")
+    c.check(
+        "delete asks for confirmation", confirmed, f"screen={type(app.screen).__name__}"
+    )
     await c.press("enter")
     await c.wait(lambda: isinstance(app.screen, StructEditor), 10)
-    await c.wait(lambda: not any(s.name == sname for s in se._structs)
-                 or "del_type" in str(se.query_one("#se-status").render()), 15)
+    await c.wait(
+        lambda: (
+            not any(s.name == sname for s in se._structs)
+            or "del_type" in str(se.query_one("#se-status").render())
+        ),
+        15,
+    )
     st = str(se.query_one("#se-status").render())
     gone = not any(s.name == sname for s in se._structs)
-    c.check("confirming delete removes the struct (or reports missing tool)",
-            gone or "del_type" in st, f"gone={gone} status={st!r}")
+    c.check(
+        "confirming delete removes the struct (or reports missing tool)",
+        gone or "del_type" in st,
+        f"gone={gone} status={st!r}",
+    )
     se.query_one(OptionList).focus()
     await c.press("escape")
     await c.wait(lambda: not isinstance(app.screen, StructEditor), 10)
@@ -1376,13 +1757,15 @@ async def s_splash_scaling(c: Ctx):
     it is placed in, so there was never a reason for all-or-nothing.
     """
     from idatui import kittygfx
-    from idatui.app import (LOGO_CHROME_ROWS, LOGO_MIN_ROWS, LoadingScreen,
-                            logo_cells)
+    from idatui.app import LOGO_CHROME_ROWS, LOGO_MIN_ROWS, LoadingScreen, logo_cells
 
     app = c.app
     placed: list[tuple] = []
     real_supported, real_upload, real_place = (
-        kittygfx.supported, kittygfx.upload, kittygfx.place)
+        kittygfx.supported,
+        kittygfx.upload,
+        kittygfx.place,
+    )
     kittygfx.supported = lambda: True
     kittygfx.upload = lambda *a, **k: True
     kittygfx.place = lambda *a, **k: (placed.append(a), True)[1]
@@ -1397,28 +1780,41 @@ async def s_splash_scaling(c: Ctx):
             await c.wait(lambda: scr._cells is not None, 5)
             room = height - LOGO_CHROME_ROWS
             has_image = bool(scr.query("#loading-image"))
-            c.check(f"{width}x{height}: the logo is drawn, not dropped",
-                    has_image and room >= LOGO_MIN_ROWS,
-                    f"image={has_image} room={room}")
+            c.check(
+                f"{width}x{height}: the logo is drawn, not dropped",
+                has_image and room >= LOGO_MIN_ROWS,
+                f"image={has_image} room={room}",
+            )
             if has_image:
                 cols, rows = scr._cells
-                c.check(f"{width}x{height}: scaled to the room available",
-                        rows <= room and rows == min(room, logo_cells()[1]),
-                        f"cells={scr._cells} room={room} natural={logo_cells()}")
+                c.check(
+                    f"{width}x{height}: scaled to the room available",
+                    rows <= room and rows == min(room, logo_cells()[1]),
+                    f"cells={scr._cells} room={room} natural={logo_cells()}",
+                )
                 await c.wait(lambda: scr.query_one("#loading-box").region.height > 0, 5)
                 box = scr.query_one("#loading-box").region
-                c.check(f"{width}x{height}: the box is not clipped",
-                        box.y >= 0 and box.y + box.height <= height,
-                        f"box={box} screen={height}")
+                c.check(
+                    f"{width}x{height}: the box is not clipped",
+                    box.y >= 0 and box.y + box.height <= height,
+                    f"box={box} screen={height}",
+                )
             app.pop_screen()
             await c.pause(0.05)
-        c.check("a full-size pane still gets the artwork's natural size",
-                logo_cells(999) == logo_cells(), f"{logo_cells(999)}")
-        c.check("and the image was actually placed each time", len(placed) >= 3,
-                f"{placed}")
+        c.check(
+            "a full-size pane still gets the artwork's natural size",
+            logo_cells(999) == logo_cells(),
+            f"{logo_cells(999)}",
+        )
+        c.check(
+            "and the image was actually placed each time", len(placed) >= 3, f"{placed}"
+        )
     finally:
         kittygfx.supported, kittygfx.upload, kittygfx.place = (
-            real_supported, real_upload, real_place)
+            real_supported,
+            real_upload,
+            real_place,
+        )
         # Every later scenario assumes the suite's own geometry.
         await c.pilot.resize_terminal(140, 44)
         await c.pause(0.05)
@@ -1438,33 +1834,45 @@ async def s_modal_centering(c: Ctx):
     import idatui.app as A
 
     ours = sorted(
-        (n for n, v in vars(A).items()
-         if isinstance(v, type) and issubclass(v, ModalScreen)
-         and v is not ModalScreen and v.__module__ == A.__name__),
-        key=str)
+        (
+            n
+            for n, v in vars(A).items()
+            if isinstance(v, type)
+            and issubclass(v, ModalScreen)
+            and v is not ModalScreen
+            and v.__module__ == A.__name__
+        ),
+        key=str,
+    )
     c.check("found the app's modal screens", len(ours) >= 8, f"{ours}")
     styles = A.IdaTui.CSS
-    c.check("centring is a rule about modals, not a list of them",
-            "ModalScreen { align: center middle; }" in styles,
-            "the ModalScreen rule is gone")
+    c.check(
+        "centring is a rule about modals, not a list of them",
+        "ModalScreen { align: center middle; }" in styles,
+        "the ModalScreen rule is gone",
+    )
     # And prove it REACHES a dialog, rather than just being present in the text.
     await c.press("ctrl+f")
     opened = await c.wait(lambda: isinstance(c.app.screen, A.SearchPalette), 10)
     if not opened:
-        c.check("the search palette opened", False,
-                f"screen={type(c.app.screen).__name__}")
+        c.check(
+            "the search palette opened", False, f"screen={type(c.app.screen).__name__}"
+        )
         return
     scr = c.app.screen
     await c.wait(lambda: scr.query_one("#pal-box").region.height > 0, 5)
     box = scr.query_one("#pal-box").region
     above, below = box.y, c.app.size.height - (box.y + box.height)
-    c.check("the search palette is vertically centred",
-            box.height > 0 and abs(above - below) <= 1,
-            f"box={box} screen={c.app.size} above={above} below={below}")
+    c.check(
+        "the search palette is vertically centred",
+        box.height > 0 and abs(above - below) <= 1,
+        f"box={box} screen={c.app.size} above={above} below={below}",
+    )
     left = box.x
     right = c.app.size.width - (box.x + box.width)
-    c.check("and horizontally centred", abs(left - right) <= 1,
-            f"left={left} right={right}")
+    c.check(
+        "and horizontally centred", abs(left - right) <= 1, f"left={left} right={right}"
+    )
     await c.press("escape")
     await c.wait(lambda: not isinstance(c.app.screen, A.SearchPalette), 5)
 
@@ -1476,8 +1884,9 @@ async def s_db_search(c: Ctx):
     await c.open("main", "listing")
     await c.press("ctrl+f")
     opened = await c.wait(lambda: isinstance(app.screen, SearchPalette), 10)
-    c.check("Ctrl+F opens the search palette", opened,
-            f"screen={type(app.screen).__name__}")
+    c.check(
+        "Ctrl+F opens the search palette", opened, f"screen={type(app.screen).__name__}"
+    )
     if not opened:
         return
     pal = app.screen
@@ -1487,29 +1896,40 @@ async def s_db_search(c: Ctx):
     inp.value = "endbr64"
     await c.press("enter")
     await c.wait(lambda: bool(pal._hits), 30)
-    c.check("a text search finds instructions", len(pal._hits) > 1,
-            f"n={len(pal._hits)}")
-    c.check("and it was classified as text",
-            pal._searched and pal._searched[0] == "text", f"{pal._searched}")
-    c.check("hits carry the line they matched",
-            all("endbr64" in h.line for h in pal._hits[:5]),
-            [h.line for h in pal._hits[:3]])
+    c.check(
+        "a text search finds instructions", len(pal._hits) > 1, f"n={len(pal._hits)}"
+    )
+    c.check(
+        "and it was classified as text",
+        pal._searched and pal._searched[0] == "text",
+        f"{pal._searched}",
+    )
+    c.check(
+        "hits carry the line they matched",
+        all("endbr64" in h.line for h in pal._hits[:5]),
+        [h.line for h in pal._hits[:3]],
+    )
 
     # -- text with padding: match what is SEEN, not IDA's column spacing ----- #
     inp.value = "call cs:"
     await c.press("enter")
     found = await c.wait(lambda: pal._searched == ("text", "call cs:"), 30)
-    c.check("a query spanning IDA's column padding still matches",
-            found and len(pal._hits) > 0, f"n={len(pal._hits)}")
+    c.check(
+        "a query spanning IDA's column padding still matches",
+        found and len(pal._hits) > 0,
+        f"n={len(pal._hits)}",
+    )
 
     # -- bytes: the same endbr64, as a pattern ------------------------------- #
     inp.value = "f3 0f 1e fa"
     await c.press("enter")
     await c.wait(lambda: pal._searched and pal._searched[0] == "bytes", 30)
-    c.check("a hex query is classified as bytes",
-            pal._searched and pal._searched[0] == "bytes", f"{pal._searched}")
-    c.check("and finds the same instruction", len(pal._hits) > 1,
-            f"n={len(pal._hits)}")
+    c.check(
+        "a hex query is classified as bytes",
+        pal._searched and pal._searched[0] == "bytes",
+        f"{pal._searched}",
+    )
+    c.check("and finds the same instruction", len(pal._hits) > 1, f"n={len(pal._hits)}")
 
     # -- wildcards ----------------------------------------------------------- #
     inp.value = "f3 0f ?? fa"
@@ -1522,34 +1942,49 @@ async def s_db_search(c: Ctx):
     await c.press("enter")
     await c.pause(0.1)
     title = str(app.screen.query_one("#pal-box").border_title)
-    c.check("a malformed byte pattern is refused with a reason",
-            "not a byte" in title, f"title={title!r}")
+    c.check(
+        "a malformed byte pattern is refused with a reason",
+        "not a byte" in title,
+        f"title={title!r}",
+    )
 
     # -- F2 pins the mode against the guess ---------------------------------- #
     inp.value = "dead"
     await c.pause(0.05)
-    c.check("a hex-looking WORD still searches text",
-            pal._mode_query()[0] == "text", f"{pal._mode_query()}")
+    c.check(
+        "a hex-looking WORD still searches text",
+        pal._mode_query()[0] == "text",
+        f"{pal._mode_query()}",
+    )
     await c.press("f2")
-    c.check("F2 forces it to bytes", pal._mode_query()[0] == "bytes",
-            f"{pal._mode_query()}")
+    c.check(
+        "F2 forces it to bytes", pal._mode_query()[0] == "bytes", f"{pal._mode_query()}"
+    )
 
     # -- Enter on a result navigates ----------------------------------------- #
     inp.value = "endbr64"
-    await c.press("f2")            # back to text
+    await c.press("f2")  # back to text
     await c.press("enter")
-    await c.wait(lambda: bool(pal._hits) and pal._searched
-                 and pal._searched[0] == "text", 30)
+    await c.wait(
+        lambda: bool(pal._hits) and pal._searched and pal._searched[0] == "text", 30
+    )
     target = pal._hits[1] if len(pal._hits) > 1 else pal._hits[0]
     pal.query_one(OptionList).highlighted = 1 if len(pal._hits) > 1 else 0
     await c.press("enter")
     closed = await c.wait(lambda: not isinstance(app.screen, SearchPalette), 10)
-    c.check("Enter on a hit closes the palette", closed,
-            f"screen={type(app.screen).__name__}")
+    c.check(
+        "Enter on a hit closes the palette",
+        closed,
+        f"screen={type(app.screen).__name__}",
+    )
     landed = await c.wait(
-        lambda: app._cur is not None and c.lst._cursor_ea() == target.head, 30)
-    c.check("and lands the cursor on it", landed,
-            f"cursor={c.lst._cursor_ea()} want={target.head:#x}")
+        lambda: app._cur is not None and c.lst._cursor_ea() == target.head, 30
+    )
+    c.check(
+        "and lands the cursor on it",
+        landed,
+        f"cursor={c.lst._cursor_ea()} want={target.head:#x}",
+    )
 
 
 @scenario("export_findings")
@@ -1572,8 +2007,9 @@ async def s_export_findings(c: Ctx):
     await c.open(fn.addr, "listing")
 
     # Make something to find: a rename and a comment, through the real paths.
-    app.program.client.invoke(
-        "rename", batch={"func": {"addr": hex(fn.addr), "name": newname}})
+    app.program.client.call(
+        remote_ops.rename, batch={"func": {"addr": hex(fn.addr), "name": newname}}
+    )
     app.program.bump_names()
     app.program.set_comment(fn.addr, note)
     app.program.invalidate(fn.addr)
@@ -1589,8 +2025,11 @@ async def s_export_findings(c: Ctx):
         inp = app.query_one("#export", Input)
         opened = await c.wait(lambda: inp.display, 5)
         c.check("Ctrl+E opens the export prompt", opened, f"display={inp.display}")
-        c.check("the prompt is prefilled with a path beside the binary",
-                inp.value == default_path(app._open_path), f"value={inp.value!r}")
+        c.check(
+            "the prompt is prefilled with a path beside the binary",
+            inp.value == default_path(app._open_path),
+            f"value={inp.value!r}",
+        )
         inp.value = out
         await c.press("enter")
         written = await c.wait(lambda: os.path.exists(out), 30)
@@ -1598,21 +2037,26 @@ async def s_export_findings(c: Ctx):
         if not written:
             return
         doc = open(out, encoding="utf-8").read()
-        c.check("the report is markdown with the expected sections",
-                doc.startswith("# Findings") and "## Comments" in doc
-                and "## Named functions" in doc, doc[:60])
-        c.check("a comment written this session is in it", note in doc,
-                doc[:200])
-        c.check("and the function it belongs to is named", newname in doc,
-                doc[:200])
-        c.check("the report is sourced from the journal, not a scan",
-                "idatui's edit journal" in doc,
-                [l for l in doc.splitlines() if "**source**" in l])
-        c.check("the analyzer's own comments stay out of it",
-                "switch jump" not in doc and "jumptable" not in doc,
-                [l for l in doc.splitlines() if "switch" in l][:2])
-        c.check("the status line says where it went",
-                out in c.status(), c.status())
+        c.check(
+            "the report is markdown with the expected sections",
+            doc.startswith("# Findings")
+            and "## Comments" in doc
+            and "## Named functions" in doc,
+            doc[:60],
+        )
+        c.check("a comment written this session is in it", note in doc, doc[:200])
+        c.check("and the function it belongs to is named", newname in doc, doc[:200])
+        c.check(
+            "the report is sourced from the journal, not a scan",
+            "idatui's edit journal" in doc,
+            [l for l in doc.splitlines() if "**source**" in l],
+        )
+        c.check(
+            "the analyzer's own comments stay out of it",
+            "switch jump" not in doc and "jumptable" not in doc,
+            [l for l in doc.splitlines() if "switch" in l][:2],
+        )
+        c.check("the status line says where it went", out in c.status(), c.status())
         # The journal has to survive the database, or a report is only ever
         # about the session that happened to be open.
         from idatui.journal import Journal
@@ -1620,14 +2064,17 @@ async def s_export_findings(c: Ctx):
         app.journal.flush(app.program)
         reloaded = Journal()
         reloaded.load(app.program)
-        c.check("the journal round-trips through the .i64",
-                fn.addr in reloaded.addresses(),
-                f"{len(reloaded)} entries, {sorted(reloaded.addresses())[:3]}")
+        c.check(
+            "the journal round-trips through the .i64",
+            fn.addr in reloaded.addresses(),
+            f"{len(reloaded)} entries, {sorted(reloaded.addresses())[:3]}",
+        )
     finally:
         # Idempotent: hand the database back exactly as we found it.
         app.program.set_comment(fn.addr, "")
-        app.program.client.invoke(
-            "rename", batch={"func": {"addr": hex(fn.addr), "name": old}})
+        app.program.client.call(
+            remote_ops.rename, batch={"func": {"addr": hex(fn.addr), "name": old}}
+        )
         app.program.bump_names()
         app.program.invalidate(fn.addr)
         if os.path.exists(out):
@@ -1639,8 +2086,11 @@ async def s_struct_filter(c: Ctx):
     app = c.app
     await c.press("ctrl+t")
     if not await c.wait(lambda: isinstance(app.screen, StructEditor), 10):
-        c.check("Ctrl+T opens the struct editor", False,
-                f"screen={type(app.screen).__name__}")
+        c.check(
+            "Ctrl+T opens the struct editor",
+            False,
+            f"screen={type(app.screen).__name__}",
+        )
         return
     se = app.screen
     await c.wait(lambda: bool(se._structs), 15)
@@ -1655,8 +2105,11 @@ async def s_struct_filter(c: Ctx):
     ol.focus()
     await c.press("slash")
     opened = await c.wait(lambda: inp.display and app.focused is inp, 5)
-    c.check("'/' from the list opens the struct filter", opened,
-            f"display={inp.display} focus={getattr(app.focused, 'id', None)}")
+    c.check(
+        "'/' from the list opens the struct filter",
+        opened,
+        f"display={inp.display} focus={getattr(app.focused, 'id', None)}",
+    )
 
     # PgDn from the FILTER: this screen can't use OptionListNav (ctrl+n is "new
     # type" here), so it forwards through its own guarded _page(). Checked while
@@ -1665,31 +2118,42 @@ async def s_struct_filter(c: Ctx):
     if ol.option_count > 2:
         ol.highlighted = 0
         await c.press("pagedown")
-        c.check("PgDn pages the struct list from the filter prompt",
-                (ol.highlighted or 0) > 1,
-                f"highlighted={ol.highlighted} n={ol.option_count}")
+        c.check(
+            "PgDn pages the struct list from the filter prompt",
+            (ol.highlighted or 0) > 1,
+            f"highlighted={ol.highlighted} n={ol.option_count}",
+        )
         await c.press("pageup")
-        c.check("PgUp returns to the first struct", (ol.highlighted or 0) == 0,
-                f"highlighted={ol.highlighted}")
+        c.check(
+            "PgUp returns to the first struct",
+            (ol.highlighted or 0) == 0,
+            f"highlighted={ol.highlighted}",
+        )
 
     for ch in q:
         await c.press(ch)
     await c.wait(lambda: len(se._structs) < total, 5)
-    c.check("typing fuzzy-filters the struct list",
-            0 < len(se._structs) < total and
-            any(s.name == target for s in se._structs),
-            f"q={q!r} {len(se._structs)}/{total}")
+    c.check(
+        "typing fuzzy-filters the struct list",
+        0 < len(se._structs) < total and any(s.name == target for s in se._structs),
+        f"q={q!r} {len(se._structs)}/{total}",
+    )
     cap = str(se.query_one("#se-title", Static).render())
-    c.check("the caption counts what the filter kept",
-            f"{len(se._structs)}/{total}" in cap, f"caption={cap!r}")
+    c.check(
+        "the caption counts what the filter kept",
+        f"{len(se._structs)}/{total}" in cap,
+        f"caption={cap!r}",
+    )
 
     # 'd' is the delete binding on this screen: in the prompt it must be a
     # character, not a destructive verb aimed at the highlighted struct.
     await c.press("d")
     await c.pause(0.05)
-    c.check("'d' in the filter types instead of deleting",
-            isinstance(app.screen, StructEditor) and inp.value == q + "d",
-            f"screen={type(app.screen).__name__} value={inp.value!r}")
+    c.check(
+        "'d' in the filter types instead of deleting",
+        isinstance(app.screen, StructEditor) and inp.value == q + "d",
+        f"screen={type(app.screen).__name__} value={inp.value!r}",
+    )
     await c.press("backspace")
     await c.wait(lambda: inp.value == q, 5)
 
@@ -1697,34 +2161,45 @@ async def s_struct_filter(c: Ctx):
     before = ol.highlighted
     await c.press("down")
     await c.pause(0.05)
-    c.check("arrows move the list while the filter has focus",
-            app.focused is inp and (ol.highlighted != before
-                                    or ol.option_count == 1),
-            f"{before} -> {ol.highlighted} of {ol.option_count}")
+    c.check(
+        "arrows move the list while the filter has focus",
+        app.focused is inp and (ol.highlighted != before or ol.option_count == 1),
+        f"{before} -> {ol.highlighted} of {ol.option_count}",
+    )
 
     sel = se._structs[ol.highlighted or 0].name
     ta = se.query_one(TextArea)
     ta.text = ""
     await c.press("enter")
     loaded = await c.wait(lambda: sel in ta.text, 15)
-    c.check("Enter in the filter loads the highlighted struct", loaded,
-            f"want {sel!r} in {ta.text[:40]!r}")
+    c.check(
+        "Enter in the filter loads the highlighted struct",
+        loaded,
+        f"want {sel!r} in {ta.text[:40]!r}",
+    )
 
     # Esc backs out one level at a time: definition -> filter -> dialog.
     await c.press("escape")
     await c.wait(lambda: app.focused is ol, 5)
-    c.check("Esc leaves the definition for the list", app.focused is ol,
-            f"focus={getattr(app.focused, 'id', None)}")
+    c.check(
+        "Esc leaves the definition for the list",
+        app.focused is ol,
+        f"focus={getattr(app.focused, 'id', None)}",
+    )
     await c.press("escape")
     cleared = await c.wait(lambda: len(se._structs) == total, 5)
-    c.check("Esc clears the filter instead of closing",
-            cleared and not inp.display and isinstance(app.screen, StructEditor),
-            f"n={len(se._structs)}/{total} display={inp.display}")
+    c.check(
+        "Esc clears the filter instead of closing",
+        cleared and not inp.display and isinstance(app.screen, StructEditor),
+        f"n={len(se._structs)}/{total} display={inp.display}",
+    )
     await c.press("escape")
     await c.wait(lambda: not isinstance(app.screen, StructEditor), 10)
-    c.check("a third Esc closes the editor",
-            not isinstance(app.screen, StructEditor),
-            f"screen={type(app.screen).__name__}")
+    c.check(
+        "a third Esc closes the editor",
+        not isinstance(app.screen, StructEditor),
+        f"screen={type(app.screen).__name__}",
+    )
 
 
 @scenario("open_default_view")
@@ -1734,9 +2209,11 @@ async def s_open(c: Ctx):
     app._open_function(fn.addr, fn.name)
     await c.wait(lambda: app._cur and app._cur.ea == fn.addr, 20)
     await c.wait(lambda: c.lst.total > 0, 30)
-    c.check("opening a function shows the linear listing by default",
-            app._active == "listing" and c.lst.display and c.lst.total > 0,
-            f"active={app._active} total={c.lst.total}")
+    c.check(
+        "opening a function shows the linear listing by default",
+        app._active == "listing" and c.lst.display and c.lst.total > 0,
+        f"active={app._active} total={c.lst.total}",
+    )
     print(f"    biggest = {fn.name} ({c.lst.total} listing rows)")
 
 
@@ -1745,15 +2222,19 @@ async def s_disasm_nav(c: Ctx):
     app, view = c.app, c.dis
     await c.open_biggest("listing")
     view.focus()
-    c.check("first instruction cached",
-            view.model is not None and view.model.cached_line(0) is not None)
+    c.check(
+        "first instruction cached",
+        view.model is not None and view.model.cached_line(0) is not None,
+    )
     for _ in range(5):
         await c.press("pagedown")
         await c.pause(0.025)
     c.check("pagedown moved the cursor", view.cursor > 0, f"cursor={view.cursor}")
     await c.wait(lambda: view.model.cached_line(view.cursor) is not None, 15)
-    c.check("cursor line eventually cached (bg fetch)",
-            view.model.cached_line(view.cursor) is not None)
+    c.check(
+        "cursor line eventually cached (bg fetch)",
+        view.model.cached_line(view.cursor) is not None,
+    )
     c.check("status shows an address", "@ 0x" in c.status(), c.status())
     # Ctrl+Y copies the current code line.
     view.focus()
@@ -1761,14 +2242,20 @@ async def s_disasm_nav(c: Ctx):
     app._clipboard = ""
     await c.press("ctrl+y")
     await c.wait(lambda: app._clipboard == cur_line, 10)
-    c.check("Ctrl+Y copies the current code line to the clipboard",
-            bool(cur_line) and app._clipboard == cur_line, f"clip={app._clipboard!r}")
+    c.check(
+        "Ctrl+Y copies the current code line to the clipboard",
+        bool(cur_line) and app._clipboard == cur_line,
+        f"clip={app._clipboard!r}",
+    )
     # goto-bottom must not hang on a huge function (ctrl+end; plain 'end' now
     # moves the cursor to end-of-line).
     await c.press("ctrl+end")
     await c.pause(0.05)
-    c.check("goto-bottom lands near end", view.cursor >= view.total - 1,
-            f"cursor={view.cursor}/{view.total}")
+    c.check(
+        "goto-bottom lands near end",
+        view.cursor >= view.total - 1,
+        f"cursor={view.cursor}/{view.total}",
+    )
 
 
 @scenario("hex")
@@ -1782,23 +2269,52 @@ async def s_hex(c: Ctx):
     await c.press("backslash")
     await c.wait(lambda: app._active == "hex", 10)
     hx = c.hex
-    await c.wait(lambda: hx.model is not None
-                and hx.model.row(hx.cursor // 16)[1] is not None, 20)
-    c.check("backslash opens the hex view synced to the code cursor",
-            app._active == "hex" and code_ea is not None and hx.cursor_va() == code_ea,
-            f"active={app._active} hexva={hx.cursor_va():#x} ea={code_ea}")
+    await c.wait(
+        lambda: hx.model is not None and hx.model.row(hx.cursor // 16)[1] is not None,
+        20,
+    )
+    c.check(
+        "backslash opens the hex view synced to the code cursor",
+        app._active == "hex" and code_ea is not None and hx.cursor_va() == code_ea,
+        f"active={app._active} hexva={hx.cursor_va():#x} ea={code_ea}",
+    )
     want = app.program.read_bytes(code_ea, 1)
     _, rb = hx.model.row(hx.cursor // 16)
-    c.check("hex shows the actual byte at that address",
-            rb is not None and rb[hx.cursor % 16] == want[0],
-            f"got={rb[hx.cursor % 16] if rb else None} want={want[0]}")
+    c.check(
+        "hex shows the actual byte at that address",
+        rb is not None and rb[hx.cursor % 16] == want[0],
+        f"got={rb[hx.cursor % 16] if rb else None} want={want[0]}",
+    )
+    old_va = hx.cursor_va()
+    block = (old_va - hx.model.start) // hx.model.BLOCK
+    old_bytes = hx.model._blocks.get(block)
+    await c.press("ctrl+r")
+    reloaded = await c.wait(
+        lambda: (
+            hx.model._blocks.get(block) is not None
+            and hx.model._blocks.get(block) is not old_bytes
+        ),
+        20,
+    )
+    c.check("Ctrl+R refetches the visible hex block", reloaded)
+    c.check(
+        "Ctrl+R preserves the hex cursor",
+        hx.cursor_va() == old_va,
+        f"got={hx.cursor_va():#x} want={old_va:#x}",
+    )
     await c.press("l")
     await c.pause(0.1)
-    c.check("hex cursor steps one byte", hx.cursor_va() == code_ea + 1,
-            f"va={hx.cursor_va():#x}")
+    c.check(
+        "hex cursor steps one byte",
+        hx.cursor_va() == code_ea + 1,
+        f"va={hx.cursor_va():#x}",
+    )
     fo = app.program.file_offset(hx.cursor_va())
-    c.check("hex carries a file offset for a mapped (.text) address",
-            fo is not None and hx.model.file_offset(hx.cursor_va()) == fo, f"fo={fo}")
+    c.check(
+        "hex carries a file offset for a mapped (.text) address",
+        fo is not None and hx.model.file_offset(hx.cursor_va()) == fo,
+        f"fo={fo}",
+    )
     rng = app.program.image_range()
     target_va = rng[0] + (rng[1] - rng[0]) // 2
     await c.press("g")
@@ -1806,14 +2322,17 @@ async def s_hex(c: Ctx):
     await c.type(hex(target_va))
     await c.press("enter")
     await c.wait(lambda: hx.cursor_va() == target_va, 15)
-    c.check("'g' in the hex view jumps the cursor to an address",
-            hx.cursor_va() == target_va, f"va={hx.cursor_va():#x} want={target_va:#x}")
+    c.check(
+        "'g' in the hex view jumps the cursor to an address",
+        hx.cursor_va() == target_va,
+        f"va={hx.cursor_va():#x} want={target_va:#x}",
+    )
     # -- a user scroll freezes the cursor's screen row (points at a new byte) --
     await c.press("g")
     await c.type(hex(rng[0]))
     await c.press("enter")
     await c.wait(lambda: hx.cursor_va() == rng[0], 10)
-    for _ in range(8):        # cursor to viewport row 8 (top still 0)
+    for _ in range(8):  # cursor to viewport row 8 (top still 0)
         await c.press("j")
     await c.pause(0.1)
     top0 = round(hx.scroll_offset.y)
@@ -1822,24 +2341,33 @@ async def s_hex(c: Ctx):
     await c.pause(0.15)
     top1 = round(hx.scroll_offset.y)
     c.check("hex viewport scrolled", top1 >= top0 + 20, f"top0={top0} top1={top1}")
-    c.check("hex cursor's screen row stays frozen on scroll",
-            hx.cursor // 16 - top1 == screen_row,
-            f"screen_row={screen_row} now={hx.cursor // 16 - top1} top1={top1}")
+    c.check(
+        "hex cursor's screen row stays frozen on scroll",
+        hx.cursor // 16 - top1 == screen_row,
+        f"screen_row={screen_row} now={hx.cursor // 16 - top1} top1={top1}",
+    )
     PAD = 1  # HexView { padding: 0 1 } -> content is inset one col
     await c.pilot.click(HexView, offset=(PAD + 19 + 3 * 3, 5))  # hex byte 3, row 5
     await c.pause(0.1)
-    c.check("clicking the hex pane moves the cursor to the clicked byte",
-            hx.cursor == (top1 + 5) * 16 + 3,
-            f"cursor={hx.cursor} want={(top1 + 5) * 16 + 3} top1={top1}")
+    c.check(
+        "clicking the hex pane moves the cursor to the clicked byte",
+        hx.cursor == (top1 + 5) * 16 + 3,
+        f"cursor={hx.cursor} want={(top1 + 5) * 16 + 3} top1={top1}",
+    )
     await c.pilot.click(HexView, offset=(PAD + 70 + 10, 7))  # ascii byte 10, row 7
     await c.pause(0.1)
-    c.check("clicking the ascii pane maps to the right byte",
-            hx.cursor == (top1 + 7) * 16 + 10,
-            f"cursor={hx.cursor} want={(top1 + 7) * 16 + 10}")
+    c.check(
+        "clicking the ascii pane maps to the right byte",
+        hx.cursor == (top1 + 7) * 16 + 10,
+        f"cursor={hx.cursor} want={(top1 + 7) * 16 + 10}",
+    )
     await c.press("backslash")
     await c.wait(lambda: app._active != "hex", 10)
-    c.check("backslash returns from hex to the code view",
-            app._active == "listing", f"active={app._active}")
+    c.check(
+        "backslash returns from hex to the code view",
+        app._active == "listing",
+        f"active={app._active}",
+    )
 
 
 @scenario("filter")
@@ -1849,24 +2377,34 @@ async def s_filter(c: Ctx):
     nfuncs = table.row_count
     # row selection opens a function
     fn = c.biggest()
-    ridx = next((i for i in range(nfuncs)
-                 if int(str(table.get_row_at(i)[0]), 16) == fn.addr), 0)
+    ridx = next(
+        (i for i in range(nfuncs) if int(str(table.get_row_at(i)[0]), 16) == fn.addr), 0
+    )
     table.move_cursor(row=ridx)
     table.focus()
     await c.press("enter")
     await c.wait(lambda: app._cur and app._cur.ea == fn.addr, 20)
-    c.check("selecting a table row opens that function",
-            bool(app._cur) and app._cur.ea == fn.addr, f"cur={app._cur.ea if app._cur else None}")
+    c.check(
+        "selecting a table row opens that function",
+        bool(app._cur) and app._cur.ea == fn.addr,
+        f"cur={app._cur.ea if app._cur else None}",
+    )
     # filter round-trip. Derive the glob from real names: this used to hardcode
     # 'sub_1*', which matches NOTHING in a binary whose code never reaches
     # 0x1xxx (echo's functions are sub_2xxx..sub_7xxx) — a deterministic failure
     # that looked like a flake, and left the table empty for the next scenario.
     subs = sorted(f.name for f in c.all_funcs() if f.name.startswith("sub_"))
     term = (subs[0][:5] + "*") if subs else ""
-    want = sum(1 for f in c.all_funcs()
-               if fnmatch.fnmatch(f.name.lower(), term.lower())) if term else 0
-    c.check("picked a glob that actually matches (test self-check)",
-            0 < want < nfuncs, f"term={term!r} want={want} of {nfuncs}")
+    want = (
+        sum(1 for f in c.all_funcs() if fnmatch.fnmatch(f.name.lower(), term.lower()))
+        if term
+        else 0
+    )
+    c.check(
+        "picked a glob that actually matches (test self-check)",
+        0 < want < nfuncs,
+        f"term={term!r} want={want} of {nfuncs}",
+    )
     table.focus()
     await c.press("slash")
     await c.pause(0.05)
@@ -1874,32 +2412,44 @@ async def s_filter(c: Ctx):
         await c.press(ch if ch != "*" else "asterisk")
     await c.press("enter")
     filtered = await c.wait(lambda: table.row_count == want, 15)
-    c.check("filter narrowed the list to exactly the matches", filtered,
-            f"term={term!r} rows={table.row_count} want={want} of {nfuncs}")
+    c.check(
+        "filter narrowed the list to exactly the matches",
+        filtered,
+        f"term={term!r} rows={table.row_count} want={want} of {nfuncs}",
+    )
     # pane toggle
     left = app.query_one("#left", FunctionsPanel)
     await c.press("ctrl+b")
     await c.pause(0.05)
-    c.check("ctrl+b hides functions pane + focuses the code view",
-            not left.display and isinstance(app.focused, (ListingView, DecompView)),
-            f"display={left.display} focus={type(app.focused).__name__}")
+    c.check(
+        "ctrl+b hides functions pane + focuses the code view",
+        not left.display and isinstance(app.focused, (ListingView, DecompView)),
+        f"display={left.display} focus={type(app.focused).__name__}",
+    )
     await c.press("ctrl+b")
     await c.pause(0.05)
-    c.check("ctrl+b again restores pane + focuses table",
-            left.display and isinstance(app.focused, DataTable),
-            f"display={left.display} focus={type(app.focused).__name__}")
+    c.check(
+        "ctrl+b again restores pane + focuses table",
+        left.display and isinstance(app.focused, DataTable),
+        f"display={left.display} focus={type(app.focused).__name__}",
+    )
 
 
 @scenario("view_toggle")
 async def s_view_toggle(c: Ctx):
     app, dis, dec = c.app, c.dis, c.dec
     await c.open_biggest("decomp")
-    pc = await c.wait(lambda: dec.display and dec.loaded_ea is not None
-                      and app._active == "decomp", 25)
+    pc = await c.wait(
+        lambda: dec.display and dec.loaded_ea is not None and app._active == "decomp",
+        25,
+    )
     c.check("pseudocode view shows", pc, f"active={app._active}")
     c.check("pseudocode has many lines", dec.total > 20, f"lines={dec.total}")
-    styled = any(seg.style is not None and seg.style.color is not None
-                 for strip in dec._strips[:min(dec.total, 200)] for seg in strip)
+    styled = any(
+        seg.style is not None and seg.style.color is not None
+        for strip in dec._strips[: min(dec.total, 200)]
+        for seg in strip
+    )
     c.check("pseudocode is syntax-highlighted", styled)
     # Cancelling a prompt must hand focus back to the pane you were READING.
     # _code_view() used to choose on _pref, which was only ever "listing", so it
@@ -1915,21 +2465,27 @@ async def s_view_toggle(c: Ctx):
     await c.press("down")
     await c.press("down")
     await c.pause(0.2)
-    c.check("cancelling goto leaves focus in the pseudocode (arrows still work)",
-            dec.cursor > line0,
-            f"cursor {line0} -> {dec.cursor} focus={type(app.focused).__name__}")
+    c.check(
+        "cancelling goto leaves focus in the pseudocode (arrows still work)",
+        dec.cursor > line0,
+        f"cursor {line0} -> {dec.cursor} focus={type(app.focused).__name__}",
+    )
     dec.focus()  # Tab only toggles the view from a code pane; elsewhere it's
     await c.pause(0.05)  # focus-next, which would silently leave us in decomp
     await c.press("tab")
     # decomp -> listing runs through _toggle_to_listing, a background worker, so
     # _active only flips once the listing model has loaded. A fixed pause held in
     # a short run and lost the race in a full one.
-    switched = await c.wait(lambda: app._active == "listing" and dis.display
-                            and not dec.display, 20)
-    c.check("tab switches to disassembly", switched,
-            f"active={app._active} split={app._split} "
-            f"focus={type(app.focused).__name__} "
-            f"lst={dis.display} dec={dec.display}")
+    switched = await c.wait(
+        lambda: app._active == "listing" and dis.display and not dec.display, 20
+    )
+    c.check(
+        "tab switches to disassembly",
+        switched,
+        f"active={app._active} split={app._split} "
+        f"focus={type(app.focused).__name__} "
+        f"lst={dis.display} dec={dec.display}",
+    )
     # _toggle_to_listing repositions asynchronously; F5 below reads the listing
     # cursor's ea and no-ops if it isn't on an addressed row yet.
     await c.wait(lambda: c.lst._cursor_ea() is not None, 10)
@@ -1939,34 +2495,54 @@ async def s_view_toggle(c: Ctx):
     dec.loaded_ea = None
     app.action_toggle_view()
     cover = dec._cover_widget
-    c.check("F5 from the listing raises the 'decompiling…' overlay",
-            dec.loading and cover is not None and "decomp-loading" in cover.classes
-            and "decompiling" in str(cover.render()),
-            f"loading={dec.loading} cover={cover!r}")
-    await c.wait(lambda: app._active == "decomp" and not dec.loading
-                 and dec._cover_widget is None, 25)
-    c.check("overlay clears when the decompile finishes",
-            not dec.loading and dec._cover_widget is None)
+    c.check(
+        "F5 from the listing raises the 'decompiling…' overlay",
+        dec.loading
+        and cover is not None
+        and "decomp-loading" in cover.classes
+        and "decompiling" in str(cover.render()),
+        f"loading={dec.loading} cover={cover!r}",
+    )
+    await c.wait(
+        lambda: (
+            app._active == "decomp" and not dec.loading and dec._cover_widget is None
+        ),
+        25,
+    )
+    c.check(
+        "overlay clears when the decompile finishes",
+        not dec.loading and dec._cover_widget is None,
+    )
     # F5 on an ALREADY-loaded function must still clear the overlay (regression:
     # the F5-raised overlay had nothing to clear it in the 'already loaded' branch
     # -> spinner stuck forever).
     await c.press("tab")  # -> listing
     await c.wait(lambda: app._active == "listing", 10)
     app.action_toggle_view()  # F5 the same, cached function again
-    cleared = await c.wait(lambda: app._active == "decomp" and not dec.loading
-                           and dec._cover_widget is None, 15)
-    c.check("re-decompiling an already-loaded function clears the overlay", cleared,
-            f"loading={dec.loading} cover={dec._cover_widget!r}")
+    cleared = await c.wait(
+        lambda: (
+            app._active == "decomp" and not dec.loading and dec._cover_widget is None
+        ),
+        15,
+    )
+    c.check(
+        "re-decompiling an already-loaded function clears the overlay",
+        cleared,
+        f"loading={dec.loading} cover={dec._cover_widget!r}",
+    )
     # line-number gutter
     dec.scroll_to(0, 0, animate=False)
     await c.pause(0.025)
     row0 = "".join(seg.text for seg in dec.render_line(0))
-    c.check("pseudocode has a numbered gutter (line 1 first)",
-            dec._gutter > 0 and row0[:dec._gutter].strip() == "1",
-            f"gutter={dec._gutter} row0={row0[:10]!r}")
+    c.check(
+        "pseudocode has a numbered gutter (line 1 first)",
+        dec._gutter > 0 and row0[: dec._gutter].strip() == "1",
+        f"gutter={dec._gutter} row0={row0[:10]!r}",
+    )
     # Home/End move along the line here too (they used to scroll to top/bottom).
-    line = next((i for i, t in enumerate(dec._texts)
-                 if t.startswith("  ") and t.strip()), None)
+    line = next(
+        (i for i, t in enumerate(dec._texts) if t.startswith("  ") and t.strip()), None
+    )
     if line is not None:
         text = dec._texts[line]
         dec.focus()
@@ -1976,28 +2552,37 @@ async def s_view_toggle(c: Ctx):
         top = round(dec.scroll_offset.y)
         await c.press("end")
         await c.pause(0.05)
-        c.check("<end> in pseudocode goes to end-of-line, not the bottom",
-                dec.cursor == line and dec.cursor_x == max(len(text) - 1, 0)
-                and round(dec.scroll_offset.y) == top,
-                f"line={dec.cursor} col={dec.cursor_x} len={len(text)}")
+        c.check(
+            "<end> in pseudocode goes to end-of-line, not the bottom",
+            dec.cursor == line
+            and dec.cursor_x == max(len(text) - 1, 0)
+            and round(dec.scroll_offset.y) == top,
+            f"line={dec.cursor} col={dec.cursor_x} len={len(text)}",
+        )
         await c.press("home")
         await c.pause(0.05)
-        c.check("<home> in pseudocode goes to start-of-line",
-                dec.cursor == line and dec.cursor_x == 0,
-                f"line={dec.cursor} col={dec.cursor_x}")
+        c.check(
+            "<home> in pseudocode goes to start-of-line",
+            dec.cursor == line and dec.cursor_x == 0,
+            f"line={dec.cursor} col={dec.cursor_x}",
+        )
         await c.press("shift+home")
         await c.pause(0.05)
-        c.check("<shift+home> skips the indentation",
-                dec.cursor_x == len(text) - len(text.lstrip()),
-                f"col={dec.cursor_x} indent={len(text) - len(text.lstrip())}")
+        c.check(
+            "<shift+home> skips the indentation",
+            dec.cursor_x == len(text) - len(text.lstrip()),
+            f"col={dec.cursor_x} indent={len(text) - len(text.lstrip())}",
+        )
         await c.press("ctrl+end")
         await c.pause(0.1)
-        c.check("<ctrl+end> still goes to the bottom",
-                dec.cursor >= dec.total - 1, f"{dec.cursor}/{dec.total}")
+        c.check(
+            "<ctrl+end> still goes to the bottom",
+            dec.cursor >= dec.total - 1,
+            f"{dec.cursor}/{dec.total}",
+        )
         await c.press("ctrl+home")
         await c.pause(0.1)
-        c.check("<ctrl+home> still goes to the top", dec.cursor == 0,
-                f"{dec.cursor}")
+        c.check("<ctrl+home> still goes to the top", dec.cursor == 0, f"{dec.cursor}")
 
 
 @scenario("search")
@@ -2017,26 +2602,39 @@ async def s_search(c: Ctx):
     # the unified listing searches the whole segment (load_all) -> allow time
     await c.wait(lambda: bool(dis._matches), 45)
     c.check("search finds matches", len(dis._matches) > 0, f"term={term!r}")
-    c.check("cursor sits on a match", dis.cursor in dis._matches, f"cursor={dis.cursor}")
-    c.check("match substring highlighted",
-            bool(dis._ranges.get(dis.cursor)), str(dis._ranges.get(dis.cursor)))
-    c.check("search cursor lands on the match's starting column",
-            bool(dis._ranges.get(dis.cursor))
-            and dis.cursor_x == dis._ranges[dis.cursor][0][0],
-            f"cursor_x={dis.cursor_x} ranges={dis._ranges.get(dis.cursor)}")
+    c.check(
+        "cursor sits on a match", dis.cursor in dis._matches, f"cursor={dis.cursor}"
+    )
+    c.check(
+        "match substring highlighted",
+        bool(dis._ranges.get(dis.cursor)),
+        str(dis._ranges.get(dis.cursor)),
+    )
+    c.check(
+        "search cursor lands on the match's starting column",
+        bool(dis._ranges.get(dis.cursor))
+        and dis.cursor_x == dis._ranges[dis.cursor][0][0],
+        f"cursor_x={dis.cursor_x} ranges={dis._ranges.get(dis.cursor)}",
+    )
     prev = dis.cursor
     await c.press("slash")
     await c.pause(0.05)
     await c.press("enter")
     await c.pause(0.05)
-    c.check("'/' repeats to next match",
-            dis.cursor != prev and dis.cursor in dis._matches, f"cursor={dis.cursor}")
+    c.check(
+        "'/' repeats to next match",
+        dis.cursor != prev and dis.cursor in dis._matches,
+        f"cursor={dis.cursor}",
+    )
     await c.press("question_mark")
     await c.pause(0.05)
     await c.press("enter")
     await c.pause(0.05)
-    c.check("'?' repeats to previous match", dis.cursor in dis._matches,
-            f"cursor={dis.cursor}")
+    c.check(
+        "'?' repeats to previous match",
+        dis.cursor in dis._matches,
+        f"cursor={dis.cursor}",
+    )
     # incremental preview + visible bar + Esc cancel
     si = app.query_one("#search", Input)
     status = app.query_one("#status", Static)
@@ -2044,22 +2642,31 @@ async def s_search(c: Ctx):
     # display flips synchronously; the REGION only exists once Textual has laid
     # the prompt out, which is a frame, not a worker.
     await c.wait(lambda: si.display and si.region.height >= 1, 5)
-    c.check("search bar visible, status hidden (no overlap)",
-            si.display and not status.display, f"si={si.display} status={status.display}")
-    c.check("search input owns the bottom row (nothing overlaps it)",
-            si.region.height >= 1
-            and si.region.y + si.region.height == app.size.height,
-            f"search={si.region} screen={app.size}")
+    c.check(
+        "search bar visible, status hidden (no overlap)",
+        si.display and not status.display,
+        f"si={si.display} status={status.display}",
+    )
+    c.check(
+        "search input owns the bottom row (nothing overlaps it)",
+        si.region.height >= 1 and si.region.y + si.region.height == app.size.height,
+        f"search={si.region} screen={app.size}",
+    )
     for ch in term:
         await c.press(ch)
         await c.pause(0.05)
-    c.check("matches highlight incrementally (before Enter)",
-            len(dis._matches) > 0 and si.value == term, f"val={si.value!r}")
+    c.check(
+        "matches highlight incrementally (before Enter)",
+        len(dis._matches) > 0 and si.value == term,
+        f"val={si.value!r}",
+    )
     await c.press("escape")
     await c.pause(0.1)
-    c.check("Esc cancels: status restored, matches cleared",
-            status.display and not si.display and not dis._matches,
-            f"status={status.display} si={si.display} m={len(dis._matches)}")
+    c.check(
+        "Esc cancels: status restored, matches cleared",
+        status.display and not si.display and not dis._matches,
+        f"status={status.display} si={si.display} m={len(dis._matches)}",
+    )
 
 
 @scenario("incr_filter")
@@ -2075,19 +2682,30 @@ async def s_incr_filter(c: Ctx):
     # settling can't see it. Wait for the effect instead of guessing at the
     # debounce: it returns the moment the rows are rebuilt.
     await c.wait(lambda: 0 < table.row_count < full, 5)
-    c.check("filter narrows incrementally as you type",
-            0 < table.row_count < full, f"{table.row_count}/{full}")
+    c.check(
+        "filter narrows incrementally as you type",
+        0 < table.row_count < full,
+        f"{table.row_count}/{full}",
+    )
     cell = table.get_row_at(0)[1]
-    c.check("filter highlights matched substring in name",
-            isinstance(cell, Text) and any(s.style for s in cell.spans), repr(str(cell)))
+    c.check(
+        "filter highlights matched substring in name",
+        isinstance(cell, Text) and any(s.style for s in cell.spans),
+        repr(str(cell)),
+    )
     await c.press("enter")
     await c.wait(lambda: isinstance(app.focused, DataTable), 5)
-    c.check("Enter keeps filter + focuses table",
-            isinstance(app.focused, DataTable) and table.row_count < full)
+    c.check(
+        "Enter keeps filter + focuses table",
+        isinstance(app.focused, DataTable) and table.row_count < full,
+    )
     await c.press("escape")
     await c.wait(lambda: table.row_count == full, 5)
-    c.check("Esc on the list clears the filter", table.row_count == full,
-            f"{table.row_count}/{full}")
+    c.check(
+        "Esc on the list clears the filter",
+        table.row_count == full,
+        f"{table.row_count}/{full}",
+    )
 
 
 @scenario("follow_xrefs")
@@ -2096,10 +2714,13 @@ async def s_follow_xrefs(c: Ctx):
     await c.open_biggest("listing")
     dis.focus()
     lines = dis.model.lines(0, 400, prefetch=False)
-    call_idx = next((i for i, ln in enumerate(lines)
-                     if ln.text.startswith("call ")), None)
+    call_idx = next(
+        (i for i, ln in enumerate(lines) if ln.text.startswith("call ")), None
+    )
     if call_idx is None:
-        c.check("found a call line to exercise follow/xrefs", False, "no call in first 400")
+        c.check(
+            "found a call line to exercise follow/xrefs", False, "no call in first 400"
+        )
         return
     dis.cursor = call_idx
     dis.refresh()
@@ -2113,8 +2734,11 @@ async def s_follow_xrefs(c: Ctx):
     # failed about one run in ten with cur == orig, at full speed, looking like
     # a code regression.
     await c.wait(lambda: len(app._nav) > depth and app._cur.ea != orig, 25)
-    c.check("Enter follows the call into another function",
-            app._cur.ea != orig and len(app._nav) > depth, f"cur={app._cur.ea:#x}")
+    c.check(
+        "Enter follows the call into another function",
+        app._cur.ea != orig and len(app._nav) > depth,
+        f"cur={app._cur.ea:#x}",
+    )
     await c.press("escape")
     await c.wait(lambda: app._cur.ea == orig, 15)
     c.check("Esc returns from the follow", app._cur.ea == orig, f"cur={app._cur.ea:#x}")
@@ -2124,15 +2748,19 @@ async def s_follow_xrefs(c: Ctx):
     opened = await c.wait(lambda: isinstance(app.screen, XrefsScreen), 25)
     c.check("'x' opens the xrefs popup", opened, f"screen={type(app.screen).__name__}")
     if opened:
-        c.check("xrefs popup has entries",
-                app.screen.query_one(OptionList).option_count >= 1)
+        c.check(
+            "xrefs popup has entries",
+            app.screen.query_one(OptionList).option_count >= 1,
+        )
         await c.press("escape")
         await c.pause(0.1)
         c.check("Esc closes the xrefs popup", not isinstance(app.screen, XrefsScreen))
 
     xf = None
     for cand in c.all_funcs()[:600]:
-        codex = [x for x in app.program.xrefs_to(cand.addr) if x.type == "code" and x.frm]
+        codex = [
+            x for x in app.program.xrefs_to(cand.addr) if x.type == "code" and x.frm
+        ]
         if codex:
             xf = (cand, codex[0])
             break
@@ -2150,19 +2778,27 @@ async def s_follow_xrefs(c: Ctx):
         await c.wait(lambda: not isinstance(app.screen, XrefsScreen), 25)
         # xref-select lands the listing cursor on the referencing SITE (frm)
         await c.wait(lambda: c.lst._cursor_ea() == xref.frm, 25)
-        c.check("xref-select lands the cursor on the referencing site",
-                c.lst._cursor_ea() == xref.frm,
-                f"cur_ea={c.lst._cursor_ea()} want={xref.frm:#x}")
+        c.check(
+            "xref-select lands the cursor on the referencing site",
+            c.lst._cursor_ea() == xref.frm,
+            f"cur_ea={c.lst._cursor_ea()} want={xref.frm:#x}",
+        )
         # F5 at the site decompiles the referencing function
         c.lst.focus()
         await c.press("tab")
         landed = await c.wait(
-            lambda: (app._active == "decomp" and dec.loaded_ea == xref.fn_addr)
-            or (app.is_listing
-                and _CANNOT_DECOMP in c.status().lower()), 25)
+            lambda: (
+                (app._active == "decomp" and dec.loaded_ea == xref.fn_addr)
+                or (app.is_listing and _CANNOT_DECOMP in c.status().lower())
+            ),
+            25,
+        )
         if app._active == "decomp":
-            c.check("F5 at the xref site decompiles the referencing function",
-                    dec.loaded_ea == xref.fn_addr, f"loaded={dec.loaded_ea}")
+            c.check(
+                "F5 at the xref site decompiles the referencing function",
+                dec.loaded_ea == xref.fn_addr,
+                f"loaded={dec.loaded_ea}",
+            )
             await c.press("tab")
             await c.wait(lambda: app._active == "listing", 20)
 
@@ -2175,9 +2811,13 @@ async def s_follow_xrefs(c: Ctx):
         dis.refresh()
         await c.pause(0.025)
         await c.press("h")
-        c.check("h moves the column cursor left", dis.cursor_x == 4, f"x={dis.cursor_x}")
+        c.check(
+            "h moves the column cursor left", dis.cursor_x == 4, f"x={dis.cursor_x}"
+        )
         await c.press("l", "l")
-        c.check("l moves the column cursor right", dis.cursor_x == 6, f"x={dis.cursor_x}")
+        c.check(
+            "l moves the column cursor right", dis.cursor_x == 6, f"x={dis.cursor_x}"
+        )
         plain = dis._line_plain(call_idx) or ""
         m = re.search(r"\b(sub_[0-9A-Fa-f]+)", plain)
         if m:
@@ -2185,24 +2825,32 @@ async def s_follow_xrefs(c: Ctx):
             dis.cursor_x = m.start(1) + 1
             dis.refresh()
             await c.pause(0.05)
-            c.check("word-under-cursor is the operand symbol",
-                    dis.word_under_cursor() == m.group(1),
-                    f"{dis.word_under_cursor()!r} vs {m.group(1)!r}")
+            c.check(
+                "word-under-cursor is the operand symbol",
+                dis.word_under_cursor() == m.group(1),
+                f"{dis.word_under_cursor()!r} vs {m.group(1)!r}",
+            )
             depth = len(app._nav)
             want = app.program.resolve(m.group(1))
             await c.press("enter")
             await c.wait(lambda: len(app._nav) > depth, 25)
-            c.check("follows the symbol under the cursor",
-                    app._cur.ea == want, f"cur={app._cur.ea:#x} want={want:#x}")
+            c.check(
+                "follows the symbol under the cursor",
+                app._cur.ea == want,
+                f"cur={app._cur.ea:#x} want={want:#x}",
+            )
 
 
 @scenario("xref_labels")
 async def s_xref_labels(c: Ctx):
     from collections import Counter, defaultdict
+
     app, dis, dec = c.app, c.dis, c.dec
     multi = None
     for cand in c.all_funcs()[:200]:
-        callers = Counter(x.fn_addr for x in app.program.xrefs_to(cand.addr) if x.fn_name)
+        callers = Counter(
+            x.fn_addr for x in app.program.xrefs_to(cand.addr) if x.fn_name
+        )
         if any(n >= 2 for n in callers.values()):
             multi = cand
             break
@@ -2223,9 +2871,14 @@ async def s_xref_labels(c: Ctx):
         if "+0x" in x:
             nm, off = x.split("+0x", 1)
             byfn[nm].add(off)
-    c.check("xref labels distinguish multiple sites in a function by offset",
-            any(len(offs) >= 2 for offs in byfn.values()), f"locs={locs[:8]}")
-    c.check("no xref label is a bare '?'", all(x != "?" for x in locs), f"locs={locs[:8]}")
+    c.check(
+        "xref labels distinguish multiple sites in a function by offset",
+        any(len(offs) >= 2 for offs in byfn.values()),
+        f"locs={locs[:8]}",
+    )
+    c.check(
+        "no xref label is a bare '?'", all(x != "?" for x in locs), f"locs={locs[:8]}"
+    )
     await c.press("escape")
     await c.wait(lambda: not isinstance(app.screen, XrefsScreen), 25)
     # pre-selection: 'x' at a call site highlights that site in the dialog
@@ -2233,8 +2886,9 @@ async def s_xref_labels(c: Ctx):
     for x in app.program.xrefs_to(multi.addr):
         if x.fn_name and x.type == "code":
             bycaller[x.fn_addr].append(x)
-    csites = next((sorted(v, key=lambda x: x.frm)
-                   for v in bycaller.values() if len(v) >= 2), None)
+    csites = next(
+        (sorted(v, key=lambda x: x.frm) for v in bycaller.values() if len(v) >= 2), None
+    )
     if not csites:
         c.check("found a caller with multiple sites for preselect", False)
         return
@@ -2253,9 +2907,11 @@ async def s_xref_labels(c: Ctx):
     await c.wait(lambda: isinstance(app.screen, XrefsScreen), 25)
     hl = app.screen.query_one(OptionList).highlighted
     it = app.screen._items
-    c.check("xref dialog pre-selects the site it was invoked from",
-            hl is not None and it[hl][0] == site.frm,
-            f"hl={hl} frm={hex(it[hl][0]) if hl is not None else None} want={hex(site.frm)}")
+    c.check(
+        "xref dialog pre-selects the site it was invoked from",
+        hl is not None and it[hl][0] == site.frm,
+        f"hl={hl} frm={hex(it[hl][0]) if hl is not None else None} want={hex(site.frm)}",
+    )
     await c.press("escape")
     await c.wait(lambda: not isinstance(app.screen, XrefsScreen), 25)
 
@@ -2286,21 +2942,28 @@ async def s_mouse(c: Ctx):
         return
     await c.pilot.click(dis, offset=(mcol + 1, mrow))
     await c.pause(0.05)
-    c.check("single click places the cursor on the clicked token",
-            dis.cursor == mline and dis.word_under_cursor() == msym,
-            f"cursor={dis.cursor} (want {mline}) word={dis.word_under_cursor()!r}")
+    c.check(
+        "single click places the cursor on the clicked token",
+        dis.cursor == mline and dis.word_under_cursor() == msym,
+        f"cursor={dis.cursor} (want {mline}) word={dis.word_under_cursor()!r}",
+    )
     depth = len(app._nav)
     want = app.program.resolve(msym)
     await c.pilot.click(dis, offset=(mcol + 1, mrow), times=2)
     await c.wait(lambda: len(app._nav) > depth, 25)
-    c.check("double-click follows the symbol", app._cur.ea == want,
-            f"cur={app._cur.ea:#x} want={want:#x}")
+    c.check(
+        "double-click follows the symbol",
+        app._cur.ea == want,
+        f"cur={app._cur.ea:#x} want={want:#x}",
+    )
     await c.press("escape")
     await c.wait(lambda: app._cur.ea != want, 20)
     await c.wait(lambda: dis.total > 0 and dis.cursor == mline, 20)
-    c.check("back restores the exact line + column",
-            dis.cursor == mline and dis.word_under_cursor() == msym,
-            f"cursor={dis.cursor} (want {mline}) word={dis.word_under_cursor()!r}")
+    c.check(
+        "back restores the exact line + column",
+        dis.cursor == mline and dis.word_under_cursor() == msym,
+        f"cursor={dis.cursor} (want {mline}) word={dis.word_under_cursor()!r}",
+    )
 
 
 @scenario("decomp_nav")
@@ -2322,23 +2985,32 @@ async def s_decomp_nav(c: Ctx):
     await c.press("escape")
     await c.wait(lambda: dec.loaded_ea == fn.addr, 25)
     await c.pause(0.1)
-    c.check("pseudocode-view position restored after jump+back",
-            dec.cursor == drow and dec.word_under_cursor() == dsym,
-            f"cursor={dec.cursor} (want {drow}) word={dec.word_under_cursor()!r}")
+    c.check(
+        "pseudocode-view position restored after jump+back",
+        dec.cursor == drow and dec.word_under_cursor() == dsym,
+        f"cursor={dec.cursor} (want {drow}) word={dec.word_under_cursor()!r}",
+    )
     # follow works with a STALE name (post-rename): ea-marker fallback
     dstale = app.program.resolve(dsym)
     old_line = dec._texts[drow] if drow < len(dec._texts) else ""
     old_ea = dec._line_ea(drow)
     if old_ea is not None and dsym in old_line:
         tmp = f"stale_{os.getpid()}"
-        app.program.client.invoke("rename", batch={"func": {"addr": hex(dstale), "name": tmp}})
+        app.program.client.call(
+            remote_ops.rename, batch={"func": {"addr": hex(dstale), "name": tmp}}
+        )
         app.program.bump_names()
         d2 = len(app._nav)
         app._follow_decomp(old_line, dsym, old_ea)
         await c.wait(lambda: len(app._nav) > d2, 25)
-        c.check("decomp follow works with a stale name (ea-marker fallback)",
-                app._cur.ea == dstale, f"cur={app._cur.ea:#x} want={dstale:#x}")
-        app.program.client.invoke("rename", batch={"func": {"addr": hex(dstale), "name": dsym}})
+        c.check(
+            "decomp follow works with a stale name (ea-marker fallback)",
+            app._cur.ea == dstale,
+            f"cur={app._cur.ea:#x} want={dstale:#x}",
+        )
+        app.program.client.call(
+            remote_ops.rename, batch={"func": {"addr": hex(dstale), "name": dsym}}
+        )
         app.program.bump_names()
 
 
@@ -2365,9 +3037,11 @@ async def s_decomp_follow_self(c: Ctx):
     depth = len(app._nav)
     await c.press("enter")
     moved = await c.wait(lambda: len(app._nav) > depth, 25)
-    c.check("decompiler follows a name not in refs (resolve fallback)",
-            moved and app._cur.ea == fn.addr,
-            f"moved={moved} cur={hex(app._cur.ea)} want={hex(fn.addr)}")
+    c.check(
+        "decompiler follows a name not in refs (resolve fallback)",
+        moved and app._cur.ea == fn.addr,
+        f"moved={moved} cur={hex(app._cur.ea)} want={hex(fn.addr)}",
+    )
 
 
 @scenario("sort")
@@ -2377,19 +3051,28 @@ async def s_sort(c: Ctx):
     await c.pilot.click(table, offset=(15, 0))  # Function header
     await c.pause(0.15)
     snames = [str(table.get_row_at(i)[1]) for i in range(min(20, table.row_count))]
-    c.check("click Function header sorts by name",
-            app._sort_col == 1 and snames == sorted(snames, key=str.lower),
-            f"sort_col={app._sort_col}")
+    c.check(
+        "click Function header sorts by name",
+        app._sort_col == 1 and snames == sorted(snames, key=str.lower),
+        f"sort_col={app._sort_col}",
+    )
     first_asc = str(table.get_row_at(0)[1])
     await c.pilot.click(table, offset=(15, 0))  # reverse
     await c.pause(0.15)
-    c.check("click again reverses the sort",
-            app._sort_reverse and str(table.get_row_at(0)[1]) != first_asc)
+    c.check(
+        "click again reverses the sort",
+        app._sort_reverse and str(table.get_row_at(0)[1]) != first_asc,
+    )
     await c.pilot.click(table, offset=(3, 0))  # Address header
     await c.pause(0.15)
-    saddrs = [int(str(table.get_row_at(i)[0]), 16) for i in range(min(20, table.row_count))]
-    c.check("click Address header sorts by address",
-            app._sort_col == 0 and saddrs == sorted(saddrs), f"sort_col={app._sort_col}")
+    saddrs = [
+        int(str(table.get_row_at(i)[0]), 16) for i in range(min(20, table.row_count))
+    ]
+    c.check(
+        "click Address header sorts by address",
+        app._sort_col == 0 and saddrs == sorted(saddrs),
+        f"sort_col={app._sort_col}",
+    )
 
 
 @scenario("rename")
@@ -2410,18 +3093,34 @@ async def s_rename(c: Ctx):
     await c.press("n")
     await c.pause(0.1)
     ri = app.query_one("#rename", Input)
-    c.check("'n' opens the rename prompt prefilled with the symbol",
-            ri.display and ri.value == dsym, f"val={ri.value!r}")
+    c.check(
+        "'n' opens the rename prompt prefilled with the symbol",
+        ri.display and ri.value == dsym,
+        f"val={ri.value!r}",
+    )
     ri.value = newname
     await c.press("enter")
-    await c.wait(lambda: app._func_index.by_addr(dtarget)
-                 and app._func_index.by_addr(dtarget).name == newname, 25)
-    c.check("rename updates the function name",
-            app._func_index.by_addr(dtarget).name == newname,
-            app._func_index.by_addr(dtarget).name)
-    rr = app.program.client.invoke("rename", batch={"func": {"addr": hex(dtarget), "name": dsym}})
-    c.check("rename reverted cleanly",
-            rr.get("summary", {}).get("ok", 0) == 1, str(rr.get("summary")))
+    await c.wait(
+        lambda: (
+            app._func_index.by_addr(dtarget)
+            and app._func_index.by_addr(dtarget).name == newname
+        ),
+        25,
+    )
+    c.check(
+        "rename updates the function name",
+        app._func_index.by_addr(dtarget).name == newname,
+        app._func_index.by_addr(dtarget).name,
+    )
+    rr = app.program.client.call(
+        remote_ops.rename, batch={"func": {"addr": hex(dtarget), "name": dsym}}
+    )
+    c.check(
+        "rename reverted cleanly",
+        rr.get("summary", {}).get("ok", 0) == 1,
+        str(rr.get("summary")),
+    )
+
     # goto label refuse
     def _find_label():
         for i, t in enumerate(dec._texts):
@@ -2429,6 +3128,7 @@ async def s_rename(c: Ctx):
             if mm:
                 return i, mm.start(), mm.group(0)
         return None
+
     lab = _find_label()
     if lab is None:
         await c.open("main", "decomp")
@@ -2442,15 +3142,25 @@ async def s_rename(c: Ctx):
         await c.press("n")
         await c.pause(0.1)
         ri2 = app.query_one("#rename", Input)
-        c.check("renaming a pseudocode label is refused with a clear message",
-                (not ri2.display) and "label" in c.status().lower(),
-                f"display={ri2.display} status={c.status()!r}")
+        c.check(
+            "renaming a pseudocode label is refused with a clear message",
+            (not ri2.display) and "label" in c.status().lower(),
+            f"display={ri2.display} status={c.status()!r}",
+        )
     else:
         c.check("found a pseudocode label to test", False, "no LABEL_ found")
     # comment via ';'
-    cline = next((i for i in range(len(dec._texts))
-                  if i > 5 and dec._line_ea(i) is not None
-                  and dec._texts[i].strip() and "//" not in dec._texts[i]), None)
+    cline = next(
+        (
+            i
+            for i in range(len(dec._texts))
+            if i > 5
+            and dec._line_ea(i) is not None
+            and dec._texts[i].strip()
+            and "//" not in dec._texts[i]
+        ),
+        None,
+    )
     if cline is not None:
         cea = dec._line_ea(cline)
         dec.focus()
@@ -2461,8 +3171,11 @@ async def s_rename(c: Ctx):
         await c.pause(0.1)
         ci = app.query_one("#comment", Input)
         cnote = f"note_{os.getpid()}"
-        c.check("';' opens the comment prompt on the current line", ci.display,
-                f"display={ci.display}")
+        c.check(
+            "';' opens the comment prompt on the current line",
+            ci.display,
+            f"display={ci.display}",
+        )
         ci.value = cnote
         await c.press("enter")
         # Gate on the comment showing up, and ONLY that: the extra
@@ -2471,9 +3184,14 @@ async def s_rename(c: Ctx):
         # out its full 25s (9s of wall clock) and then the check below passed
         # vacuously anyway.
         await c.wait(lambda: any(cnote in t for t in dec._texts), 25)
-        c.check("comment appears in the pseudocode after ';'",
-                any(cnote in t for t in dec._texts), "comment not shown")
-        app.program.client.invoke("set_comments", items=[{"addr": hex(cea), "comment": ""}])
+        c.check(
+            "comment appears in the pseudocode after ';'",
+            any(cnote in t for t in dec._texts),
+            "comment not shown",
+        )
+        app.program.client.call(
+            remote_ops.set_comments, items=[{"addr": hex(cea), "comment": ""}]
+        )
     else:
         c.check("found a pseudocode line to comment", False, "no marker line")
 
@@ -2493,29 +3211,42 @@ async def s_comment_func(c: Ctx):
     dec.cursor, dec.cursor_x = 0, 2  # the signature line
     dec.refresh()
     await c.pause(0.05)
-    c.check("signature line has no address of its own", dec._line_ea(0) is None,
-            f"ea={dec._line_ea(0)}")
+    c.check(
+        "signature line has no address of its own",
+        dec._line_ea(0) is None,
+        f"ea={dec._line_ea(0)}",
+    )
     await c.press("semicolon")
     await c.pause(0.1)
     ci = app.query_one("#comment", Input)
     note = f"fn_note_{os.getpid()}"
-    c.check("';' on the signature line opens a function-comment prompt",
-            ci.display and "function comment" in str(ci.placeholder).lower(),
-            f"display={ci.display} ph={ci.placeholder!r}")
+    c.check(
+        "';' on the signature line opens a function-comment prompt",
+        ci.display and "function comment" in str(ci.placeholder).lower(),
+        f"display={ci.display} ph={ci.placeholder!r}",
+    )
     # literal '\n' in the comment becomes a real newline -> multi-line render
     a, b = f"{note}_A", f"{note}_B"
     ci.value = f"{a}\\n{b}"
     await c.press("enter")
-    await c.wait(lambda: dec.loaded_ea == fn.addr
-                 and any(a in t for t in dec._texts)
-                 and any(b in t for t in dec._texts), 25)
+    await c.wait(
+        lambda: (
+            dec.loaded_ea == fn.addr
+            and any(a in t for t in dec._texts)
+            and any(b in t for t in dec._texts)
+        ),
+        25,
+    )
     la = next((i for i, t in enumerate(dec._texts) if a in t), None)
     lb = next((i for i, t in enumerate(dec._texts) if b in t), None)
-    c.check("multi-line function comment renders on separate lines",
-            la is not None and lb is not None and lb > la
-            and a not in dec._texts[lb],
-            f"la={la} lb={lb}")
-    app.program.client.invoke("set_comments", items=[{"addr": hex(fn.addr), "comment": ""}])
+    c.check(
+        "multi-line function comment renders on separate lines",
+        la is not None and lb is not None and lb > la and a not in dec._texts[lb],
+        f"la={la} lb={lb}",
+    )
+    app.program.client.call(
+        remote_ops.set_comments, items=[{"addr": hex(fn.addr), "comment": ""}]
+    )
 
 
 @scenario("retype")
@@ -2535,30 +3266,41 @@ async def s_retype(c: Ctx):
     await c.press("y")
     await c.wait(lambda: app.query_one("#retype", Input).display, 10)
     ri = app.query_one("#retype", Input)
-    c.check("'y' on a function prefills its prototype",
-            ri.display and ri.value == old_proto, f"val={ri.value!r} want={old_proto!r}")
+    c.check(
+        "'y' on a function prefills its prototype",
+        ri.display and ri.value == old_proto,
+        f"val={ri.value!r} want={old_proto!r}",
+    )
     ri.value = f"void __fastcall {cf.name}(int zz_retype_arg)"
     await c.press("enter")
-    await c.wait(lambda: (lambda f: bool(f) and "zz_retype_arg" in f.prototype)(
-        app.program.func_types(cf.addr)), 20)
+    await c.wait(
+        lambda: (lambda f: bool(f) and "zz_retype_arg" in f.prototype)(
+            app.program.func_types(cf.addr)
+        ),
+        20,
+    )
     after = app.program.func_types(cf.addr)
-    c.check("applying a retype changes the function prototype",
-            after is not None and "zz_retype_arg" in after.prototype,
-            f"proto={after.prototype if after else None!r}")
+    c.check(
+        "applying a retype changes the function prototype",
+        after is not None and "zz_retype_arg" in after.prototype,
+        f"proto={after.prototype if after else None!r}",
+    )
     app.program.set_function_type(cf.addr, old_proto)  # restore
     # the retype above kicked off a recompile+reload; let it land before we start
     # placing the cursor, or the reload resets it under us.
     app.program.bump_names()
-    await c.wait(lambda: not dec.loading and dec.loaded_ea == cf.addr
-                 and bool(dec._texts), 25)
+    await c.wait(
+        lambda: not dec.loading and dec.loaded_ea == cf.addr and bool(dec._texts), 25
+    )
     await c.pause(0.3)
 
     # -- 'y' on a LOCAL variable retypes that variable, not the prototype --- #
     fts = app.program.func_types(cf.addr)
     lv = next((v for v in (fts.lvars if fts else []) if not v.is_arg), None)
     if lv is not None:
-        line = next((i for i, t in enumerate(dec._texts)
-                     if _word_occurrences(t, lv.name)), None)
+        line = next(
+            (i for i, t in enumerate(dec._texts) if _word_occurrences(t, lv.name)), None
+        )
         if line is not None:
             col = _word_occurrences(dec._texts[line], lv.name)[0][0]
             dec.focus()
@@ -2568,26 +3310,43 @@ async def s_retype(c: Ctx):
             await c.press("y")
             await c.wait(lambda: app.query_one("#retype", Input).display, 10)
             ri = app.query_one("#retype", Input)
-            c.check("'y' on a local variable prefills that variable's type",
-                    ri.value == lv.type and lv.name in str(ri.placeholder),
-                    f"val={ri.value!r} want={lv.type!r} ph={ri.placeholder!r}")
+            c.check(
+                "'y' on a local variable prefills that variable's type",
+                ri.value == lv.type and lv.name in str(ri.placeholder),
+                f"val={ri.value!r} want={lv.type!r} ph={ri.placeholder!r}",
+            )
             ri.value = "unsigned __int64"
             await c.press("enter")
-            changed = await c.wait(lambda: (lambda f: bool(f) and any(
-                v.name == lv.name and v.type == "unsigned __int64"
-                for v in f.lvars))(app.program.func_types(cf.addr)), 25)
-            c.check("applying it retypes the local variable", changed,
-                    f"{lv.name}: wanted unsigned __int64")
+            changed = await c.wait(
+                lambda: (
+                    lambda f: (
+                        bool(f)
+                        and any(
+                            v.name == lv.name and v.type == "unsigned __int64"
+                            for v in f.lvars
+                        )
+                    )
+                )(app.program.func_types(cf.addr)),
+                25,
+            )
+            c.check(
+                "applying it retypes the local variable",
+                changed,
+                f"{lv.name}: wanted unsigned __int64",
+            )
             after = app.program.func_types(cf.addr)
-            c.check("retyping a local leaves the prototype alone",
-                    after is not None and after.prototype == old_proto,
-                    f"proto={after.prototype if after else None!r}")
+            c.check(
+                "retyping a local leaves the prototype alone",
+                after is not None and after.prototype == old_proto,
+                f"proto={after.prototype if after else None!r}",
+            )
 
     # -- 'y' on a GLOBAL retypes the global, not the enclosing function ----- #
     # The lvar retype above recompiled too — settle again, or the scan below
     # indexes into pseudocode that's about to be replaced.
-    await c.wait(lambda: not dec.loading and dec.loaded_ea == cf.addr
-                 and bool(dec._texts), 25)
+    await c.wait(
+        lambda: not dec.loading and dec.loaded_ea == cf.addr and bool(dec._texts), 25
+    )
     await c.pause(0.3)
 
     # Pick a global that actually appears as a word in the pseudocode — a symbol
@@ -2605,8 +3364,11 @@ async def s_retype(c: Ctx):
             if app.program.func_types(a) is not None:
                 continue
             d = app.program.data_type(a) or {}
-            if (d.get("name") and not d.get("is_func")
-                    and "(" not in (d.get("type") or "")):
+            if (
+                d.get("name")
+                and not d.get("is_func")
+                and "(" not in (d.get("type") or "")
+            ):
                 glob = (w, a, d, i)
                 break
         if glob:
@@ -2620,27 +3382,40 @@ async def s_retype(c: Ctx):
             dec.cursor, dec.cursor_x = line, col + 1  # inside the word
             dec.refresh()
             await c.pause(0.05)
-            c.check("the cursor sits on the global",
-                    dec.word_under_cursor() == gname,
-                    f"word={dec.word_under_cursor()!r} want={gname!r} "
-                    f"line={line} col={col} text={dec._texts[line][:60]!r}")
+            c.check(
+                "the cursor sits on the global",
+                dec.word_under_cursor() == gname,
+                f"word={dec.word_under_cursor()!r} want={gname!r} "
+                f"line={line} col={col} text={dec._texts[line][:60]!r}",
+            )
             await c.press("y")
             await c.wait(lambda: app.query_one("#retype", Input).display, 10)
             ri = app.query_one("#retype", Input)
-            c.check("'y' on a global prefills the global's type (not the proto)",
-                    ri.value != old_proto and gname in str(ri.placeholder),
-                    f"val={ri.value!r} ph={ri.placeholder!r}")
+            c.check(
+                "'y' on a global prefills the global's type (not the proto)",
+                ri.value != old_proto and gname in str(ri.placeholder),
+                f"val={ri.value!r} ph={ri.placeholder!r}",
+            )
             ri.value = "unsigned __int64"
             await c.press("enter")
             retyped = await c.wait(
-                lambda: (app.program.data_type(glob.addr) or {}).get("type")
-                == "unsigned __int64", 25)
-            c.check("applying it retypes the global", retyped,
-                    f"type={(app.program.data_type(glob.addr) or {}).get('type')!r}")
+                lambda: (
+                    (app.program.data_type(glob.addr) or {}).get("type")
+                    == "unsigned __int64"
+                ),
+                25,
+            )
+            c.check(
+                "applying it retypes the global",
+                retyped,
+                f"type={(app.program.data_type(glob.addr) or {}).get('type')!r}",
+            )
             after = app.program.func_types(cf.addr)
-            c.check("retyping a global leaves the prototype alone",
-                    after is not None and after.prototype == old_proto,
-                    f"proto={after.prototype if after else None!r}")
+            c.check(
+                "retyping a global leaves the prototype alone",
+                after is not None and after.prototype == old_proto,
+                f"proto={after.prototype if after else None!r}",
+            )
             if dt.get("type"):  # restore
                 app.program.set_data_type(glob.addr, dt["type"])
 
@@ -2671,10 +3446,12 @@ async def s_scroll_restore(c: Ctx):
     await c.wait(lambda: app._cur.ea == fb.addr, 20)
     renders: list[int] = []
     _orig_rl = dis.render_line
+
     def _traced(y, _o=_orig_rl):
         if y == 0:
             renders.append(round(dis.scroll_offset.y))
         return _o(y)
+
     dis.render_line = _traced
     await c.press("escape")
     await c.wait(lambda: app._cur.ea == fa.addr, 20)
@@ -2683,13 +3460,19 @@ async def s_scroll_restore(c: Ctx):
     # one happened. Wait for the paint we are actually asserting about (each
     # poll ticks the screen, so this is ~one frame, not a quarter second).
     await c.wait(lambda: bool(renders) and renders[-1] == want_sy, 5)
-    c.check("disasm scroll + cursor restored on back (mid-viewport)",
-            round(dis.scroll_offset.y) == want_sy and dis.cursor == want_cur and want_rel > 0,
-            f"scroll={round(dis.scroll_offset.y)} (want {want_sy}) "
-            f"cursor={dis.cursor} (want {want_cur}) rel_before={want_rel}")
-    c.check("pane is repainted at the restored scroll (no stale top frame)",
-            bool(renders) and renders[-1] == want_sy,
-            f"last repaint scroll={renders[-1] if renders else None} (want {want_sy})")
+    c.check(
+        "disasm scroll + cursor restored on back (mid-viewport)",
+        round(dis.scroll_offset.y) == want_sy
+        and dis.cursor == want_cur
+        and want_rel > 0,
+        f"scroll={round(dis.scroll_offset.y)} (want {want_sy}) "
+        f"cursor={dis.cursor} (want {want_cur}) rel_before={want_rel}",
+    )
+    c.check(
+        "pane is repainted at the restored scroll (no stale top frame)",
+        bool(renders) and renders[-1] == want_sy,
+        f"last repaint scroll={renders[-1] if renders else None} (want {want_sy})",
+    )
     dis.render_line = _orig_rl
 
 
@@ -2709,14 +3492,18 @@ async def s_paging(c: Ctx):
     rel = dis.cursor - round(dis.scroll_offset.y)
     await c.press("pagedown")
     await c.pause(0.05)
-    c.check("PageDown preserves the viewport-relative row",
-            dis.cursor - round(dis.scroll_offset.y) == rel,
-            f"rel={dis.cursor - round(dis.scroll_offset.y)} want={rel}")
+    c.check(
+        "PageDown preserves the viewport-relative row",
+        dis.cursor - round(dis.scroll_offset.y) == rel,
+        f"rel={dis.cursor - round(dis.scroll_offset.y)} want={rel}",
+    )
     await c.press("pageup")
     await c.pause(0.05)
-    c.check("PageUp preserves the viewport-relative row",
-            dis.cursor - round(dis.scroll_offset.y) == rel,
-            f"rel={dis.cursor - round(dis.scroll_offset.y)} want={rel}")
+    c.check(
+        "PageUp preserves the viewport-relative row",
+        dis.cursor - round(dis.scroll_offset.y) == rel,
+        f"rel={dis.cursor - round(dis.scroll_offset.y)} want={rel}",
+    )
 
 
 @scenario("rename_history")
@@ -2766,8 +3553,13 @@ async def s_rename_history(c: Ctx):
     await c.pause(0.1)
     app.query_one("#rename", Input).value = hnew
     await c.press("enter")
-    await c.wait(lambda: app._func_index.by_addr(htarget)
-                 and app._func_index.by_addr(htarget).name == hnew, 25)
+    await c.wait(
+        lambda: (
+            app._func_index.by_addr(htarget)
+            and app._func_index.by_addr(htarget).name == hnew
+        ),
+        25,
+    )
     if app._active != "listing":
         await c.press("tab")
     await c.press("escape")
@@ -2776,14 +3568,22 @@ async def s_rename_history(c: Ctx):
     dis.model.lines(hrow, 4, prefetch=False)
     await c.pause(0.1)
     hline = dis._line_plain(hrow)
-    c.check("caller disasm shows renamed callee after 'back'",
-            hline is not None and hnew in hline, f"line={hline!r}")
+    c.check(
+        "caller disasm shows renamed callee after 'back'",
+        hline is not None and hnew in hline,
+        f"line={hline!r}",
+    )
     await c.press("tab")
     await c.wait(lambda: dec.loaded_ea == bea, 25)
     await c.pause(0.15)
-    c.check("caller pseudocode shows renamed callee after 'back'",
-            any(hnew in tx for tx in dec._texts), "pseudocode still stale")
-    app.program.client.invoke("rename", batch={"func": {"addr": hex(htarget), "name": hsym}})
+    c.check(
+        "caller pseudocode shows renamed callee after 'back'",
+        any(hnew in tx for tx in dec._texts),
+        "pseudocode still stale",
+    )
+    app.program.client.call(
+        remote_ops.rename, batch={"func": {"addr": hex(htarget), "name": hsym}}
+    )
 
 
 @scenario("region_define")
@@ -2800,37 +3600,59 @@ async def s_region_define(c: Ctx):
         # setup: undefine the whole function so [addr, addr+size) is a bare region
         c.prog.undefine(addr, size=size)
         c.prog.bump_items()
-        c.check("function removed by undefine",
-                c.prog.function_of(addr) is None, "still a function")
+        c.check(
+            "function removed by undefine",
+            c.prog.function_of(addr) is None,
+            "still a function",
+        )
 
         # navigate there via the real 'g' prompt -> opens the flat LISTING view
         # (a non-function region), not refused
         await c.goto_ui(hex(addr))
         await c.wait(lambda: app._cur is not None and app._cur.ea == addr, 25)
-        c.check("goto to a non-function address opens the listing view (not refused)",
-                app._cur is not None and app._cur.is_region
-                and app._active == "listing" and c.lst.display,
-                f"cur={app._cur} active={app._active} status={c.status()!r}")
+        c.check(
+            "goto to a non-function address opens the listing view (not refused)",
+            app._cur is not None
+            and app._cur.is_region
+            and app._active == "listing"
+            and c.lst.display,
+            f"cur={app._cur} active={app._active} status={c.status()!r}",
+        )
         await c.wait(lambda: c.lst.total > 0 and c.lst._cursor_ea() is not None, 25)
-        c.check("listing renders heads and the cursor sits on the target address",
-                c.lst.total > 0 and c.lst._cursor_ea() == addr,
-                f"total={c.lst.total} cur_ea={c.lst._cursor_ea()}")
+        c.check(
+            "listing renders heads and the cursor sits on the target address",
+            c.lst.total > 0 and c.lst._cursor_ea() == addr,
+            f"total={c.lst.total} cur_ea={c.lst._cursor_ea()}",
+        )
         # the flat listing spans the whole segment, not just this function
         seg = c.prog.segment_bounds(addr)
-        c.check("listing spans the whole segment (more heads than one function)",
-                seg is not None and c.lst.total > 1, f"total={c.lst.total} seg={seg}")
+        c.check(
+            "listing spans the whole segment (more heads than one function)",
+            seg is not None and c.lst.total > 1,
+            f"total={c.lst.total} seg={seg}",
+        )
 
         # 'p' on the entry head (re)creates the function
         c.lst.focus()
         c.lst.cursor, c.lst.cursor_x = c.lst.model.index_of_ea(addr), 0
         await c.pause(0.05)
         await c.press("p")
-        await c.wait(lambda: c.prog.function_of(addr) is not None
-                     and app._cur is not None and not app._cur.is_region, 25)
-        c.check("'p' creates a function and upgrades the listing to a function view",
-                c.prog.function_of(addr) is not None and not app._cur.is_region
-                and app._cur.ea == addr and app._active in ("listing", "decomp"),
-                f"fn={c.prog.function_of(addr)} cur={app._cur} active={app._active}")
+        await c.wait(
+            lambda: (
+                c.prog.function_of(addr) is not None
+                and app._cur is not None
+                and not app._cur.is_region
+            ),
+            25,
+        )
+        c.check(
+            "'p' creates a function and upgrades the listing to a function view",
+            c.prog.function_of(addr) is not None
+            and not app._cur.is_region
+            and app._cur.ea == addr
+            and app._active in ("listing", "decomp"),
+            f"fn={c.prog.function_of(addr)} cur={app._cur} active={app._active}",
+        )
     finally:
         # idempotency: guarantee the function is back even if a check failed
         if c.prog.function_of(addr) is None:
@@ -2866,46 +3688,83 @@ async def s_listing_view(c: Ctx):
     # `total > 0` is set from the segment's size before a single page has
     # materialised, so waiting on it and then reading rows was the suite's
     # one known flake (it failed roughly one run in three). Wait for a ROW.
-    await c.wait(lambda: app._cur is not None and app._active == "listing"
-                 and c.lst.total > 0 and c.lst.model is not None
-                 and any(h.kind == "data" for h in c.lst.model.window(0, 40)), 25)
-    c.check("navigating to a data segment opens the listing view",
-            app._active == "listing" and c.lst.display and c.lst.total > 0,
-            f"active={app._active} total={c.lst.total}")
+    await c.wait(
+        lambda: (
+            app._cur is not None
+            and app._active == "listing"
+            and c.lst.total > 0
+            and c.lst.model is not None
+            and any(h.kind == "data" for h in c.lst.model.window(0, 40))
+        ),
+        25,
+    )
+    c.check(
+        "navigating to a data segment opens the listing view",
+        app._active == "listing" and c.lst.display and c.lst.total > 0,
+        f"active={app._active} total={c.lst.total}",
+    )
     kinds = {h.kind for h in c.lst.model.window(0, 40)}
     c.check("listing shows data heads (not just code)", "data" in kinds, str(kinds))
 
     # a rendered data line carries the item text (e.g. db/dd/string)
     c.lst.focus()
-    first_data = next((i for i in range(min(c.lst.total, 60))
-                       if c.lst.model.get(i) and c.lst.model.get(i).kind == "data"), None)
-    c.check("a data head exists in the first screenful", first_data is not None,
-            f"total={c.lst.total}")
+    first_data = next(
+        (
+            i
+            for i in range(min(c.lst.total, 60))
+            if c.lst.model.get(i) and c.lst.model.get(i).kind == "data"
+        ),
+        None,
+    )
+    c.check(
+        "a data head exists in the first screenful",
+        first_data is not None,
+        f"total={c.lst.total}",
+    )
     if first_data is not None:
         c.lst.cursor = first_data
         await c.pause(0.05)
         plain = c.lst._line_plain(first_data)
-        c.check("data line renders its item text", bool(plain and plain.strip()),
-                f"plain={plain!r}")
-        c.check("listing cursor reports the head address",
-                c.lst._cursor_ea() == c.lst.model.get(first_data).ea, str(c.lst._cursor_ea()))
+        c.check(
+            "data line renders its item text",
+            bool(plain and plain.strip()),
+            f"plain={plain!r}",
+        )
+        c.check(
+            "listing cursor reports the head address",
+            c.lst._cursor_ea() == c.lst.model.get(first_data).ea,
+            str(c.lst._cursor_ea()),
+        )
 
     # backslash from the listing opens hex at the cursor address; and back
     cur_ea = c.lst._cursor_ea()
     await c.press("backslash")
     await c.wait(lambda: app._active == "hex" and c.hex.display, 15)
-    c.check("backslash from the listing opens the hex view", app._active == "hex",
-            f"active={app._active}")
+    c.check(
+        "backslash from the listing opens the hex view",
+        app._active == "hex",
+        f"active={app._active}",
+    )
     await c.press("backslash")
     await c.wait(lambda: app._active == "listing", 15)
-    c.check("returning from hex lands back on the listing (not a func view)",
-            app._active == "listing" and c.lst.display, f"active={app._active}")
+    c.check(
+        "returning from hex lands back on the listing (not a func view)",
+        app._active == "listing" and c.lst.display,
+        f"active={app._active}",
+    )
 
     # 'd' defines typed data over an undefined run. Synthesize the run
     # deterministically: undefine a data head, then re-type it via the prompt.
-    dhead = next((c.lst.model.get(i) for i in range(min(c.lst.total, 200))
-                  if c.lst.model.get(i) and c.lst.model.get(i).kind == "data"
-                  and (c.lst.model.get(i).size or 0) >= 4), None)
+    dhead = next(
+        (
+            c.lst.model.get(i)
+            for i in range(min(c.lst.total, 200))
+            if c.lst.model.get(i)
+            and c.lst.model.get(i).kind == "data"
+            and (c.lst.model.get(i).size or 0) >= 4
+        ),
+        None,
+    )
     if dhead is None:
         c.check("found a data head to re-type", False)
         return
@@ -2921,31 +3780,49 @@ async def s_listing_view(c: Ctx):
         # win the race, and it started failing the moment page loads got bigger.
         stale = c.lst.model
         await c.goto_ui(hex(dea))
-        await c.wait(lambda: app._active == "listing" and c.lst.total > 0
-                     and c.lst.model is not stale
-                     and c.lst.model.index_of_ea(dea) >= 0, 25)
+        await c.wait(
+            lambda: (
+                app._active == "listing"
+                and c.lst.total > 0
+                and c.lst.model is not stale
+                and c.lst.model.index_of_ea(dea) >= 0
+            ),
+            25,
+        )
         ui = c.lst.model.index_of_ea(dea)
-        c.check("undefining a data head yields an unknown run in the listing",
-                ui >= 0 and c.lst.model.get(ui).kind == "unknown",
-                f"kind={c.lst.model.get(ui).kind if ui>=0 else None}")
+        c.check(
+            "undefining a data head yields an unknown run in the listing",
+            ui >= 0 and c.lst.model.get(ui).kind == "unknown",
+            f"kind={c.lst.model.get(ui).kind if ui >= 0 else None}",
+        )
         c.lst.focus()
         c.lst.cursor = ui
         await c.pause(0.05)
         await c.press("d")
         await c.pause(0.1)
         mdi = app.query_one("#makedata", Input)
-        c.check("'d' opens the make-data prompt prefilled with a type",
-                mdi.display and bool(mdi.value), f"display={mdi.display} val={mdi.value!r}")
+        c.check(
+            "'d' opens the make-data prompt prefilled with a type",
+            mdi.display and bool(mdi.value),
+            f"display={mdi.display} val={mdi.value!r}",
+        )
         mdi.value = "char[4]"
         await c.press("enter")
-        await c.wait(lambda: app._active == "listing"
-                     and c.lst.model.index_of_ea(dea) >= 0
-                     and c.lst.model.get(c.lst.model.index_of_ea(dea)) is not None
-                     and c.lst.model.get(c.lst.model.index_of_ea(dea)).kind == "data", 25)
+        await c.wait(
+            lambda: (
+                app._active == "listing"
+                and c.lst.model.index_of_ea(dea) >= 0
+                and c.lst.model.get(c.lst.model.index_of_ea(dea)) is not None
+                and c.lst.model.get(c.lst.model.index_of_ea(dea)).kind == "data"
+            ),
+            25,
+        )
         di = c.lst.model.index_of_ea(dea)
-        c.check("'d' turns the undefined run into a typed data item",
-                di >= 0 and c.lst.model.get(di).kind == "data",
-                f"kind={c.lst.model.get(di).kind if di>=0 else None}")
+        c.check(
+            "'d' turns the undefined run into a typed data item",
+            di >= 0 and c.lst.model.get(di).kind == "data",
+            f"kind={c.lst.model.get(di).kind if di >= 0 else None}",
+        )
     finally:
         c.prog.bump_items()
 
@@ -2971,8 +3848,11 @@ async def s_listing_name_addr(c: Ctx):
     if data_ea is None:
         c.check("found a data segment with a >=2-byte item", False)
         return
-    dh = next(h for h in c.prog.listing(data_ea).window(0, 60)
-              if h.kind == "data" and (h.size or 0) >= 2)
+    dh = next(
+        h
+        for h in c.prog.listing(data_ea).window(0, 60)
+        if h.kind == "data" and (h.size or 0) >= 2
+    )
     A = dh.ea
     newname = f"after_{os.getpid()}"
     try:
@@ -2980,33 +3860,53 @@ async def s_listing_name_addr(c: Ctx):
         c.prog.make_data(A, "unsigned __int8")
         c.prog.bump_items()
         await c.goto_ui(hex(A + 1))
-        await c.wait(lambda: app._active == "listing" and app._cur is not None
-                     and app._cur.ea == A + 1, 25)
+        await c.wait(
+            lambda: (
+                app._active == "listing"
+                and app._cur is not None
+                and app._cur.ea == A + 1
+            ),
+            25,
+        )
         head = c.lst.cur_head()
-        c.check("cursor lands on the now-undefined byte at addr+1",
-                head is not None and head.ea == A + 1 and head.kind == "unknown",
-                f"head={head}")
+        c.check(
+            "cursor lands on the now-undefined byte at addr+1",
+            head is not None and head.ea == A + 1 and head.kind == "unknown",
+            f"head={head}",
+        )
         # 'n' opens the address-name prompt (even though there's no symbol)
         c.lst.focus()
         await c.press("n")
         await c.pause(0.1)
         ri = app.query_one("#rename", Input)
-        c.check("'n' opens the name prompt on an unnamed byte",
-                ri.display, f"display={ri.display}")
+        c.check(
+            "'n' opens the name prompt on an unnamed byte",
+            ri.display,
+            f"display={ri.display}",
+        )
         ri.value = newname
         await c.press("enter")
-        await c.wait(lambda: app._active == "listing"
-                     and c.lst.model.index_of_ea(A + 1) >= 0
-                     and c.lst.model.get(c.lst.model.index_of_ea(A + 1)) is not None
-                     and c.lst.model.get(c.lst.model.index_of_ea(A + 1)).name == newname, 25)
+        await c.wait(
+            lambda: (
+                app._active == "listing"
+                and c.lst.model.index_of_ea(A + 1) >= 0
+                and c.lst.model.get(c.lst.model.index_of_ea(A + 1)) is not None
+                and c.lst.model.get(c.lst.model.index_of_ea(A + 1)).name == newname
+            ),
+            25,
+        )
         hi = c.lst.model.index_of_ea(A + 1)
-        c.check("naming a bare byte at addr+1 sticks",
-                hi >= 0 and c.lst.model.get(hi).name == newname,
-                f"name={c.lst.model.get(hi).name if hi>=0 else None}")
+        c.check(
+            "naming a bare byte at addr+1 sticks",
+            hi >= 0 and c.lst.model.get(hi).name == newname,
+            f"name={c.lst.model.get(hi).name if hi >= 0 else None}",
+        )
     finally:
         # revert: drop the label and restore raw bytes at A
         try:
-            c.prog.client.invoke("rename", batch={"data": {"addr": hex(A + 1), "new": ""}})
+            c.prog.client.call(
+                remote_ops.rename, batch={"data": {"addr": hex(A + 1), "new": ""}}
+            )
         except Exception:  # noqa: BLE001
             pass
         c.prog.undefine(A, size=8)
@@ -3025,8 +3925,9 @@ async def s_listing_make_string(c: Ctx):
         if lm is None:
             continue
         lm.ensure(80)
-        h = next((h for h in lm.window(0, 80)
-                  if h.kind == "data" and "'" in h.text), None)
+        h = next(
+            (h for h in lm.window(0, 80) if h.kind == "data" and "'" in h.text), None
+        )
         if h is not None:
             target = h.ea
             break
@@ -3038,22 +3939,36 @@ async def s_listing_make_string(c: Ctx):
         c.prog.undefine(A, size=8)
         c.prog.bump_items()
         await c.goto_ui(hex(A))
-        await c.wait(lambda: app._active == "listing" and app._cur is not None
-                     and app._cur.ea == A, 25)
-        c.check("target is undefined before 'a'",
-                c.lst.cur_head() is not None and c.lst.cur_head().kind == "unknown",
-                f"head={c.lst.cur_head()}")
+        await c.wait(
+            lambda: (
+                app._active == "listing" and app._cur is not None and app._cur.ea == A
+            ),
+            25,
+        )
+        c.check(
+            "target is undefined before 'a'",
+            c.lst.cur_head() is not None and c.lst.cur_head().kind == "unknown",
+            f"head={c.lst.cur_head()}",
+        )
         c.lst.focus()
         await c.press("a")
-        await c.wait(lambda: c.lst.model.index_of_ea(A) >= 0
-                     and c.lst.model.get(c.lst.model.index_of_ea(A)) is not None
-                     and c.lst.model.get(c.lst.model.index_of_ea(A)).kind == "data"
-                     and "'" in c.lst.model.get(c.lst.model.index_of_ea(A)).text, 25)
+        await c.wait(
+            lambda: (
+                c.lst.model.index_of_ea(A) >= 0
+                and c.lst.model.get(c.lst.model.index_of_ea(A)) is not None
+                and c.lst.model.get(c.lst.model.index_of_ea(A)).kind == "data"
+                and "'" in c.lst.model.get(c.lst.model.index_of_ea(A)).text
+            ),
+            25,
+        )
         hi = c.lst.model.index_of_ea(A)
-        c.check("'a' creates a string literal at the cursor",
-                hi >= 0 and c.lst.model.get(hi).kind == "data"
-                and "'" in c.lst.model.get(hi).text,
-                f"head={c.lst.model.get(hi) if hi >= 0 else None}")
+        c.check(
+            "'a' creates a string literal at the cursor",
+            hi >= 0
+            and c.lst.model.get(hi).kind == "data"
+            and "'" in c.lst.model.get(hi).text,
+            f"head={c.lst.model.get(hi) if hi >= 0 else None}",
+        )
     finally:
         try:
             c.prog.make_string(A)  # restore the original string
@@ -3083,25 +3998,38 @@ async def s_listing_struct_expand(c: Ctx):
         c.check("found a data address for the struct test", False)
         return
     try:
-        c.prog.client.invoke(
-            "declare_type",
-            decls=["struct TuiExpandS { int a; char b[4]; short c; };"])
+        c.prog.client.call(
+            remote_ops.declare_type,
+            decls=["struct TuiExpandS { int a; char b[4]; short c; };"],
+        )
         c.prog.make_data(A, "TuiExpandS")
         c.prog.bump_items()
         await c.goto_ui(hex(A))
-        await c.wait(lambda: app._active == "listing" and app._cur is not None
-                     and app._cur.ea == A and c.lst.total > 0, 25)
+        await c.wait(
+            lambda: (
+                app._active == "listing"
+                and app._cur is not None
+                and app._cur.ea == A
+                and c.lst.total > 0
+            ),
+            25,
+        )
         # the summary head, then member rows for a/b/c
         si = c.lst.model.index_of_ea(A)
         members = [c.lst.model.get(si + 1 + k) for k in range(3)]
         names = [m.text for m in members if m is not None]
-        c.check("struct global expands into member rows",
-                all(m is not None and m.kind == "member" for m in members)
-                and any("a" in t for t in names) and any("b" in t for t in names),
-                f"members={names}")
-        c.check("member rows carry field addresses",
-                members[1] is not None and members[1].ea == A + 4,
-                f"ea={members[1].ea if members[1] else None:#x} want={A+4:#x}")
+        c.check(
+            "struct global expands into member rows",
+            all(m is not None and m.kind == "member" for m in members)
+            and any("a" in t for t in names)
+            and any("b" in t for t in names),
+            f"members={names}",
+        )
+        c.check(
+            "member rows carry field addresses",
+            members[1] is not None and members[1].ea == A + 4,
+            f"ea={members[1].ea if members[1] else None:#x} want={A + 4:#x}",
+        )
     finally:
         try:
             c.prog.undefine(A, size=16)
@@ -3119,45 +4047,66 @@ async def s_continuous_view(c: Ctx):
     fn = await c.open_biggest("listing")
     fn_ea = fn.addr
     await c.wait(lambda: app._active == "listing" and c.lst.display, 10)
-    c.check("a function opens in the continuous listing by default",
-            app._active == "listing" and c.lst.display
-            and c.lst._cursor_ea() == fn_ea,
-            f"active={app._active} disp={c.lst.display} cur_ea={c.lst._cursor_ea()}")
+    c.check(
+        "a function opens in the continuous listing by default",
+        app._active == "listing" and c.lst.display and c.lst._cursor_ea() == fn_ea,
+        f"active={app._active} disp={c.lst.display} cur_ea={c.lst._cursor_ea()}",
+    )
     # the listing spans the whole segment, not just the function
     c.lst.model.load_all()
     seg = c.prog.segment_bounds(fn_ea)
     seg_rows = len(c.lst.model)
     # a function's own instruction count is far smaller than the segment
     fdis = c.prog.disasm(fn_ea, fn.name)
-    c.check("the continuous listing extends past the function's bounds",
-            seg_rows > fdis.total(), f"listing={seg_rows} func={fdis.total()}")
+    c.check(
+        "the continuous listing extends past the function's bounds",
+        seg_rows > fdis.total(),
+        f"listing={seg_rows} func={fdis.total()}",
+    )
     kinds = {c.lst.model.get(i).kind for i in range(seg_rows)}
-    c.check("continuous listing interleaves code with data/undefined",
-            "code" in kinds and ("data" in kinds or "unknown" in kinds), str(kinds))
+    c.check(
+        "continuous listing interleaves code with data/undefined",
+        "code" in kinds and ("data" in kinds or "unknown" in kinds),
+        str(kinds),
+    )
     # rendering parity with disasm: code lines carry opcode bytes
-    cidx = next((i for i in range(seg_rows)
-                 if c.lst.model.get(i).kind == "code"), None)
-    c.check("continuous listing renders opcode bytes (parity with disasm)",
-            cidx is not None and c.lst.model.get(cidx).raw
-            and c.lst._op_field(c.lst.model.get(cidx)).strip() != "",
-            f"raw={c.lst.model.get(cidx).raw if cidx is not None else None!r}")
+    cidx = next((i for i in range(seg_rows) if c.lst.model.get(i).kind == "code"), None)
+    c.check(
+        "continuous listing renders opcode bytes (parity with disasm)",
+        cidx is not None
+        and c.lst.model.get(cidx).raw
+        and c.lst._op_field(c.lst.model.get(cidx)).strip() != "",
+        f"raw={c.lst.model.get(cidx).raw if cidx is not None else None!r}",
+    )
     # F5/Tab at the function -> decompiler, and back to the same spot
     c.lst.focus()
     await c.press("tab")
-    await c.wait(lambda: (app._active == "decomp" and c.dec.loaded_ea == fn_ea)
-                 or (app.is_listing
-                and _CANNOT_DECOMP in c.status().lower()), 25)
+    await c.wait(
+        lambda: (
+            (app._active == "decomp" and c.dec.loaded_ea == fn_ea)
+            or (app.is_listing and _CANNOT_DECOMP in c.status().lower())
+        ),
+        25,
+    )
     if app._active == "decomp":
-        c.check("F5/Tab decompiles the function under the cursor",
-                c.dec.loaded_ea == fn_ea, f"loaded={c.dec.loaded_ea}")
+        c.check(
+            "F5/Tab decompiles the function under the cursor",
+            c.dec.loaded_ea == fn_ea,
+            f"loaded={c.dec.loaded_ea}",
+        )
         await c.press("tab")
         await c.wait(lambda: app._active == "listing", 25)
-        c.check("F5/Tab in the decompiler returns to the listing at the same ea",
-                app._active == "listing" and c.lst._cursor_ea() == fn_ea,
-                f"active={app._active} cur_ea={c.lst._cursor_ea()}")
+        c.check(
+            "F5/Tab in the decompiler returns to the listing at the same ea",
+            app._active == "listing" and c.lst._cursor_ea() == fn_ea,
+            f"active={app._active} cur_ea={c.lst._cursor_ea()}",
+        )
     else:
-        c.check("undecompilable function falls back to the listing",
-                app._active == "listing", f"active={app._active}")
+        c.check(
+            "undecompilable function falls back to the listing",
+            app._active == "listing",
+            f"active={app._active}",
+        )
 
 
 @scenario("func_banners")
@@ -3170,18 +4119,27 @@ async def s_func_banners(c: Ctx):
     c.lst.model.load_all()
     heads = [c.lst.model.get(i) for i in range(len(c.lst.model))]
     ci = c.lst.model.index_of_ea(fn.addr)
-    c.check("navigation to a function lands on its code head, not a banner",
-            ci >= 0 and c.lst.model.get(ci).kind == "code",
-            f"kind={c.lst.model.get(ci).kind if ci >= 0 else None}")
-    c.check("a SUBROUTINE separator banner is present",
-            any(h.kind == "sep" and "S U B R O U T I N E" in h.text for h in heads))
-    c.check("a 'name proc' header is present",
-            any(h.kind == "funchdr" and h.text.endswith(" proc") for h in heads))
-    c.check("a 'name endp' footer is present",
-            any(h.kind == "funchdr" and h.text.endswith("endp") for h in heads))
+    c.check(
+        "navigation to a function lands on its code head, not a banner",
+        ci >= 0 and c.lst.model.get(ci).kind == "code",
+        f"kind={c.lst.model.get(ci).kind if ci >= 0 else None}",
+    )
+    c.check(
+        "a SUBROUTINE separator banner is present",
+        any(h.kind == "sep" and "S U B R O U T I N E" in h.text for h in heads),
+    )
+    c.check(
+        "a 'name proc' header is present",
+        any(h.kind == "funchdr" and h.text.endswith(" proc") for h in heads),
+    )
+    c.check(
+        "a 'name endp' footer is present",
+        any(h.kind == "funchdr" and h.text.endswith("endp") for h in heads),
+    )
     # the proc header for the origin function carries its name
-    hdr = next((h for h in heads if h.kind == "funchdr"
-                and h.text == f"{fn.name} proc"), None)
+    hdr = next(
+        (h for h in heads if h.kind == "funchdr" and h.text == f"{fn.name} proc"), None
+    )
     c.check("the proc header names the function", hdr is not None, f"fn={fn.name}")
 
 
@@ -3246,35 +4204,58 @@ async def s_opfmt_listing(c: Ctx):
     ea = head.ea
     c.lst.focus()
     parked = await _park_on(c, ea)
-    c.check("the cursor is on the literal's line", parked,
-            f"want {ea:#x}, cursor at {c.lst._cursor_ea():#x}")
+    c.check(
+        "the cursor is on the literal's line",
+        parked,
+        f"want {ea:#x}, cursor at {c.lst._cursor_ea():#x}",
+    )
     before = head.text
     try:
         await c.press("o")
-        await c.wait(lambda: c.lst.model.index_of_ea(ea) >= 0
-                     and (c.lst.model.get(c.lst.model.index_of_ea(ea)) or head).text
-                     != before, 25)
+        await c.wait(
+            lambda: (
+                c.lst.model.index_of_ea(ea) >= 0
+                and (c.lst.model.get(c.lst.model.index_of_ea(ea)) or head).text
+                != before
+            ),
+            25,
+        )
         i = c.lst.model.index_of_ea(ea)
         after = c.lst.model.get(i).text if i >= 0 else before
-        c.check("'o' re-renders the literal", after != before,
-                f"{before!r} -> {after!r}  ea={ea:#x} show={show}")
-        c.check("the status names the format it moved to",
-                any(f in c.status() for f in show["choices"]),
-                f"status={c.status()!r} choices={show['choices']}")
+        c.check(
+            "'o' re-renders the literal",
+            after != before,
+            f"{before!r} -> {after!r}  ea={ea:#x} show={show}",
+        )
+        c.check(
+            "the status names the format it moved to",
+            any(f in c.status() for f in show["choices"]),
+            f"status={c.status()!r} choices={show['choices']}",
+        )
         c.check("the change is marked unsaved", app._dirty)
         # 'O' walks the ring the other way: back to where we started.
         await c.press("O")
-        await c.wait(lambda: c.lst.model.index_of_ea(ea) >= 0
-                     and (c.lst.model.get(c.lst.model.index_of_ea(ea)) or head).text
-                     == before, 25)
+        await c.wait(
+            lambda: (
+                c.lst.model.index_of_ea(ea) >= 0
+                and (c.lst.model.get(c.lst.model.index_of_ea(ea)) or head).text
+                == before
+            ),
+            25,
+        )
         j = c.lst.model.index_of_ea(ea)
-        c.check("'O' cycles back", j >= 0 and c.lst.model.get(j).text == before,
-                f"{c.lst.model.get(j).text if j >= 0 else None!r} want {before!r}")
+        c.check(
+            "'O' cycles back",
+            j >= 0 and c.lst.model.get(j).text == before,
+            f"{c.lst.model.get(j).text if j >= 0 else None!r} want {before!r}",
+        )
         # An explicit format by name (what the palette/RPC use).
         r = c.prog.op_format(ea, mode="dec")
-        c.check("an explicit format renders decimal",
-                r["format"] == "dec" and str(int(show["value"], 16)) in r["text"],
-                str(r))
+        c.check(
+            "an explicit format renders decimal",
+            r["format"] == "dec" and str(int(show["value"], 16)) in r["text"],
+            str(r),
+        )
     finally:
         try:
             c.prog.op_format(ea, mode="default", n=show.get("n", -1))
@@ -3293,24 +4274,33 @@ async def s_opfmt_no_literal(c: Ctx):
         h = c.lst.model.get(i)
         return h is not None and h.kind in ("sep", "funchdr", "label")
 
-    row = next((i for i in range(c.lst.cursor, min(c.lst.cursor + 400,
-                                                   len(c.lst.model)))
-                if _banner(i)), None)
+    row = next(
+        (
+            i
+            for i in range(c.lst.cursor, min(c.lst.cursor + 400, len(c.lst.model)))
+            if _banner(i)
+        ),
+        None,
+    )
     if row is None:
         c.check("found a banner row", False)
         return
     c.lst.focus()
-    for _ in range(20):                 # hold it against a late-landing open
+    for _ in range(20):  # hold it against a late-landing open
         c.lst.cursor = row
         await c.pause(0.05)
         if c.lst.cursor == row:
             break
-    c.check("the cursor is on a banner row", _banner(c.lst.cursor),
-            f"row={c.lst.cursor}")
+    c.check(
+        "the cursor is on a banner row", _banner(c.lst.cursor), f"row={c.lst.cursor}"
+    )
     await c.press("o")
     await c.wait(lambda: "reformat" in c.status() or "format" in c.status(), 15)
-    c.check("'o' on a line with no literal explains itself",
-            "reformat" in c.status(), f"status={c.status()!r}")
+    c.check(
+        "'o' on a line with no literal explains itself",
+        "reformat" in c.status(),
+        f"status={c.status()!r}",
+    )
 
 
 @scenario("opfmt_refusal_is_not_swallowed")
@@ -3338,7 +4328,7 @@ async def s_opfmt_refusal_visible(c: Ctx):
         c.check("the cursor is on the literal's line", False)
         return
     try:
-        await c.press("o")                      # a success: sets the flash
+        await c.press("o")  # a success: sets the flash
         await c.wait(lambda: "\u2192" in c.status(), 25)
         good = c.status()
 
@@ -3351,9 +4341,14 @@ async def s_opfmt_refusal_visible(c: Ctx):
             h = c.lst.model.get(i)
             return h is not None and h.kind in ("sep", "funchdr", "label")
 
-        row = next((i for i in range(c.lst.cursor,
-                                     min(c.lst.cursor + 400, len(c.lst.model)))
-                    if _banner(i)), None)
+        row = next(
+            (
+                i
+                for i in range(c.lst.cursor, min(c.lst.cursor + 400, len(c.lst.model)))
+                if _banner(i)
+            ),
+            None,
+        )
         if row is None:
             c.check("found a banner row to refuse on", False)
             return
@@ -3362,11 +4357,13 @@ async def s_opfmt_refusal_visible(c: Ctx):
             await c.pause(0.05)
             if c.lst.cursor == row:
                 break
-        c.lst.action_op_format("cycle")     # no keypress: as the RPC does it
+        c.lst.action_op_format("cycle")  # no keypress: as the RPC does it
         await c.wait(lambda: c.status() != good, 15)
-        c.check("a refusal replaces the previous success on the status bar",
-                c.status() != good and "reformat" in c.status(),
-                f"still showing {c.status()!r}")
+        c.check(
+            "a refusal replaces the previous success on the status bar",
+            c.status() != good and "reformat" in c.status(),
+            f"still showing {c.status()!r}",
+        )
     finally:
         try:
             c.prog.op_format(head.ea, mode="default", n=show.get("n", -1))
@@ -3380,8 +4377,11 @@ def _styled_cols(strip, style_attr, want):
     cols, x = [], 0
     for seg in strip:
         st = seg.style
-        if st is not None and getattr(st, style_attr, None) is not None \
-                and str(getattr(st, style_attr)) == want:
+        if (
+            st is not None
+            and getattr(st, style_attr, None) is not None
+            and str(getattr(st, style_attr)) == want
+        ):
             cols.extend(range(x, x + len(seg.text)))
         x += len(seg.text)
     return cols
@@ -3397,15 +4397,22 @@ async def s_opfmt_highlight(c: Ctx):
     (usually the same characters) and used to win.
     """
     from idatui.app import _S_OPERAND
+
     await c.open_biggest("listing")
     c.lst.model.load_all()
     lst = c.lst
     lst.focus()
     # A row with two operands, so "which one" is a real question.
-    row = next((i for i in range(lst.cursor, min(lst.cursor + 400, len(lst.model)))
-                if lst.model.get(i) is not None
-                and (lst.model.get(i).ops or ()) and len(lst.model.get(i).ops) >= 2),
-               None)
+    row = next(
+        (
+            i
+            for i in range(lst.cursor, min(lst.cursor + 400, len(lst.model)))
+            if lst.model.get(i) is not None
+            and (lst.model.get(i).ops or ())
+            and len(lst.model.get(i).ops) >= 2
+        ),
+        None,
+    )
     if row is None:
         c.check("found a row with two operands", False)
         return
@@ -3424,12 +4431,17 @@ async def s_opfmt_highlight(c: Ctx):
         strip = lst.render_line(row - round(lst.scroll_offset.y))
         cols = _styled_cols(strip, "bgcolor", want_bg)
         seen.append((n, min(cols) if cols else None, max(cols) + 1 if cols else None))
-        c.check(f"operand {n} ({h.text[lo:hi]!r}) is marked when the cursor is on it",
-                cols and min(cols) == base + lo and max(cols) + 1 == base + hi,
-                f"marked={min(cols) if cols else None}.."
-                f"{max(cols)+1 if cols else None} want={base+lo}..{base+hi}")
-    c.check("the mark MOVES between the operands (it isn't the whole line)",
-            len({s[1] for s in seen}) == len(seen), str(seen))
+        c.check(
+            f"operand {n} ({h.text[lo:hi]!r}) is marked when the cursor is on it",
+            cols and min(cols) == base + lo and max(cols) + 1 == base + hi,
+            f"marked={min(cols) if cols else None}.."
+            f"{max(cols) + 1 if cols else None} want={base + lo}..{base + hi}",
+        )
+    c.check(
+        "the mark MOVES between the operands (it isn't the whole line)",
+        len({s[1] for s in seen}) == len(seen),
+        str(seen),
+    )
     # ... and the marked operand is the one the edit acts on — either it gets
     # reformatted, or the refusal names that same operand. What must never
     # happen is a different operand quietly changing.
@@ -3438,11 +4450,14 @@ async def s_opfmt_highlight(c: Ctx):
         try:
             r = c.prog.op_format(h.ea, mode="show", col=lst.op_col())
             got, why = r.get("n"), ""
-        except IDAToolError as e:            # "operand N (rsp) has no format"
+        except IDAToolError as e:  # "operand N (rsp) has no format"
             m = re.search(r"operand (\d+)", e.message)
             got, why = (int(m.group(1)) if m else None), e.message
-        c.check(f"marked operand {n} is the one acted on (or refused)",
-                got == n, f"marked op{n}, worker said op{got} {why}")
+        c.check(
+            f"marked operand {n} is the one acted on (or refused)",
+            got == n,
+            f"marked op{n}, worker said op{got} {why}",
+        )
 
 
 @scenario("opfmt_sticks_to_its_literal")
@@ -3465,8 +4480,7 @@ async def s_opfmt_sticks(c: Ctx):
             # The second literal must be one whose printed WIDTH changes as it
             # cycles (0x36u vs 54), or the cursor never falls off it and the
             # test proves nothing.
-            if len(recs) >= 2 and recs[0][1] < recs[1][0] \
-                    and int(recs[1][2], 16) >= 16:
+            if len(recs) >= 2 and recs[0][1] < recs[1][0] and int(recs[1][2], 16) >= 16:
                 pick = (fn, line, recs)
                 break
         if pick:
@@ -3476,7 +4490,7 @@ async def s_opfmt_sticks(c: Ctx):
         return
     fn, line, recs = pick
     first, second = recs[0], recs[1]
-    target = (second[3], second[4])        # (ea, opnum) of the literal we mean
+    target = (second[3], second[4])  # (ea, opnum) of the literal we mean
     other = (first[3], first[4])
     try:
         # Make it WIDE first (0x30, four characters). The cursor then sits on a
@@ -3491,33 +4505,47 @@ async def s_opfmt_sticks(c: Ctx):
             return
         dec = c.dec
         dec.focus()
-        wide = next((r for r in dec._nums.get(line, ())
-                     if (r[3], r[4]) == target), None)
+        wide = next(
+            (r for r in dec._nums.get(line, ()) if (r[3], r[4]) == target), None
+        )
         if wide is None or wide[1] - wide[0] < 3:
-            c.check("the literal is now printed wide", False,
-                    f"nums={dec._nums.get(line)}")
+            c.check(
+                "the literal is now printed wide", False, f"nums={dec._nums.get(line)}"
+            )
             return
-        dec.cursor, dec.cursor_x = line, wide[1] - 1   # its LAST character
+        dec.cursor, dec.cursor_x = line, wide[1] - 1  # its LAST character
         dec.refresh()
         await c.pause(0.05)
         seen = []
         for _ in range(3):
             before = dec._texts[line]
             await c.press("o")
-            await c.wait(lambda: dec.loaded_ea == fn.addr
-                         and line < len(dec._texts)
-                         and dec._texts[line] != before, 30)
-            cur = next(((r[3], r[4]) for r in dec._nums.get(line, ())
-                        if r[0] <= dec.cursor_x < r[1]), None)
+            await c.wait(
+                lambda: (
+                    dec.loaded_ea == fn.addr
+                    and line < len(dec._texts)
+                    and dec._texts[line] != before
+                ),
+                30,
+            )
+            cur = next(
+                (
+                    (r[3], r[4])
+                    for r in dec._nums.get(line, ())
+                    if r[0] <= dec.cursor_x < r[1]
+                ),
+                None,
+            )
             seen.append(cur)
-        c.check("every press stays on the literal we started on",
-                all(s == target for s in seen),
-                f"target={target} other={other} landed={seen} "
-                f"line={dec._texts[line].strip()!r}")
+        c.check(
+            "every press stays on the literal we started on",
+            all(s == target for s in seen),
+            f"target={target} other={other} landed={seen} "
+            f"line={dec._texts[line].strip()!r}",
+        )
     finally:
         try:
-            c.prog.pc_num_format(fn.addr, mode="default", line=line,
-                                 col=second[0])
+            c.prog.pc_num_format(fn.addr, mode="default", line=line, col=second[0])
         except Exception:  # noqa: BLE001
             pass
         c.prog.bump_names()
@@ -3533,6 +4561,7 @@ async def s_cursor_on_visible(c: Ctx):
     that hadn't changed.
     """
     from idatui.rpc import cursor_on
+
     app = c.app
     fn = await c.open_biggest("listing")
     c.lst.model.load_all()
@@ -3541,44 +4570,66 @@ async def s_cursor_on_visible(c: Ctx):
     await c.pause(0.1)
     top = round(lst.scroll_offset.y)
     # A token that occurs both before the viewport and inside it.
-    here = next((t for t in ("rax", "rsp", "eax", "rbp", "rdi")
-                 if any(t in (lst._line_plain(i) or "")
-                        for i in range(top, min(top + 20, lst.total)))
-                 and any(t in (lst._line_plain(i) or "") for i in range(0, top))),
-                None)
+    here = next(
+        (
+            t
+            for t in ("rax", "rsp", "eax", "rbp", "rdi")
+            if any(
+                t in (lst._line_plain(i) or "")
+                for i in range(top, min(top + 20, lst.total))
+            )
+            and any(t in (lst._line_plain(i) or "") for i in range(0, top))
+        ),
+        None,
+    )
     if here is None:
-        c.check("found a token both above and inside the viewport", False,
-                f"top={top}")
+        c.check("found a token both above and inside the viewport", False, f"top={top}")
         return
     found = cursor_on(app, here)
     await c.pause(0.1)
     c.check(f"cursor_on({here!r}) found it", found)
     vis = round(lst.scroll_offset.y)
-    c.check("it lands inside the viewport, not thousands of rows above",
-            vis <= lst.cursor < vis + lst._visible_height(),
-            f"cursor={lst.cursor} viewport={vis}..{vis + lst._visible_height()}")
-    c.check("and it searched from the viewport, not from row 0",
-            lst.cursor >= top, f"cursor={lst.cursor} was top={top}")
+    c.check(
+        "it lands inside the viewport, not thousands of rows above",
+        vis <= lst.cursor < vis + lst._visible_height(),
+        f"cursor={lst.cursor} viewport={vis}..{vis + lst._visible_height()}",
+    )
+    c.check(
+        "and it searched from the viewport, not from row 0",
+        lst.cursor >= top,
+        f"cursor={lst.cursor} was top={top}",
+    )
     # An explicit line still wins, and lands visibly.
-    far = next((i for i in range(0, min(top, lst.total))
-                if here in (lst._line_plain(i) or "")), None)
+    far = next(
+        (
+            i
+            for i in range(0, min(top, lst.total))
+            if here in (lst._line_plain(i) or "")
+        ),
+        None,
+    )
     if far is not None:
         cursor_on(app, here, line=far)
         await c.pause(0.1)
         v2 = round(lst.scroll_offset.y)
-        c.check("an explicit line is honoured AND scrolled into view",
-                lst.cursor == far and v2 <= far < v2 + lst._visible_height(),
-                f"cursor={lst.cursor} want={far} viewport={v2}")
+        c.check(
+            "an explicit line is honoured AND scrolled into view",
+            lst.cursor == far and v2 <= far < v2 + lst._visible_height(),
+            f"cursor={lst.cursor} want={far} viewport={v2}",
+        )
     # The `cursor` verb has the same duty: a driver that parks the cursor for
     # an edit must leave it where the edit can be watched.
     from idatui.rpc import place_cursor
+
     deep = min(lst.total - 1, 900)
     place_cursor(lst, deep, 0)
     await c.pause(0.1)
     v3 = round(lst.scroll_offset.y)
-    c.check("`cursor line=` scrolls to what it selected",
-            v3 <= deep < v3 + lst._visible_height(),
-            f"cursor={lst.cursor} viewport={v3}..{v3 + lst._visible_height()}")
+    c.check(
+        "`cursor line=` scrolls to what it selected",
+        v3 <= deep < v3 + lst._visible_height(),
+        f"cursor={lst.cursor} viewport={v3}..{v3 + lst._visible_height()}",
+    )
 
 
 @scenario("opfmt_decomp")
@@ -3594,7 +4645,7 @@ async def s_opfmt_decomp(c: Ctx):
             continue
         for i, txt in enumerate(d.code.split("\n")):
             m = re.search(r"[=<>+\-*/(,]\s(\d{2,}|0x[0-9A-Fa-f]{2,})\b", txt)
-            if m and "//" not in txt[:m.start()]:
+            if m and "//" not in txt[: m.start()]:
                 pick = (fn, i, m.start(1))
                 break
         if pick:
@@ -3615,14 +4666,24 @@ async def s_opfmt_decomp(c: Ctx):
     before = dec._texts[line]
     try:
         await c.press("o")
-        await c.wait(lambda: dec.loaded_ea == fn.addr and line < len(dec._texts)
-                     and dec._texts[line] != before, 30)
-        c.check("'o' re-renders the pseudocode literal",
-                line < len(dec._texts) and dec._texts[line] != before,
-                f"{before!r} -> {dec._texts[line] if line < len(dec._texts) else None!r}")
-        c.check("the status says which format",
-                any(f in c.status() for f in ("hex", "dec", "oct", "char", "default")),
-                f"status={c.status()!r}")
+        await c.wait(
+            lambda: (
+                dec.loaded_ea == fn.addr
+                and line < len(dec._texts)
+                and dec._texts[line] != before
+            ),
+            30,
+        )
+        c.check(
+            "'o' re-renders the pseudocode literal",
+            line < len(dec._texts) and dec._texts[line] != before,
+            f"{before!r} -> {dec._texts[line] if line < len(dec._texts) else None!r}",
+        )
+        c.check(
+            "the status says which format",
+            any(f in c.status() for f in ("hex", "dec", "oct", "char", "default")),
+            f"status={c.status()!r}",
+        )
     finally:
         try:
             c.prog.pc_num_format(fn.addr, mode="default", line=line, col=col)
@@ -3664,10 +4725,13 @@ async def _open_graph(c: Ctx, fn=None, t=60):
     await c.press("space")
     gv = app.query_one(GraphView)
     ok = await c.wait(lambda: app._active == "graph" and gv.lay is not None, t)
-    c.check("the graph opened", ok,
-            f"active={app._active} sticky={app._graph_sticky} "
-            f"focus={type(app.focused).__name__} prompt={app._prompt_active()} "
-            f"status={c.status()!r}")
+    c.check(
+        "the graph opened",
+        ok,
+        f"active={app._active} sticky={app._graph_sticky} "
+        f"focus={type(app.focused).__name__} prompt={app._prompt_active()} "
+        f"status={c.status()!r}",
+    )
     return fn, gv
 
 
@@ -3675,26 +4739,58 @@ async def _open_graph(c: Ctx, fn=None, t=60):
 async def s_graph_open(c: Ctx):
     app = c.app
     fn, gv = await _open_graph(c)
-    c.check("space opens the graph view", app._active == "graph",
-            f"active={app._active} status={c.status()}")
+    c.check(
+        "space opens the graph view",
+        app._active == "graph",
+        f"active={app._active} status={c.status()}",
+    )
     if gv.lay is None:
         return
-    c.check("the graph has the function's blocks",
-            len(gv.lay.nodes) == len(gv.fc.blocks) and len(gv.lay.nodes) > 1,
-            f"nodes={len(gv.lay.nodes)} blocks={len(gv.fc.blocks) if gv.fc else 0}")
-    c.check("it is the right function", gv.fc is not None and gv.fc.func_ea == fn.addr,
-            f"{gv.fc.func_ea if gv.fc else None:#x} want {fn.addr:#x}")
+    c.check(
+        "the graph has the function's blocks",
+        len(gv.lay.nodes) == len(gv.fc.blocks) and len(gv.lay.nodes) > 1,
+        f"nodes={len(gv.lay.nodes)} blocks={len(gv.fc.blocks) if gv.fc else 0}",
+    )
+    c.check(
+        "it is the right function",
+        gv.fc is not None and gv.fc.func_ea == fn.addr,
+        f"{gv.fc.func_ea if gv.fc else None:#x} want {fn.addr:#x}",
+    )
     c.check("the cursor starts on a real address", gv._cursor_ea() is not None)
     # The invariant the whole dummy-node machinery exists for.
     boxes = [(n.x, n.y, n.right, n.y + n.h - 1) for n in gv.lay.nodes]
-    overlap = any(a[0] <= b[2] and b[0] <= a[2] and a[1] <= b[3] and b[1] <= a[3]
-                  for i, a in enumerate(boxes) for b in boxes[i + 1:])
+    overlap = any(
+        a[0] <= b[2] and b[0] <= a[2] and a[1] <= b[3] and b[1] <= a[3]
+        for i, a in enumerate(boxes)
+        for b in boxes[i + 1 :]
+    )
     c.check("no two blocks overlap", not overlap)
     c.check("the status names the graph", "graph" in c.status(), c.status())
+    old_fc = gv.fc
+    old_ea = gv._cursor_ea()
+    await c.press("ctrl+r")
+    rebuilt = await c.wait(
+        lambda: (
+            app.is_graph
+            and gv.fc is not None
+            and gv.fc is not old_fc
+            and gv.lay is not None
+        ),
+        30,
+    )
+    c.check("Ctrl+R rebuilds the graph", rebuilt)
+    c.check(
+        "Ctrl+R preserves the graph cursor",
+        gv._cursor_ea() == old_ea,
+        f"got={gv._cursor_ea()} want={old_ea}",
+    )
     await c.press("space")
     await c.wait(lambda: app._active != "graph", 15)
-    c.check("space returns to the listing", app._active == "listing",
-            f"active={app._active}")
+    c.check(
+        "space returns to the listing",
+        app._active == "listing",
+        f"active={app._active}",
+    )
 
 
 @scenario("graph_nav")
@@ -3707,8 +4803,11 @@ async def s_graph_nav(c: Ctx):
     start_ea = gv._cursor_ea()
     await c.press("j")
     await c.pause(0.05)
-    c.check("j moves the cursor within the block", gv._cursor_ea() != start_ea,
-            f"{start_ea:#x} -> {gv._cursor_ea():#x}")
+    c.check(
+        "j moves the cursor within the block",
+        gv._cursor_ea() != start_ea,
+        f"{start_ea:#x} -> {gv._cursor_ea():#x}",
+    )
     await c.press("k")
     await c.pause(0.05)
     c.check("k comes back", gv._cursor_ea() == start_ea)
@@ -3718,24 +4817,35 @@ async def s_graph_nav(c: Ctx):
     if succs:
         await c.press("J")
         await c.pause(0.1)
-        c.check("J follows an edge to a successor block",
-                gv.cursor_node == succs[0][0],
-                f"node={gv.cursor_node} want={succs[0][0]}")
+        c.check(
+            "J follows an edge to a successor block",
+            gv.cursor_node == succs[0][0],
+            f"node={gv.cursor_node} want={succs[0][0]}",
+        )
         await c.press("K")
         await c.pause(0.1)
-        c.check("K goes back up an edge", gv.cursor_node == b0,
-                f"node={gv.cursor_node} want={b0}")
+        c.check(
+            "K goes back up an edge",
+            gv.cursor_node == b0,
+            f"node={gv.cursor_node} want={b0}",
+        )
     await c.press("0")
     await c.pause(0.1)
-    c.check("0 returns to the entry block", gv.cursor_node == gv.fc.entry,
-            f"node={gv.cursor_node} entry={gv.fc.entry}")
+    c.check(
+        "0 returns to the entry block",
+        gv.cursor_node == gv.fc.entry,
+        f"node={gv.cursor_node} entry={gv.fc.entry}",
+    )
     # the cursor is always scrolled into view
     cell = gv._cursor_cell()
     top, left = int(gv.scroll_offset.y), int(gv.scroll_offset.x)
-    c.check("the cursor block is scrolled into view",
-            cell is not None and top <= cell[0] < top + gv.size.height
-            and left <= cell[1] < left + gv.size.width,
-            f"cell={cell} scroll=({top},{left}) size={gv.size}")
+    c.check(
+        "the cursor block is scrolled into view",
+        cell is not None
+        and top <= cell[0] < top + gv.size.height
+        and left <= cell[1] < left + gv.size.width,
+        f"cell={cell} scroll=({top},{left}) size={gv.size}",
+    )
 
 
 @scenario("graph_zoom")
@@ -3751,18 +4861,24 @@ async def s_graph_zoom(c: Ctx):
         await c.press("z")
         await c.pause(0.15)
         seen.append(gv.ZOOMS[gv._zoom])
-    c.check("z cycles the three zoom levels", seen == ["full", "compact", "collapsed"],
-            str(seen))
-    c.check("collapsed is much smaller than full", gv.lay.height < full_h,
-            f"{gv.lay.height} vs {full_h}")
+    c.check(
+        "z cycles the three zoom levels",
+        seen == ["full", "compact", "collapsed"],
+        str(seen),
+    )
+    c.check(
+        "collapsed is much smaller than full",
+        gv.lay.height < full_h,
+        f"{gv.lay.height} vs {full_h}",
+    )
     c.check("the cursor survives a zoom", gv._cursor_ea() is not None)
-    c.check("the status still names the function",
-            gv.fc.name in c.status(), c.status())
+    c.check("the status still names the function", gv.fc.name in c.status(), c.status())
     await c.press("z")
     await c.pause(0.15)
     c.check("and wraps back to full", gv.ZOOMS[gv._zoom] == "full")
-    c.check("canvas is restored", gv.lay.height == full_h,
-            f"{gv.lay.height} vs {full_h}")
+    c.check(
+        "canvas is restored", gv.lay.height == full_h, f"{gv.lay.height} vs {full_h}"
+    )
 
 
 @scenario("graph_engine")
@@ -3776,6 +4892,7 @@ async def s_graph_engine(c: Ctx):
     them), and a missing pytriskel degrades to native instead of raising.
     """
     from idatui import graph_triskel
+
     app = c.app
     fn, gv = await _open_graph(c)
     if gv.lay is None:
@@ -3783,39 +4900,56 @@ async def s_graph_engine(c: Ctx):
         return
     ea = gv._cursor_ea()
     first = gv.lay.stats["engine"]
-    c.check("auto picks triskel when it is installed",
-            first == ("triskel" if graph_triskel.available() else "native"),
-            f"engine={first} available={graph_triskel.available()}")
+    c.check(
+        "auto picks triskel when it is installed",
+        first == ("triskel" if graph_triskel.available() else "native"),
+        f"engine={first} available={graph_triskel.available()}",
+    )
 
     seen = [first]
     for _ in range(3):
         await c.press("e")
         await c.pause(0.2)
         seen.append(gv.lay.stats["engine"])
-        c.check(f"the view survives engine={gv._engine}",
-                gv.lay is not None and gv.lay.width > 0 and gv.lay.height > 0,
-                f"{gv.lay.width}x{gv.lay.height}")
-        c.check(f"the cursor keeps an address on engine={gv._engine}",
-                gv._cursor_ea() is not None)
-        c.check(f"the canvas covers every edge on engine={gv._engine}",
-                all(0 <= col < gv.lay.width and 0 <= row < gv.lay.height
-                    for rt in _routes_of(gv.lay) for row, col in rt),
-                f"canvas {gv.lay.width}x{gv.lay.height}")
+        c.check(
+            f"the view survives engine={gv._engine}",
+            gv.lay is not None and gv.lay.width > 0 and gv.lay.height > 0,
+            f"{gv.lay.width}x{gv.lay.height}",
+        )
+        c.check(
+            f"the cursor keeps an address on engine={gv._engine}",
+            gv._cursor_ea() is not None,
+        )
+        c.check(
+            f"the canvas covers every edge on engine={gv._engine}",
+            all(
+                0 <= col < gv.lay.width and 0 <= row < gv.lay.height
+                for rt in _routes_of(gv.lay)
+                for row, col in rt
+            ),
+            f"canvas {gv.lay.width}x{gv.lay.height}",
+        )
     c.check("e cycles back round", seen[0] == seen[-1], str(seen))
     c.check("native was one of them", "native" in seen, str(seen))
-    c.check("the status names the engine", "graph:" in c.status() or
-            gv.fc.name in c.status(), c.status())
+    c.check(
+        "the status names the engine",
+        "graph:" in c.status() or gv.fc.name in c.status(),
+        c.status(),
+    )
     if ea is not None:
-        c.check("the cursor address is unchanged by relayout",
-                gv._cursor_ea() is not None)
+        c.check(
+            "the cursor address is unchanged by relayout", gv._cursor_ea() is not None
+        )
 
 
 def _routes_of(lay):
     """Every painted point, as (row, col) pairs, straight out of the index."""
     out = []
     for row, runs in lay.painting.hruns.items():
-        out.append([(row, lo) for lo, _hi, _s, _e in runs]
-                   + [(row, hi) for _lo, hi, _s, _e in runs])
+        out.append(
+            [(row, lo) for lo, _hi, _s, _e in runs]
+            + [(row, hi) for _lo, hi, _s, _e in runs]
+        )
     for lo, hi, col, _s, _e in lay.painting.vruns:
         out.append([(lo, col), (hi, col)])
     return out
@@ -3831,6 +4965,7 @@ async def s_graph_render(c: Ctx):
     if gv.lay is None:
         c.check("graph loaded", False)
         return
+
     # The layout being ready (`gv.lay`) is not the same as the view having a
     # SIZE to render into -- that needs a laid-out frame, and reading glyphs
     # before one lands scrapes an empty canvas. Gate on the paint itself.
@@ -3839,17 +4974,28 @@ async def s_graph_render(c: Ctx):
 
     await c.wait(lambda: gv.size.height > 0 and "\u250c" in _blob(), 10)
     blob = _blob()
-    c.check("boxes are drawn", blob.count("\u250c") >= 1 and blob.count("\u2502") > 4,
-            f"corners={blob.count(chr(0x250c))} verts={blob.count(chr(0x2502))}")
-    c.check("edges are drawn", any(ch in blob for ch in "\u25bc\u2570\u256d\u256e\u256f"),
-            "no edge glyphs on screen")
+    c.check(
+        "boxes are drawn",
+        blob.count("\u250c") >= 1 and blob.count("\u2502") > 4,
+        f"corners={blob.count(chr(0x250C))} verts={blob.count(chr(0x2502))}",
+    )
+    c.check(
+        "edges are drawn",
+        any(ch in blob for ch in "\u25bc\u2570\u256d\u256e\u256f"),
+        "no edge glyphs on screen",
+    )
     ea = gv._cursor_ea()
     head = gv.cur_head()
-    c.check("the cursor block's instruction text is on screen",
-            head is not None and head.text.split(" ")[0] in blob,
-            f"mnem={head.text.split(' ')[0] if head else None}")
-    c.check("the address gutter renders at full zoom",
-            ea is not None and f"{ea:08X}" in blob, f"ea={ea:#x}")
+    c.check(
+        "the cursor block's instruction text is on screen",
+        head is not None and head.text.split(" ")[0] in blob,
+        f"mnem={head.text.split(' ')[0] if head else None}",
+    )
+    c.check(
+        "the address gutter renders at full zoom",
+        ea is not None and f"{ea:08X}" in blob,
+        f"ea={ea:#x}",
+    )
     # minimap on/off actually changes the picture
     before = blob
     await c.press("m")
@@ -3881,20 +5027,26 @@ async def s_graph_click(c: Ctx):
     top, left = int(gv.scroll_offset.y), int(gv.scroll_offset.x)
     target = None
     for n in gv.lay.nodes:
-        if (n.id != gv.cursor_node and top <= n.y + 1 < top + gv.size.height - 1
-                and left <= n.x + 2 < left + gv.size.width - 2):
+        if (
+            n.id != gv.cursor_node
+            and top <= n.y + 1 < top + gv.size.height - 1
+            and left <= n.x + 2 < left + gv.size.width - 2
+        ):
             target = n
             break
     if target is None:
         c.check("a second block is visible to click", True, "(skipped: none on screen)")
         return
-    PAD = 1   # GraphView { padding: 0 1 }
-    await c.pilot.click(GraphView,
-                        offset=(PAD + target.x + 2 - left, target.y + 1 - top))
+    PAD = 1  # GraphView { padding: 0 1 }
+    await c.pilot.click(
+        GraphView, offset=(PAD + target.x + 2 - left, target.y + 1 - top)
+    )
     await c.pause(0.15)
-    c.check("clicking a block moves the cursor into it",
-            gv.cursor_node == target.id,
-            f"node={gv.cursor_node} want={target.id}")
+    c.check(
+        "clicking a block moves the cursor into it",
+        gv.cursor_node == target.id,
+        f"node={gv.cursor_node} want={target.id}",
+    )
 
 
 @scenario("graph_minimap")
@@ -3911,14 +5063,19 @@ async def s_graph_minimap(c: Ctx):
     # frame -- not just a settled app.
     await c.wait(lambda: gv._minimap_rect() is not None, 5)
     rect = gv._minimap_rect()
-    c.check("the minimap has a hit-box while it's shown", rect is not None,
-            f"size={gv.size} shown={gv._show_minimap}")
+    c.check(
+        "the minimap has a hit-box while it's shown",
+        rect is not None,
+        f"size={gv.size} shown={gv._show_minimap}",
+    )
     if rect is None:
         return
     left, top, mw, mh = rect
-    c.check("it sits inside the pane, clear of the scrollbar",
-            left + mw <= gv.size.width - 1,
-            f"left={left} w={mw} pane={gv.size.width}")
+    c.check(
+        "it sits inside the pane, clear of the scrollbar",
+        left + mw <= gv.size.width - 1,
+        f"left={left} w={mw} pane={gv.size.width}",
+    )
 
     # a big graph, so the overview actually maps to somewhere far away
     big = c.find_func(lambda f: f.size > 0x300) or fn
@@ -3946,33 +5103,45 @@ async def s_graph_minimap(c: Ctx):
     PAD = 1
     await c.pilot.click(GraphView, offset=(PAD + left + mw // 2, top + mh - 2))
     await c.pause(0.2)
-    c.check("clicking low on the minimap scrolls the view down",
-            gv.scroll_offset.y > 0, f"scroll_y={gv.scroll_offset.y}")
+    c.check(
+        "clicking low on the minimap scrolls the view down",
+        gv.scroll_offset.y > 0,
+        f"scroll_y={gv.scroll_offset.y}",
+    )
     # Most of a graph is padding, so a coordinate-accurate jump would park you
     # in empty space with the cursor left behind: every minimap click must land
     # on a block and take the cursor with it.
     landed = gv.lay.by_id.get(gv.cursor_node)
-    c.check("it snaps the cursor onto a real block",
-            landed is not None and landed.block is not None,
-            f"node={gv.cursor_node}")
-    c.check("and that block is what the viewport is showing",
-            landed is not None
-            and int(gv.scroll_offset.y) <= landed.y + landed.h
-            and landed.y <= int(gv.scroll_offset.y) + gv.size.height,
-            f"node.y={landed.y if landed else None} "
-            f"scroll={gv.scroll_offset.y} h={gv.size.height}")
+    c.check(
+        "it snaps the cursor onto a real block",
+        landed is not None and landed.block is not None,
+        f"node={gv.cursor_node}",
+    )
+    c.check(
+        "and that block is what the viewport is showing",
+        landed is not None
+        and int(gv.scroll_offset.y) <= landed.y + landed.h
+        and landed.y <= int(gv.scroll_offset.y) + gv.size.height,
+        f"node.y={landed.y if landed else None} "
+        f"scroll={gv.scroll_offset.y} h={gv.size.height}",
+    )
     low_node = gv.cursor_node
 
     # and the top of the minimap brings it back to a block up there
     await c.pilot.click(GraphView, offset=(PAD + left + mw // 2, top + 1))
     await c.pause(0.2)
     top_node = gv.lay.by_id.get(gv.cursor_node)
-    c.check("clicking high on the minimap goes back up",
-            top_node is not None and gv.cursor_node != low_node
-            and top_node.y < gv.lay.by_id[low_node].y,
-            f"top={gv.cursor_node} low={low_node}")
-    c.check("the cursor still has a real address after a minimap jump",
-            gv._cursor_ea() is not None)
+    c.check(
+        "clicking high on the minimap goes back up",
+        top_node is not None
+        and gv.cursor_node != low_node
+        and top_node.y < gv.lay.by_id[low_node].y,
+        f"top={gv.cursor_node} low={low_node}",
+    )
+    c.check(
+        "the cursor still has a real address after a minimap jump",
+        gv._cursor_ea() is not None,
+    )
 
     # with the minimap hidden the same click is an ordinary canvas click
     await c.press("m")
@@ -3983,16 +5152,19 @@ async def s_graph_minimap(c: Ctx):
 
     # Panning into the padding (which is most of the canvas) must not strand
     # you on a blank screen with nothing to navigate back by.
-    gv.scroll_to(y=max(gv.lay.height - 1, 0), x=max(gv.lay.width - 1, 0),
-                 animate=False)
+    gv.scroll_to(y=max(gv.lay.height - 1, 0), x=max(gv.lay.width - 1, 0), animate=False)
     await c.pause(0.1)
-    c.check("a pan past the graph leaves the viewport empty",
-            not gv._viewport_has_block() or True)   # setup, not an assertion
+    c.check(
+        "a pan past the graph leaves the viewport empty",
+        not gv._viewport_has_block() or True,
+    )  # setup, not an assertion
     gv._snap_into_view()
     await c.pause(0.1)
-    c.check("panning into empty padding snaps back to a block",
-            gv._viewport_has_block(),
-            f"scroll={gv.scroll_offset} canvas={gv.lay.width}x{gv.lay.height}")
+    c.check(
+        "panning into empty padding snaps back to a block",
+        gv._viewport_has_block(),
+        f"scroll={gv.scroll_offset} canvas={gv.lay.width}x{gv.lay.height}",
+    )
 
 
 @scenario("graph_rename")
@@ -4011,8 +5183,10 @@ async def s_graph_rename(c: Ctx):
     new = f"gtest_{os.getpid()}"
     await c.press("n")
     await c.wait(lambda: app.query_one("#rename", Input).display, 10)
-    c.check("n opens the rename prompt from the graph",
-            app.query_one("#rename", Input).display)
+    c.check(
+        "n opens the rename prompt from the graph",
+        app.query_one("#rename", Input).display,
+    )
     inp = app.query_one("#rename", Input)
     inp.value = ""
     await c.type(new)
@@ -4023,12 +5197,16 @@ async def s_graph_rename(c: Ctx):
         got = app.program.resolve(new)
     except Exception:  # noqa: BLE001
         got = None
-    c.check("the rename reached the database", got == ea,
-            f"resolve({new}) -> {got if got is None else hex(got)} want {ea:#x}")
+    c.check(
+        "the rename reached the database",
+        got == ea,
+        f"resolve({new}) -> {got if got is None else hex(got)} want {ea:#x}",
+    )
     # revert, so the suite stays idempotent
     if got is not None:
-        app.program.client.invoke(
-            "rename", batch={"data": {"addr": hex(ea), "new": ""}})
+        app.program.client.call(
+            remote_ops.rename, batch={"data": {"addr": hex(ea), "new": ""}}
+        )
         app.program.bump_names()
 
 
@@ -4046,17 +5224,30 @@ async def s_graph_sticky(c: Ctx):
         c.check("a second function exists", True, "(skipped)")
         return
     app._goto(other.name)
-    ok = await c.wait(lambda: app._cur is not None and app._cur.ea == other.addr
-                      and app._active == "graph"
-                      and gv.fc is not None and gv.fc.func_ea == other.addr, 60)
-    c.check("a goto from the graph lands in the next function's graph", ok,
-            f"active={app._active} sticky={app._graph_sticky} "
-            f"cur={app._cur.ea if app._cur else None} "
-            f"fc={gv.fc.func_ea if gv.fc else None} want={other.addr:#x}")
+    ok = await c.wait(
+        lambda: (
+            app._cur is not None
+            and app._cur.ea == other.addr
+            and app._active == "graph"
+            and gv.fc is not None
+            and gv.fc.func_ea == other.addr
+        ),
+        60,
+    )
+    c.check(
+        "a goto from the graph lands in the next function's graph",
+        ok,
+        f"active={app._active} sticky={app._graph_sticky} "
+        f"cur={app._cur.ea if app._cur else None} "
+        f"fc={gv.fc.func_ea if gv.fc else None} want={other.addr:#x}",
+    )
     await c.press("space")
     await c.wait(lambda: app._active != "graph", 15)
-    c.check("space still leaves graph mode", app._active == "listing",
-            f"active={app._active}")
+    c.check(
+        "space still leaves graph mode",
+        app._active == "listing",
+        f"active={app._active}",
+    )
     c.check("and it stops being sticky", app._graph_sticky is False)
 
 
@@ -4074,13 +5265,14 @@ async def run(binary, only=None):
     #
     # So: work on a scratch copy, seeded from a golden database that nothing
     # ever writes back to.
-    async with staged(binary, lambda p: IdaTui(open_path=p, keepalive=False),
-                      prefix="idatui-pilot-") as target:
+    async with staged(
+        binary, lambda p: IdaTui(open_path=p, keepalive=False), prefix="idatui-pilot-"
+    ) as target:
         await _run_on(target, only)
 
 
 async def _run_on(binary, only=None):
-    # Code Mode attaches a registered GUI or starts/reuses a managed worker.
+    # IDA Nexus attaches a registered GUI or starts/reuses a managed worker.
     app = IdaTui(open_path=binary, keepalive=False)
     async with app.run_test(size=(140, 44)) as pilot:
         c = Ctx(app, pilot)
@@ -4097,7 +5289,9 @@ async def _run_on(binary, only=None):
             except _StopSuite:
                 raise
             except Exception as e:  # noqa: BLE001 — isolate: one scenario's crash
-                print(f"── {name}  ({asyncio.get_event_loop().time() - _t0:.1f}s) CRASHED")
+                print(
+                    f"── {name}  ({asyncio.get_event_loop().time() - _t0:.1f}s) CRASHED"
+                )
                 c.check("scenario did not crash", False, f"{type(e).__name__}: {e}")
                 traceback.print_exc()
     # Headless run_test does not reliably emit App.Unmount; explicitly release
@@ -4133,7 +5327,9 @@ def main(argv):
     if binary is None:  # default target for the pilot
         binary = os.path.join(
             os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-            "targets", "echo")
+            "targets",
+            "echo",
+        )
     try:
         asyncio.run(run(binary, only))
     except _StopSuite:

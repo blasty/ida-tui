@@ -54,7 +54,7 @@ Growing a second disassembly renderer for graph mode would have been the real
 cost.
 
 The backend adds exactly one operation, `flowchart(addr)` in
-`idatui/codemode_client.py`, which returns block ranges and typed edges — **not**
+`idatui/nexus_client.py`, which returns block ranges and typed edges — **not**
 text.
 
 ## Two layout engines

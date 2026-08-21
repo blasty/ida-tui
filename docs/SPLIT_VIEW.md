@@ -32,7 +32,7 @@ known technique:
 The old ida-pro-mcp backend derived the per-line marker via
 `cfunc.get_line_item(line, col=0, …).get_ea()`. To get the **full set**, sweep
 every column of the line (`get_line_item(line, x, …).get_ea()` for `x` in
-`0..len`) and collect distinct non-`BADADDR` EAs. The Code Mode adapter's
+`0..len`) and collect distinct non-`BADADDR` EAs. The IDA Nexus adapter's
 `decomp_map(ea)` operation returns
 `[{line, primary_ea, eas:[…]}, …]`; invert for `ea → line`.
 
@@ -78,14 +78,14 @@ decomp→listing uses `ListingModel.ensure_ea`. Tab re-links from the new driver
 Still single-ea per line (one instruction highlighted); the region comes in
 phase 3.
 
-**Phase 3 — rich highlight. DONE.** The Code Mode `decomp_map` operation
-(`idatui/codemode_client.py`) sweeps `cfunc.get_line_item` across every column of
+**Phase 3 — rich highlight. DONE.** The IDA Nexus `decomp_map` operation
+(`idatui/nexus_client.py`) sweeps `cfunc.get_line_item` across every column of
 each pseudocode line and collects the EAs from each item's `dstr()` (`'EA: desc'`
 — the same source as the `/*ea*/` marker, so it aligns). `Program.decomp_map(ea)`
 returns the per-line ea lists (cached by name-gen); the app loads it async into
 `_split_eamap` / `_split_ea2line` and `_sync_split` bands the **whole** instruction
 region of a C line (and uses the exact ea→line inverse for the reverse). Falls
-back to the single marker until the map lands. Verified on a real Code Mode database
+back to the single marker until the map lands. Verified on a real IDA Nexus database
 (alignment + multi-instruction region band).
 
 **Phase 4 — polish. DONE.**

@@ -4,11 +4,16 @@
 The splash re-anchors itself on every progress note, so the escape it sends has
 to be a REPLACEMENT, not another copy. That is one key (``p``) and it is
 invisible in every screenshot, which is exactly why it needs a test.
+
+Also the cross-platform contract: graphics are optional everywhere, so a
+missing ``termios`` (native Windows) or a failing terminal probe must disable
+the splash, never prevent TUI startup.
 """
 
 #: pure stdlib escape-construction checks; no IDA, no Textual.
 #: Read by tests/run.py (--fast skips every NEEDS_IDA file).
 NEEDS_IDA = False
+import builtins
 import os
 import re
 import sys
@@ -58,7 +63,61 @@ def keys(cmd):
     return dict(kv.split("=", 1) for kv in cmd.split(",") if "=" in kv)
 
 
+def t_no_termios_falls_back():
+    """Native Windows has no termios; the splash must simply use ANSI art."""
+    original_import = builtins.__import__
+
+    def without_termios(name, *args, **kwargs):
+        if name == "termios":
+            raise ModuleNotFoundError("No module named 'termios'")
+        return original_import(name, *args, **kwargs)
+
+    builtins.__import__ = without_termios
+    try:
+        check("missing termios disables graphics", kittygfx._query_tty(0) is False)
+    except Exception as exc:  # the original Windows startup crash
+        check("missing termios does not escape", False,
+              f"{type(exc).__name__}: {exc}")
+    finally:
+        builtins.__import__ = original_import
+
+
+def t_probe_failure_is_never_fatal():
+    """Even an unexpected platform/probe error cannot prevent TUI startup."""
+    original_query = kittygfx._query_tty
+    original_stdout = sys.__stdout__
+    original_supported = kittygfx._supported
+    old_env = os.environ.pop("IDATUI_KITTY", None)
+
+    class FakeTty:
+        def isatty(self):
+            return True
+
+    def broken_query():
+        raise RuntimeError("terminal API failed")
+
+    try:
+        sys.__stdout__ = FakeTty()
+        kittygfx._query_tty = broken_query
+        kittygfx._supported = None
+        check("probe exception disables graphics", kittygfx.supported() is False)
+        check("failed result is cached", kittygfx.supported() is False)
+    except Exception as exc:
+        check("probe exception does not escape", False,
+              f"{type(exc).__name__}: {exc}")
+    finally:
+        kittygfx._query_tty = original_query
+        kittygfx._supported = original_supported
+        sys.__stdout__ = original_stdout
+        if old_env is not None:
+            os.environ["IDATUI_KITTY"] = old_env
+
+
 def main() -> int:
+    # -- graphics stay optional on every platform ---------------------------- #
+    t_no_termios_falls_back()
+    t_probe_failure_is_never_fatal()
+
     kittygfx._uploaded[kittygfx.LOGO_ID] = (768, 801)   # pretend it's uploaded
 
     # -- the bug: anonymous placements STACK ------------------------------- #

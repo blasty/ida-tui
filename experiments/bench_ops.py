@@ -1,4 +1,4 @@
-"""Time a realistic idatui operation mix against whatever ida-codemode is installed.
+"""Time a realistic idatui operation mix against whatever ida-nexus is installed.
 
 The companion to `bench_pack_trace.py`: that one isolates a single workaround,
 this one answers "how much faster is the whole client, on real operations".
@@ -14,19 +14,20 @@ replace or delete it::
     PYTHONPATH=. ~/ida-venv/bin/python /tmp/bench_ops.py
 
     # B: current client against the OLD library (shows what the workarounds were for)
-    git -C ~/dev/ida-codemode checkout 4195f21
+    git -C ~/dev/ida-nexus checkout 4195f21
     PYTHONPATH=. ~/ida-venv/bin/python /tmp/bench_ops.py
 
     # A: the client as it SHIPPED on the old library, workarounds and all
     git checkout 8550474          # the commit before the workaround removal
     PYTHONPATH=. ~/ida-venv/bin/python /tmp/bench_ops.py
 
-    git checkout main && git -C ~/dev/ida-codemode checkout main   # ALWAYS restore
+    git checkout main && git -C ~/dev/ida-nexus checkout main   # ALWAYS restore
 
-ida-codemode is installed **editable** into both venvs, so checking that repo out
+ida-nexus is installed **editable** into both venvs, so checking that repo out
 swaps the backend under the TUI with no reinstall -- which is what makes this A/B
 cheap.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -34,7 +35,8 @@ import os
 import statistics
 import time
 
-from idatui.codemode_client import CodeModeClient
+from idatui import remote_ops
+from idatui.nexus_client import NexusClient
 
 
 def bench(fn, reps: int) -> tuple[float, float]:
@@ -53,13 +55,13 @@ def main() -> int:
     ap.add_argument("--reps", type=int, default=20)
     args = ap.parse_args()
 
-    client = CodeModeClient(os.path.abspath(args.target))
+    client = NexusClient(os.path.abspath(args.target))
     client.connect()
     handle = client._handle
 
     # Work on the biggest function we can find, so the payload-heavy operations
     # are actually payload-heavy.
-    index = client.invoke("list_funcs", queries=[{"offset": 0, "count": 60}])
+    index = client.call(remote_ops.list_funcs, queries=[{"offset": 0, "count": 60}])
     funcs = (index.get("result") or [{}])[0].get("data") or []
     if not funcs:
         print("VERDICT: FAIL - no functions")
@@ -71,19 +73,30 @@ def main() -> int:
         # Synthetic: isolates the per-operation floor (execute_sync marshalling).
         ("empty round trip", lambda: handle.execute_python("result = 1")),
         # Payload-dominated: what _PACK_EPILOGUE was written for.
-        ("list_funcs 500", lambda: client.invoke(
-            "list_funcs", queries=[{"offset": 0, "count": 500}])),
-        ("heads 200 (listing page)", lambda: client.invoke(
-            "heads", addr=ea, count=200, annotate=True)),
+        (
+            "list_funcs 500",
+            lambda: client.call(
+                remote_ops.list_funcs, queries=[{"offset": 0, "count": 500}]
+            ),
+        ),
+        (
+            "heads 200 (listing page)",
+            lambda: client.call(remote_ops.heads, addr=ea, count=200, annotate=True),
+        ),
         # IDA-work-dominated: Hex-Rays, nothing upstream can move.
-        ("decompile (warm)", lambda: client.invoke("decompile", addr=ea)),
-        ("flowchart (graph)", lambda: client.invoke("flowchart", addr=ea)),
+        ("decompile (warm)", lambda: client.call(remote_ops.decompile, addr=ea)),
+        ("flowchart (graph)", lambda: client.call(remote_ops.flowchart, addr=ea)),
         # Round-trip-dominated: small payload, so only the floor matters.
-        ("xrefs_to", lambda: client.invoke("xref_query", direction="to", addr=ea)),
+        (
+            "xrefs_to",
+            lambda: client.call(remote_ops.xref_query, direction="to", addr=ea),
+        ),
     ]
 
-    print(f"# target={os.path.basename(args.target)} func={ea} reps={args.reps} "
-          f"backend={client.backend}")
+    print(
+        f"# target={os.path.basename(args.target)} func={ea} reps={args.reps} "
+        f"backend={client.backend}"
+    )
     results = {}
     for name, fn in ops:
         try:

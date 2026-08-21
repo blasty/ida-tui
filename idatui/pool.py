@@ -1,6 +1,6 @@
-"""DatabasePool — LRU leases on Code Mode databases for a project.
+"""DatabasePool — LRU leases on IDA Nexus databases for a project.
 
-Code Mode may bind a lease to an existing IDA GUI or to a shared managed idalib
+IDA Nexus may bind a lease to an existing IDA GUI or to a shared managed idalib
 worker. The pool therefore owns *client interest*, never an IDA process. Releasing
 an LRU entry persists managed IDBs but does not implicitly save a GUI, then closes
 only this TUI's lease; other clients and GUI sessions remain alive. Managed workers exit themselves after their final lease.
@@ -48,8 +48,8 @@ def _pss_mb(pid: int | None) -> int:
 
 
 def _default_spawn(ref: BinaryRef, ttl: int, *, new_database: bool = False):  # pragma: no cover - needs IDA
-    from .codemode_client import CodeModeClient
-    return CodeModeClient(
+    from .nexus_client import NexusClient
+    return NexusClient(
         ref.staged,
         ttl=ttl,
         load_args=ref.load_args,
@@ -59,7 +59,7 @@ def _default_spawn(ref: BinaryRef, ttl: int, *, new_database: bool = False):  # 
 
 
 class DatabasePool:
-    """Live Code Mode database leases, keyed by project label."""
+    """Live IDA Nexus database leases, keyed by project label."""
 
     def __init__(self, project: Project, *, budget_mb: int | None = None,
                  ttl: int = 1800, spawn=None, mem_fn=None) -> None:
@@ -101,7 +101,7 @@ class DatabasePool:
         """A live client for ``label``, attaching or spawning as needed.
 
         Do not sweep IDA scratch files here: a registered GUI or another Code
-        Mode client may own the database. Code Mode's registry locks and health
+        Mode client may own the database. IDA Nexus's registry locks and health
         probes are the authority for safe discovery and stale-record cleanup.
         """
         client = self._clients.get(label)
@@ -225,6 +225,28 @@ class DatabasePool:
             self.evict(label, save=save, save_gui=save)
         self.active = None
 
+    def discard_changes(self, labels: list[str]) -> list[str]:
+        """Discard final managed sessions; return labels whose owner remains.
+
+        A returned label is not an error: its client is attached to a GUI or a
+        still-shared worker, so releasing our lease transfers finalization to
+        that session's owner or remaining clients.
+        """
+        transferred: list[str] = []
+        for label in labels:
+            client = self._clients.get(label)
+            if client is not None and not client.discard_database():
+                transferred.append(label)
+        return transferred
+
+    def replace_client(self, label: str, old, new) -> bool:
+        """Replace one disconnected lease without changing residency policy."""
+        if self._clients.get(label) is not old:
+            return False
+        self._clients[label] = new
+        self._touch(label)
+        return True
+
     # -- introspection ------------------------------------------------------ #
     def status(self) -> list[dict]:
         """Per-binary residency for the switcher UI."""
@@ -247,5 +269,3 @@ class DatabasePool:
                 f"{self.memory_mb()}/{self.budget_mb}MB active={self.active}>")
 
 
-# Source compatibility for callers that imported the pre-Code-Mode name.
-WorkerPool = DatabasePool

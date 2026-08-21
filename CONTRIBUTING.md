@@ -18,12 +18,12 @@ without a licence.
 uv sync
 ```
 
-That pulls [ida-codemode](https://github.com/HexRaysSA/ida-codemode) from PyPI,
+That pulls [ida-nexus](https://github.com/HexRaysSA/ida-nexus) from PyPI,
 which is how ida-tui talks to IDA. To also attach to databases open in the IDA
 GUI:
 
 ```sh
-uvx ida-hcli plugin install ida-codemode
+uvx ida-hcli plugin install ida-nexus
 ```
 
 ## Running the tests
@@ -39,7 +39,7 @@ python3 tests/run.py                 # everything (needs IDA)
 ```
 
 The IDA-backed suites need an interpreter that has `textual`, `idapro` and
-`ida_codemode` on it:
+`ida_nexus` on it:
 
 ```sh
 <ida-python> tests/test_scenarios.py /path/to/binary --only rename
@@ -47,7 +47,7 @@ The IDA-backed suites need an interpreter that has `textual`, `idapro` and
 ```
 
 **House rule:** a suite marked `pure` must keep running under a plain system
-`python3`. This is why `idatui/codemode_client.py` defers its `ida_codemode`
+`python3`. This is why `idatui/nexus_client.py` defers its `ida_nexus`
 import instead of doing it at module top. Please don't break that — it's what
 keeps the fast gate fast and lets people without IDA contribute at all.
 

@@ -1,6 +1,6 @@
-"""One-shot launcher for the IDA Code Mode-backed TUI.
+"""One-shot launcher for the IDA Nexus-backed TUI.
 
-A path first resolves to a registered GUI database; when none matches, Code Mode
+A path first resolves to a registered GUI database; when none matches, IDA Nexus
 reuses or starts a managed idalib worker. With no path, a single registered
 database is selected automatically.
 
@@ -34,9 +34,9 @@ def _log(msg: str) -> None:
 
 
 def _registered_databases() -> tuple[list[dict], list[dict]]:
-    """Ready and blocked Code Mode registrations, with normalized errors."""
+    """Ready and blocked IDA Nexus registrations, with normalized errors."""
     try:
-        from ida_codemode import InstanceState, discover_databases
+        from ida_nexus import InstanceState, discover_databases
 
         ready: list[dict] = []
         blocked: list[dict] = []
@@ -70,7 +70,7 @@ def main(argv: list[str] | None = None) -> int:
                    help="open a multi-binary project (created from the given "
                         "binaries if FILE doesn't exist)")
     p.add_argument("--ttl", type=int, default=1800,
-                   help="deprecated compatibility option (Code Mode uses leases)")
+                   help="deprecated compatibility option (IDA Nexus uses leases)")
     p.add_argument("--no-keepalive", action="store_true",
                    help="deprecated compatibility option (the lease is the heartbeat)")
     p.add_argument("--rpc", metavar="PATH",
@@ -87,7 +87,7 @@ def main(argv: list[str] | None = None) -> int:
     g.add_argument("--base", metavar="ADDR",
                    help="load address, e.g. 0x8000000 (any base; NOT paragraphs)")
     g.add_argument("--ida-args", metavar="STR", dest="ida_args",
-                   help="legacy switches; only Code Mode-representable -p/-b/-T are accepted")
+                   help="legacy switches; only IDA Nexus-representable -p/-b/-T are accepted")
     args = p.parse_args(argv)
 
     load: dict = {}
@@ -166,10 +166,10 @@ def main(argv: list[str] | None = None) -> int:
             _log(f"attaching to registered {item.get('backend')} database: {binary}")
         elif not ready:
             detail = f" ({blocked[0].get('error')})" if blocked else ""
-            _log(f"no registered Code Mode database; pass a binary path{detail}")
+            _log(f"no registered IDA Nexus database; pass a binary path{detail}")
             return 2
         else:
-            _log("several Code Mode databases are registered; pass one of these paths:")
+            _log("several IDA Nexus databases are registered; pass one of these paths:")
             for item in ready:
                 _log(f"  {item.get('exe_path') or item.get('idb_path')} "
                      f"[{item.get('backend')}, {item.get('record_id')}]")

@@ -23,7 +23,7 @@ firmware image, a cleaned build tree).
 A source whose size/mtime no longer matches the staged copy is re-staged, and its
 now-stale database is dropped (the DB describes the old bytes).
 
-The model has no IDA imports. Staging consults ida_codemode's registry before
+The model has no IDA imports. Staging consults ida_nexus's registry before
 replacing files so it never mutates a database owned by a GUI/shared worker.
 """
 from __future__ import annotations
@@ -57,7 +57,7 @@ class BinaryRef:
     #: it is, a raw firmware image doesn't, and IDA defaults to metapc at 0.
     processor: str = ""   # IDA processor name: arm, armb, mipsb, metapc, …
     base: int = 0         # load address (natural, e.g. 0x8000000)
-    ida_args: str = ""    # legacy -p/-b/-T switches accepted by Code Mode adapter
+    ida_args: str = ""    # legacy -p/-b/-T switches accepted by IDA Nexus adapter
 
     @property
     def db(self) -> str:
@@ -311,7 +311,7 @@ class Project:
         """Ensure ``ref`` is staged in the sidecar; returns the staged path.
 
         Re-staging a changed source drops its database: the DB describes the old
-        bytes. Refuse while Code Mode reports a GUI/idalib owner; replacing a
+        bytes. Refuse while IDA Nexus reports a GUI/idalib owner; replacing a
         staged executable or IDB underneath a shared live instance is corruption.
         """
         if not os.path.isfile(ref.source):
@@ -319,15 +319,15 @@ class Project:
         if not self.is_stale(ref):
             return ref.staged
         try:
-            from .codemode_client import database_owner
+            from .nexus_client import database_owner
             owner = database_owner(ref.db, ref.staged)
         except Exception as exc:
             raise ProjectError(
-                f"cannot verify Code Mode ownership before staging {ref.label}: {exc}"
+                f"cannot verify IDA Nexus ownership before staging {ref.label}: {exc}"
             ) from exc
         if owner is not None:
             raise ProjectError(
-                f"cannot restage {ref.label}: Code Mode instance {owner.record_id} "
+                f"cannot restage {ref.label}: IDA Nexus instance {owner.record_id} "
                 f"still owns {owner.idb_path}; close/release it first"
             )
         os.makedirs(self.bin_dir, exist_ok=True)
@@ -353,7 +353,7 @@ class Project:
     def sweep_scratch(self, ref: BinaryRef) -> int:
         """Delete unpacked working files (never the ``.i64``) for maintenance.
 
-        Runtime paths no longer call this: Code Mode instances are shared, so a
+        Runtime paths no longer call this: IDA Nexus instances are shared, so a
         registry owner may still be using these files. Callers must independently
         prove that no GUI/idalib instance owns the database.
         """

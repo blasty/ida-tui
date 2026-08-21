@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Unit tests for idatui.project (the multi-binary project model + staging).
 
-IDA-free: exercises staging plus Code Mode ownership checks without opening a database.
+IDA-free: exercises staging plus IDA Nexus ownership checks without opening a database.
 
     python tests/test_project.py
 """

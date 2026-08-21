@@ -115,7 +115,7 @@ async def run() -> int:
             # `app._t` is assigned the moment the key is handled, so it is NOT a
             # signal that the VIEW has followed -- the navigation it kicks off
             # runs in a worker. Waiting on it and then reading the cursor was a
-            # race that the (slower) Code Mode backend loses. Gate on the thing
+            # race that the (slower) IDA Nexus backend loses. Gate on the thing
             # the check is about.
             await settle(app, lambda: app._t == 1 and lst._cursor_ea() == t.ip(1),
                          timeout=20)

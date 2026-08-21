@@ -4,12 +4,12 @@ TODO:
 [x] PORT TO ida-codemode-mcp as a library dependency
     [x] DatabaseHandle discovery prefers registered GUI sessions
     [x] shared managed idalib workers + SSE lease lifecycle
-    [x] domain operations execute against ida-domain through Code Mode
+    [x] domain operations execute against ida-domain through IDA Nexus
     [x] delete the private pickle worker and ida-pro-mcp patch injection
     [x] stop sweeping/reaping resources that may belong to another client
     [ ] run the full live Pilot suite against both GUI and managed backends
     [ ] add database revision/change notifications for cross-client cache invalidation
-    [ ] decide how "discard changes" should work (Code Mode final workers save)
+    [ ] decide how "discard changes" should work (IDA Nexus final workers save)
 
 - [x] add support for toggling literal types, ala `o` in IDA. (decimal to hex to
       reference etc.)

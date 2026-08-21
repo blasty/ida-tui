@@ -19,6 +19,7 @@ The message handlers and the ``@work`` entry points stay on ``IdaTui``: Textual
 dispatches ``on_<message>`` by name on the DOMNode, and its worker machinery
 wants a DOMNode host. They are one-line delegates into here.
 """
+
 from __future__ import annotations
 
 import re
@@ -26,10 +27,10 @@ from typing import TYPE_CHECKING
 
 from textual.widgets import DataTable
 
-from . import diag
+from . import diag, remote_ops
 from .errors import IDAToolError
 
-if TYPE_CHECKING:                                    # pragma: no cover
+if TYPE_CHECKING:  # pragma: no cover
     from .app import IdaTui
 
 _app_mod = None
@@ -40,13 +41,18 @@ def _M():
     global _app_mod
     if _app_mod is None:
         from . import app as _m
+
         _app_mod = _m
     return _app_mod
 
 
 #: A C type wide enough for N bytes, for prefilling a retype/define prompt.
-_BY_SIZE = {1: "unsigned __int8", 2: "unsigned __int16",
-            4: "unsigned __int32", 8: "unsigned __int64"}
+_BY_SIZE = {
+    1: "unsigned __int8",
+    2: "unsigned __int16",
+    4: "unsigned __int32",
+    8: "unsigned __int64",
+}
 
 
 class EditController:
@@ -169,16 +175,24 @@ class EditController:
             # If the cursor is on a symbol token (a call/branch target, a data
             # reference, or this head's own label) rename THAT symbol; otherwise
             # create/rename a label at the head's address (bare/undefined bytes).
-            if (word and app._looks_like_symbol(word) and word != mnem
-                    and word.lower() not in M._ASM_KEYWORDS):
+            if (
+                word
+                and app._looks_like_symbol(word)
+                and word != mnem
+                and word.lower() not in M._ASM_KEYWORDS
+            ):
                 app.prompts.rename.show(
                     f"rename '{word}' —  Enter=apply  Esc=cancel",
-                    word, ctx=(msg.view, word, None))
+                    word,
+                    ctx=(msg.view, word, None),
+                )
             else:
                 cur = head.name if (head is not None and head.name) else ""
                 app.prompts.rename.show(
                     f"name @ {ea:#x} —  Enter=apply  Esc=cancel",
-                    cur, ctx=(msg.view, cur, ea))
+                    cur,
+                    ctx=(msg.view, cur, ea),
+                )
             return
         if not msg.name:
             app._status("nothing to rename under the cursor")
@@ -186,11 +200,14 @@ class EditController:
         if self.is_pseudocode_label(msg.view, msg.name):
             app._status(
                 f"can't rename pseudocode label '{msg.name}' "
-                "(Hex-Rays goto labels aren't renamable via the API)")
+                "(Hex-Rays goto labels aren't renamable via the API)"
+            )
             return
         app.prompts.rename.show(
             f"rename '{msg.name}' —  Enter=apply  Esc=cancel",
-            msg.name, ctx=(msg.view, msg.name, None))
+            msg.name,
+            ctx=(msg.view, msg.name, None),
+        )
 
     def submit_rename(self, ctx, value: str) -> None:  # type: ignore[no-untyped-def]
         view, old, addr = ctx
@@ -242,7 +259,7 @@ class EditController:
                 kind = "stack"
                 batch = {"stack": {"func_addr": hex(cur.ea), "old": old, "new": new}}
         try:
-            res = prog.client.invoke("rename", batch=batch)
+            res = prog.client.call(remote_ops.rename, batch=batch)
         except IDAToolError as e:
             app.call_from_thread(app._status, f"rename failed: {e.message}")
             return
@@ -275,8 +292,9 @@ class EditController:
         app = self.app
         assert app.program is not None
         try:
-            res = app.program.client.invoke(
-                "rename", batch={"data": {"addr": hex(addr), "new": name}})
+            res = app.program.client.call(
+                remote_ops.rename, batch={"data": {"addr": hex(addr), "new": name}}
+            )
         except IDAToolError as e:
             app.call_from_thread(app._status, f"name failed: {e.message}")
             return
@@ -307,11 +325,11 @@ class EditController:
         lm = app.program.listing(addr)
         label = name if is_func_start else app.program.region_label(addr)
         idx = max(lm.ensure_ea(addr), 0) if lm is not None else 0
-        app.call_from_thread(self.open_at_named, label, addr, idx, name,
-                             is_func_start)
+        app.call_from_thread(self.open_at_named, label, addr, idx, name, is_func_start)
 
-    def open_at_named(self, label: str, addr: int, idx: int, name: str,
-                      is_func_start: bool = False) -> None:
+    def open_at_named(
+        self, label: str, addr: int, idx: int, name: str, is_func_start: bool = False
+    ) -> None:
         app = self.app
         if is_func_start:
             app.program.bump_names()
@@ -328,10 +346,11 @@ class EditController:
         pseudocode a comment is `// text` before the trailing /*0xEA*/ markers;
         C has no `//` operator, so the last `//` is unambiguously the comment."""
         if isinstance(view, _M().DecompView) and 0 <= view.cursor < len(view._texts):
-            s = re.sub(r"(?:/\*\s*0x[0-9A-Fa-f]+\s*\*/\s*)+$", "",
-                       view._texts[view.cursor])
+            s = re.sub(
+                r"(?:/\*\s*0x[0-9A-Fa-f]+\s*\*/\s*)+$", "", view._texts[view.cursor]
+            )
             i = s.rfind("//")
-            return s[i + 2:].strip() if i >= 0 else ""
+            return s[i + 2 :].strip() if i >= 0 else ""
         return ""
 
     def request_comment(self, msg) -> None:  # type: ignore[no-untyped-def]
@@ -349,7 +368,9 @@ class EditController:
         what = "function comment" if func_level else "comment"
         app.prompts.comment.show(
             f"{what} @ {ea:#x} —  Enter=apply (empty=clear)  Esc=cancel",
-            existing, ctx=(msg.view, ea, existing))
+            existing,
+            ctx=(msg.view, ea, existing),
+        )
 
     def submit_comment(self, ctx, value: str) -> None:  # type: ignore[no-untyped-def]
         view, ea, existing = ctx
@@ -369,10 +390,13 @@ class EditController:
             app.call_from_thread(app._status, f"comment failed: {e.message}")
             return
         data = res.get("result") if isinstance(res, dict) else None
-        if (isinstance(data, list) and data and isinstance(data[0], dict)
-                and data[0].get("error")):
-            app.call_from_thread(app._status,
-                                 f"comment failed: {data[0]['error']}")
+        if (
+            isinstance(data, list)
+            and data
+            and isinstance(data[0], dict)
+            and data[0].get("error")
+        ):
+            app.call_from_thread(app._status, f"comment failed: {data[0]['error']}")
             return
         app.call_from_thread(self.after_comment, ea, text)
 
@@ -429,30 +453,34 @@ class EditController:
                     if dt is not None and not dt.get("is_func"):
                         kind, subject = "data", tgt
                         prefill = dt.get("type") or self.guess_data_type(
-                            dt.get("size") or 0)
+                            dt.get("size") or 0
+                        )
         # 3) fall back to the current function itself
         if kind is None and ft is not None:
             kind, subject, prefill = "func", app._cur.ea, ft.prototype
         if kind is None:
-            app.call_from_thread(app._status,
-                                 "nothing to retype under the cursor")
+            app.call_from_thread(app._status, "nothing to retype under the cursor")
             return
-        app.call_from_thread(self.open_retype, view, kind, subject,
-                             word or "", prefill)
+        app.call_from_thread(self.open_retype, view, kind, subject, word or "", prefill)
 
-    def open_retype(self, view, kind: str, subject: int, word: str,
-                    prefill: str) -> None:  # type: ignore[no-untyped-def]
+    def open_retype(
+        self, view, kind: str, subject: int, word: str, prefill: str
+    ) -> None:  # type: ignore[no-untyped-def]
         label = "prototype" if kind == "func" else f"type for '{word}'"
-        self.app.prompts.retype.show(f"{label} —  Enter=apply  Esc=cancel",
-                                     prefill, ctx=(view, kind, subject, word))
+        self.app.prompts.retype.show(
+            f"{label} —  Enter=apply  Esc=cancel",
+            prefill,
+            ctx=(view, kind, subject, word),
+        )
 
     def submit_retype(self, ctx, value: str) -> None:  # type: ignore[no-untyped-def]
         view, kind, subject, word = ctx
         if view is not None and value:
             self.app._do_retype(kind, subject, word, value)
 
-    def do_retype(self, kind: str, subject: int, word: str,
-                  new: str) -> None:  # worker context
+    def do_retype(
+        self, kind: str, subject: int, word: str, new: str
+    ) -> None:  # worker context
         app = self.app
         assert app.program is not None
         if kind == "func":
@@ -473,8 +501,9 @@ class EditController:
         app.program.bump_names()
         self.reload_active_code()
         app._dirty = True
-        app.journal.record("retype", getattr(app._cur, "ea", None), word,
-                           {"kind": kind})
+        app.journal.record(
+            "retype", getattr(app._cur, "ea", None), word, {"kind": kind}
+        )
         what = "prototype" if kind == "func" else f"'{word}'"
         app._status(f"retyped {what}   (Ctrl+S to save)")
 
@@ -498,15 +527,17 @@ class EditController:
             f"data type @ {ea:#x} (e.g. int, char[16], my_struct)"
             "  —  Enter=apply  Esc=cancel",
             self.default_data_type(head) if head is not None else "int",
-            ctx=(view, ea))
+            ctx=(view, ea),
+        )
 
     def submit_make_data(self, ctx, value: str) -> None:  # type: ignore[no-untyped-def]
         view, ea = ctx
         if view is not None and value:
             self.app._do_make_data(ea, value, self.app._anchor())
 
-    def do_make_data(self, ea: int, type_decl: str,
-                     anchor=None) -> None:  # worker context
+    def do_make_data(
+        self, ea: int, type_decl: str, anchor=None
+    ) -> None:  # worker context
         app = self.app
         assert app.program is not None
         try:
@@ -522,8 +553,7 @@ class EditController:
         lm = app.program.listing(ea)
         idx = max(lm.ensure_ea(ea), 0) if lm is not None else 0
         _cur, top = app._anchor_rows(anchor, lm, ea)
-        app.call_from_thread(
-            app._open_at, ea, name, idx, False, -1, 0, True, None, top)
+        app.call_from_thread(app._open_at, ea, name, idx, False, -1, 0, True, None, top)
         app.call_from_thread(self.edit_done, anchor)
 
     # -- literal display formats (IDA 'o') --------------------------------- #
@@ -554,8 +584,9 @@ class EditController:
             fn = view.loaded_ea if view.loaded_ea is not None else app._cur.ea
             app._do_op_format(msg.mode, "decomp", fn, view.cursor_x, view.cursor)
 
-    def do_op_format(self, mode: str, where: str, ea: int, col: int,
-                     line: int = -1) -> None:  # worker context
+    def do_op_format(
+        self, mode: str, where: str, ea: int, col: int, line: int = -1
+    ) -> None:  # worker context
         app = self.app
         assert app.program is not None
         try:
@@ -584,7 +615,9 @@ class EditController:
             app.call_from_thread(
                 app._status,
                 f"{what}{fmt} {r.get('value') or ''}"
-                f"   [{', '.join(r.get('choices', []))}]", True)
+                f"   [{', '.join(r.get('choices', []))}]",
+                True,
+            )
             return
         step = f"{prev} \u2192 {fmt}" if prev and prev != fmt else fmt
         desc = f"{what}{step}: {text[:96]}"
@@ -629,13 +662,17 @@ class EditController:
             return
         app._do_edit_item(msg.kind, ea, app._anchor())
 
-    def do_edit_item(self, kind: str, ea: int,
-                     anchor=None) -> None:  # worker context
+    def do_edit_item(self, kind: str, ea: int, anchor=None) -> None:  # worker context
         app = self.app
         assert app.program is not None
-        verb = {"code": "defined code", "func": "created function",
-                "undef": "undefined", "string": "made string",
-                "thumb": "switched decoding", "thumbscan": "scanned"}[kind]
+        verb = {
+            "code": "defined code",
+            "func": "created function",
+            "undef": "undefined",
+            "string": "made string",
+            "thumb": "switched decoding",
+            "thumbscan": "scanned",
+        }[kind]
         try:
             if kind == "code":
                 # Keep going until something stops it: one instruction is rarely
@@ -646,20 +683,24 @@ class EditController:
                 if n == 0 and why == "defined":
                     # Already code/data here — a no-op, not a failure. Saying
                     # "failed to create instruction" for it would be a lie.
-                    app.call_from_thread(
-                        app._status, f"already defined @ {ea:#x}")
+                    app.call_from_thread(app._status, f"already defined @ {ea:#x}")
                     return
                 if n == 0:
-                    raise IDAToolError("define_code",
-                                       f"@ {ea:#x}: Failed to create instruction")
+                    raise IDAToolError(
+                        "define_code", f"@ {ea:#x}: Failed to create instruction"
+                    )
                 end = int(str(r.get("end", hex(ea))), 0)
-                reason = {"undecodable": "hit bytes that don't decode",
-                          "flow": "control flow ends here",
-                          "defined": "ran into existing code/data",
-                          "segment": "end of segment",
-                          "limit": "instruction limit"}.get(why, why)
-                verb = (f"defined {n} instruction{'s' if n != 1 else ''} "
-                        f"({ea:#x}\u2013{end:#x}) \u2014 {reason}")
+                reason = {
+                    "undecodable": "hit bytes that don't decode",
+                    "flow": "control flow ends here",
+                    "defined": "ran into existing code/data",
+                    "segment": "end of segment",
+                    "limit": "instruction limit",
+                }.get(why, why)
+                verb = (
+                    f"defined {n} instruction{'s' if n != 1 else ''} "
+                    f"({ea:#x}\u2013{end:#x}) \u2014 {reason}"
+                )
             elif kind == "thumbscan":
                 # A vector table is a list of Thumb entry points that IDA won't
                 # follow on a headerless image, because nothing tells it those
@@ -668,11 +709,15 @@ class EditController:
                 r = app.program.thumb_scan(ea, ea + 0x400)
                 n, applied = int(r.get("n", 0)), int(r.get("applied", 0))
                 if not n:
-                    verb = (f"no Thumb entry pointers in {ea:#x}\u2013{ea+0x400:#x}"
-                            " (odd words pointing into the image)")
+                    verb = (
+                        f"no Thumb entry pointers in {ea:#x}\u2013{ea + 0x400:#x}"
+                        " (odd words pointing into the image)"
+                    )
                 else:
-                    verb = (f"{n} Thumb entr{'y' if n == 1 else 'ies'} found, "
-                            f"{applied} disassembled")
+                    verb = (
+                        f"{n} Thumb entr{'y' if n == 1 else 'ies'} found, "
+                        f"{applied} disassembled"
+                    )
             elif kind == "thumb":
                 # Switch the mode, then disassemble in it: flipping T and
                 # leaving the bytes undefined shows nothing, and the reason you
@@ -686,11 +731,16 @@ class EditController:
                     verb += " (segment set to 32-bit; Thumb needs ARM32)"
                 if r.get("db_64bit"):
                     # Disassembly will look right and F5 will never work.
-                    verb += ("  \u26a0 this database is 64-bit, so Hex-Rays "
-                             "won't decompile it \u2014 Ctrl+L and pick "
-                             "arm:ARMv7-A")
-                verb += (f" \u2014 {n} instruction{'s' if n != 1 else ''}"
-                         if n else " \u2014 still doesn't decode")
+                    verb += (
+                        "  \u26a0 this database is 64-bit, so Hex-Rays "
+                        "won't decompile it \u2014 Ctrl+L and pick "
+                        "arm:ARMv7-A"
+                    )
+                verb += (
+                    f" \u2014 {n} instruction{'s' if n != 1 else ''}"
+                    if n
+                    else " \u2014 still doesn't decode"
+                )
                 # falls through to the shared reload: same cache bump, same
                 # anchor restore, same flash. That is the whole point of having
                 # one path.
@@ -698,9 +748,11 @@ class EditController:
                 anchor.refresh_functions = True
                 r = app.program.define_func(ea)
                 if r.get("start") and r.get("end"):
-                    verb = (f"created function {r['start']}\u2013{r['end']}"
-                            + (" (end worked out from the code)"
-                               if r.get("how") == "explicit-end" else ""))
+                    verb = f"created function {r['start']}\u2013{r['end']}" + (
+                        " (end worked out from the code)"
+                        if r.get("how") == "explicit-end"
+                        else ""
+                    )
             elif kind == "string":
                 s = app.program.make_string(ea)
                 verb = f"made string ({s[:24]!r})" if s else verb
@@ -726,13 +778,14 @@ class EditController:
             idx = 0 if ea == fn.addr else model.index_of_ea(ea)
             _cur, top = app._anchor_rows(anchor, model, ea)
             app.call_from_thread(
-                app._open_at, fn.addr, fn.name, idx, False, -1, 0, False,
-                None, top)
+                app._open_at, fn.addr, fn.name, idx, False, -1, 0, False, None, top
+            )
         else:
             name = app.program.region_label(ea)
             lm = app.program.listing(ea)
             idx = max(lm.ensure_ea(ea), 0) if lm is not None else 0
             _cur, top = app._anchor_rows(anchor, lm, ea)
             app.call_from_thread(
-                app._open_at, ea, name, idx, False, -1, 0, True, None, top)
+                app._open_at, ea, name, idx, False, -1, 0, True, None, top
+            )
         app.call_from_thread(self.edit_done, anchor)

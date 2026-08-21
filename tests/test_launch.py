@@ -3,12 +3,12 @@
 
 The old `_sweep_locks` deleted `.id0/.id1/.id2/.nam/.til` next to the user's
 binary when a database failed to open. That was only defensible while the TUI
-exclusively owned a private worker; under Code Mode a GUI or another client may
+exclusively owned a private worker; under IDA Nexus a GUI or another client may
 own the database, so the sweep is gone. Its tests are replaced by one that keeps
 it gone -- deleting a shared database's working files is unrecoverable, and this
 is the cheapest guard against someone reintroducing the "helpful" cleanup.
 
-Pure: no IDA, no Code Mode library, no Textual.
+Pure: no IDA, no IDA Nexus library, no Textual.
 """
 from __future__ import annotations
 
@@ -47,7 +47,7 @@ def touch(*paths):
 def t_no_lock_sweeping():
     """The launcher must not delete database working files any more.
 
-    Code Mode's registry locks, health probes and IDA itself arbitrate database
+    IDA Nexus's registry locks, health probes and IDA itself arbitrate database
     ownership now. A sweep here would delete files out from under a live GUI.
     """
     check("_sweep_locks is gone", not hasattr(launch, "_sweep_locks"))

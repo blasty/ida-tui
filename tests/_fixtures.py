@@ -133,7 +133,7 @@ async def build_pristine(binary: str, cache: str, app_factory) -> None:
                 break
         app.program.client.save_database()
     # Textual's headless run_test context does not reliably emit App.Unmount on
-    # every platform/version; release the Code Mode lease explicitly.
+    # every platform/version; release the IDA Nexus lease explicitly.
     if app.program is not None:
         app.program.close()
     if app.client is not None:

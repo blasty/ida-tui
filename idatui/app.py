@@ -10,7 +10,7 @@ Design notes:
   without ever materializing 52k lines in a widget.
 * All network/domain work runs in Textual worker threads; the UI never blocks.
 * An address-history stack backs Enter (follow) / Esc (back), IDA-style.
-* Database lifecycle is lease-based through ida_codemode: matching GUI sessions
+* Database lifecycle is lease-based through ida_nexus: matching GUI sessions
   are reused, otherwise a shared managed idalib worker is opened on demand.
 """
 
@@ -46,8 +46,7 @@ from textual.widgets import (
 )
 from textual.widgets.option_list import Option
 
-from . import graph
-from . import kittygfx
+from . import diag, graph, kittygfx
 from .edit_ctl import EditController
 from .prompt import PromptBar
 from .trace_ctl import TraceController
@@ -55,8 +54,8 @@ from . import findings, search
 from .highlight import CTextArea, highlight_c
 from .journal import Journal
 
-from .errors import IDAToolError, IDAConnectionError
-from .codemode_client import CodeModeClient, registered_database
+from .errors import IDAConnectionError
+from .nexus_client import NexusClient, registered_database
 from .domain import Func, Head, ListingModel, Program, Struct
 
 # Styles for the disassembly listing.
@@ -1088,7 +1087,7 @@ class ListingView(SearchMixin, NavMixin, ColumnCursor, ScrollView, can_focus=Tru
     def _span_segments(h: Head, fallback: Style):
         """Segments for a row's disassembly text.
 
-        Uses IDA's own token classification when Code Mode supplies it; falls
+        Uses IDA's own token classification when IDA Nexus supplies it; falls
         back to the mnemonic/rest split when spans are absent or disagree with
         the plain text.
         """
@@ -3695,6 +3694,7 @@ _HELP = (
         ("Ctrl+B", "show/hide the names pane"),
         ("Ctrl+T", "structs / types editor"),
         ("Ctrl+F", "search the database: text or bytes"),
+        ("Ctrl+R", "refresh the current view in place"),
         ("Ctrl+E", "export findings as markdown"),
         ("Ctrl+P", "command palette"),
     )),
@@ -3748,14 +3748,14 @@ _HELP = (
 class QuitScreen(ModalScreen):
     """Asked before exiting with unsaved database changes.
 
-    Code Mode clients cannot roll a shared database back. The ``d`` choice means
-    "do not explicitly save": a GUI keeps the changes dirty, while a managed
-    idalib worker may persist them when its final lease closes.
+    A final managed-worker lease can discard the whole session. Shared workers
+    and GUI databases keep their state: releasing this lease transfers the final
+    save/discard decision to the remaining client or GUI owner.
     """
 
     BINDINGS = [
         Binding("s", "save", "Save & quit"),
-        Binding("d", "discard", "Leave & quit"),
+        Binding("d", "discard", "Discard / leave"),
         Binding("escape,c", "cancel", "Cancel"),
     ]
 
@@ -3771,8 +3771,11 @@ class QuitScreen(ModalScreen):
             body = Text()
             for label in self._labels:
                 body.append(f"  \u2022 {label}\n", _S_LABEL)
+            body.append(
+                "\nFinal managed leases discard; shared/GUI sessions stay open.",
+                _S_DIM)
             yield Static(body, id="quit-list")
-            yield Static("s  save & quit      d  leave as-is & quit      Esc  cancel",
+            yield Static("s  save & quit      d  discard / leave & quit      Esc  cancel",
                          id="quit-help")
 
     def action_save(self) -> None:
@@ -5174,6 +5177,7 @@ class IdaTui(App):
         Binding("ctrl+n", "symbols", "Symbols"),
         Binding("ctrl+t", "structs", "Structs"),
         Binding("ctrl+f", "find", "Find"),
+        Binding("ctrl+r", "refresh_view", "Refresh", show=False),
         Binding("ctrl+e", "export", "Export", show=False),
         Binding("backslash", "hex", "Hex"),
         Binding("s", "toggle_split", "Split", show=False),
@@ -5244,7 +5248,7 @@ class IdaTui(App):
         self._open_path = open_path
         self._ttl = ttl
         self._load_args = load_args or ""   # first-open options for a headerless blob
-        self._new_database = False           # Ctrl+L asks Code Mode for a fresh IDB
+        self._new_database = False           # Ctrl+L asks IDA Nexus for a fresh IDB
         self._title = (os.path.basename(open_path) if open_path else "")
         #: Where we are in the execution trace, and everything that moves us.
         #: Owns the trace state; the _trace/_t/_trail_* properties below
@@ -5253,7 +5257,7 @@ class IdaTui(App):
         self._do_keepalive = keepalive
         self._rpc_path = rpc_path
         self._rpc = None
-        self.client: CodeModeClient | None = None
+        self.client: NexusClient | None = None
         self.program: Program | None = None
         self._loading_screen: LoadingScreen | None = None
         self._ka = None
@@ -5294,6 +5298,11 @@ class IdaTui(App):
         self.journal = Journal()
         self._xref_focus_name: str | None = None
         self._dirty = False
+        # One subscription for the active database. NexusClient debounces
+        # bursts off the Textual worker pool; the callback re-enters here on the
+        # UI thread to invalidate and reload the visible models.
+        self._idb_event_watch = None
+        self._idb_refresh_seq = 0
 
     # -- layout ------------------------------------------------------------ #
     def compose(self) -> ComposeResult:
@@ -5363,7 +5372,7 @@ class IdaTui(App):
         if self._rpc_path:
             self._start_rpc()
         # A file no loader recognises has to be described before it can be
-        # opened, so ask BEFORE Code Mode creates it — once IDA has made a database
+        # opened, so ask BEFORE IDA Nexus creates it — once IDA has made a database
         # the answer is baked in and changing it requires a fresh-IDB reopen.
         if self._project is not None:
             ref = self._pending_load_ref()
@@ -5436,7 +5445,7 @@ class IdaTui(App):
             ref = self._project.by_label(self._binary)
             if ref is not None:
                 path, label = ref.source, ref.label
-        # Release our lease first. Code Mode waits for a managed worker's final
+        # Release our lease first. IDA Nexus waits for a managed worker's final
         # lease grace, then creates the replacement IDB atomically. A GUI-backed
         # database is rejected by _can_reload(): the TUI must never close it.
         self._release_database()
@@ -5455,6 +5464,7 @@ class IdaTui(App):
         self._ask_load_options(path, label=label)
 
     def _release_database(self) -> None:
+        self._stop_idb_event_watch()
         if self.program is not None:
             self.program.close()
         if self._pool is not None and self._binary is not None:
@@ -5633,9 +5643,142 @@ class IdaTui(App):
                 pass
         return len(text)
 
+    # -- live refresh from shared IDB changes ----------------------------- #
+    def _start_idb_event_watch(self, client: NexusClient) -> None:
+        self._stop_idb_event_watch()
+        watch = getattr(client, "watch_idb_events", None)
+        if watch is None:  # IDA-free test doubles and pre-event adapters
+            return
+
+        def changed(events) -> None:  # listener thread
+            try:
+                self.call_from_thread(self._refresh_idb_events, client, events)
+            except Exception:  # noqa: BLE001 -- app teardown can win this race
+                pass
+
+        def failed(error: BaseException) -> None:  # listener thread
+            try:
+                self.call_from_thread(self._idb_event_watch_failed, client, error)
+            except Exception:  # noqa: BLE001 -- app teardown can win this race
+                pass
+
+        self._idb_event_watch = watch(
+            changed, on_error=failed, debounce=0.2)
+
+    def _stop_idb_event_watch(self) -> None:
+        watcher, self._idb_event_watch = self._idb_event_watch, None
+        if watcher is not None:
+            watcher.close()
+
+    def _idb_event_watch_failed(
+        self, client: NexusClient, error: BaseException
+    ) -> None:
+        if client is not self.client:
+            return
+        if isinstance(error, IDAConnectionError):
+            self._on_connection_lost()
+        else:
+            self._status(f"live database refresh stopped: {error}")
+
+    def _listing_event_anchor(self) -> ViewAnchor:
+        """Capture the listing position even when the split's decompiler has focus."""
+        anchor = ViewAnchor(view=self._active)
+        listing = self.query_one(ListingView)
+        model = listing.model
+        if model is None:
+            return anchor
+        anchor.cursor_x = listing.cursor_x
+        anchor.ea = listing._cursor_ea()
+        top = round(listing.scroll_offset.y)
+        head = model.cached_line(top) or model.get(top)
+        anchor.top_ea = getattr(head, "ea", None)
+        return anchor
+
+    def _refresh_idb_events(
+        self, client: NexusClient, events: tuple[dict, ...]
+    ) -> None:
+        """Invalidate once per external edit burst and reload the active surface."""
+        program = self.program
+        if not events or client is not self.client or program is None \
+                or program.client is not client:
+            return
+        self._idb_refresh_seq += 1
+        seq = self._idb_refresh_seq
+        entry = self._cur
+        anchor = self._listing_event_anchor()
+        hex_ea = self.query_one(HexView).cursor_va() if self.is_hex else None
+        graph_ea = self.query_one(GraphView)._cursor_ea() if self.is_graph else None
+        decomp = self.query_one(DecompView)
+        if entry is not None and decomp.loaded_ea == entry.ea:
+            entry.dec_cursor = decomp.cursor
+            entry.dec_cursor_x = decomp.cursor_x
+            entry.dec_scroll_y = round(decomp.scroll_offset.y)
+            entry.dec_scroll_x = round(decomp.scroll_offset.x)
+
+        program.invalidate_external()
+        self._status(
+            f"{len(events)} external database "
+            f"change{'s' if len(events) != 1 else ''} — refreshing…")
+        self._reindex_functions()
+
+        if self.is_hex:
+            self.query_one(HexView).model = None
+            self._load_hex_model(hex_ea)
+            return
+        if self.is_graph and entry is not None:
+            self._load_graph(entry.ea, graph_ea or entry.ea)
+            return
+        if entry is None:
+            return
+
+        # A split needs both halves rebuilt; a decompiler-only view still keeps
+        # the hidden listing fresh so Tab does not reveal pre-event rows.
+        decomp.loaded_ea = None
+        self._reload_idb_listing(program, seq, entry, anchor)
+        if self.is_decomp or self._split:
+            self._show_active()
+
+    @work(thread=True, exclusive=True, group="idb-refresh")
+    def _reload_idb_listing(
+        self, program: Program, seq: int, entry: NavEntry, anchor: ViewAnchor
+    ) -> None:
+        target = anchor.ea if anchor.ea is not None else entry.ea
+        model = program.listing(target)
+        cursor = top = -1
+        if model is not None:
+            model.ensure_ea(target)
+            cursor, top = self._anchor_rows(anchor, model, target)
+        fn = program.function_of(entry.ea)
+        name = fn.name if fn is not None else program.region_label(entry.ea)
+        self.app.call_from_thread(
+            self._apply_idb_listing, program, seq, entry, model,
+            cursor, top, anchor.cursor_x, name, fn is None)
+
+    def _apply_idb_listing(
+        self, program: Program, seq: int, entry: NavEntry, model,
+        cursor: int, top: int, cursor_x: int, name: str, is_region: bool,
+    ) -> None:
+        if program is not self.program or seq != self._idb_refresh_seq \
+                or entry is not self._cur:
+            return
+        if model is None:
+            self._status(f"{entry.ea:#x} is no longer in a loaded segment")
+            return
+        entry.name = name
+        entry.is_region = is_region
+        entry.cursor = max(cursor, 0)
+        entry.cursor_x = cursor_x
+        if top >= 0:
+            entry.scroll_y = top
+        self.query_one(ListingView).load(
+            model, name, cursor=entry.cursor, cursor_x=entry.cursor_x,
+            scroll_y=top if top >= 0 else None)
+        if self.is_listing:
+            self._show_active()
+
     # -- connection loss / recovery --------------------------------------- #
     def _handle_exception(self, error: BaseException) -> None:
-        """Intercept a lost Code Mode lease so the app can rediscover the DB.
+        """Intercept a lost IDA Nexus lease so the app can rediscover the DB.
 
         Everything unrelated to database connectivity crashes as usual.
         """
@@ -5670,15 +5813,22 @@ class IdaTui(App):
 
     @work(thread=True, exclusive=True, group="reconnect")
     def _reconnect(self) -> None:
-        # The registered instance disappeared. Rediscover it; Code Mode may find
-        # a GUI/replacement worker, then we rebuild caches against the new handle.
+        # Rediscovery is attach-only. If a GUI owner closes its database, a TUI
+        # must not silently reopen it by spawning a headless worker.
         try:
             if self._open_path is None:
                 self.app.call_from_thread(self._reconnect_failed,
                                           "no binary to reopen")
                 return
-            client = CodeModeClient(self._open_path, ttl=self._ttl,
-                                    load_args=self._load_args)
+            if self._project is not None and self._binary is not None:
+                ref = self._project.by_label(self._binary)
+                client = NexusClient(
+                    ref.staged, ttl=self._ttl, load_args=ref.load_args,
+                    output_database=ref.db, spawn=False)
+            else:
+                client = NexusClient(
+                    self._open_path, ttl=self._ttl,
+                    load_args=self._load_args, spawn=False)
             client.connect(progress=lambda m: self.app.call_from_thread(
                 self._conn_note, m))
         except Exception as e:  # noqa: BLE001
@@ -5686,21 +5836,33 @@ class IdaTui(App):
             return
         self.app.call_from_thread(self._after_reconnect, client, Program(client))
 
-    def _after_reconnect(self, client: "CodeModeClient", program: "Program") -> None:
+    def _after_reconnect(self, client: "NexusClient", program: "Program") -> None:
+        old_client, old_program = self.client, self.program
+        self._stop_idb_event_watch()
+        if old_program is not None:
+            old_program.close()
+        if self._pool is not None and self._binary is not None:
+            self._pool.replace_client(self._binary, old_client, client)
+        if old_client is not None and old_client is not client:
+            old_client.close()
         self.client = client
         self.program = program
+        self._start_idb_event_watch(client)
         self._reconnecting = False
+        self._dirty = False
         self._dismiss_conn()
-        self._status("reconnected \u2014 reloading\u2026")
-        self._load_functions()  # rebuild the function index against the new client
+        self._status("reattached — reloading persisted state…")
+        self._load_functions()
         cur = self._cur
-        if cur is not None:  # refresh the current view with the new program
+        if cur is not None:
             self._open_entry(cur, push=False)
 
     def _reconnect_failed(self, why: str) -> None:
         self._reconnecting = False
-        self._conn_note(f"reconnect failed: {why}  \u2014  retry on next action, or 'q'")
-        self._status(f"reconnect failed: {why}")
+        note = (f"database owner closed: {why} — reopen it in IDA, then "
+                "Esc and retry an action; or q to quit")
+        self._conn_note(note)
+        self._status(note)
 
     # -- connection + initial load ---------------------------------------- #
     @work(thread=True, exclusive=True, group="connect")
@@ -5727,13 +5889,14 @@ class IdaTui(App):
             return
         self.client = client
         self.program = program
+        self._start_idb_event_watch(client)
         self._new_database = False
         self.app.call_from_thread(
             self._status, f"{module} [{client.backend}] — loading functions…")
         self._load_functions()
 
     def _open_database_client(self):  # type: ignore[no-untyped-def]
-        """Attach through Code Mode, reusing a GUI or managed idalib database."""
+        """Attach through IDA Nexus, reusing a GUI or managed idalib database."""
         if self._pool is not None:  # project mode: the pool owns the leases
             label = self._binary or self._project.refs[0].label
             client = self._pool.get(label, progress=lambda m:
@@ -5745,13 +5908,13 @@ class IdaTui(App):
             return client
         if not self._open_path:
             self.app.call_from_thread(
-                self._status, "Code Mode needs a database or executable path")
+                self._status, "IDA Nexus needs a database or executable path")
             self.app.call_from_thread(self._dismiss_loading)
             return None
         base = os.path.basename(self._open_path)
         self.app.call_from_thread(
-            self._status, f"discovering Code Mode database for {base}…")
-        client = CodeModeClient(self._open_path, ttl=self._ttl,
+            self._status, f"discovering IDA Nexus database for {base}…")
+        client = NexusClient(self._open_path, ttl=self._ttl,
                                 load_args=self._load_args,
                                 new_database=self._new_database)
         client.connect(progress=lambda m: self.app.call_from_thread(
@@ -5825,7 +5988,7 @@ class IdaTui(App):
     @work(thread=True, exclusive=True, group="index")
     def _index_binary(self) -> None:
         """Fold this binary's symbols + strings into the project index, so it can
-        be searched later even when its Code Mode lease is gone."""
+        be searched later even when its IDA Nexus lease is gone."""
         if self._index is None or self._project is None or self._binary is None:
             return
         ref = self._project.by_label(self._binary)
@@ -5928,7 +6091,7 @@ class IdaTui(App):
                       cursor=0, push=True, is_region=True)
 
     def _can_reload(self) -> bool:
-        """Whether Code Mode can replace this IDB with different options.
+        """Whether IDA Nexus can replace this IDB with different options.
 
         A GUI database is owned by the user and has no remote close/rollback
         route. Managed idalib databases can be released and reopened fresh.
@@ -6123,11 +6286,13 @@ class IdaTui(App):
 
     def _on_quit_choice(self, choice: str | None) -> None:
         if choice == "discard":
-            # Code Mode has no rollback/close-without-save operation. For GUI
-            # sessions this leaves changes dirty in IDA; a managed worker owns
-            # its final save policy and may persist them on final lease release.
-            self._save_on_exit = False
-            self.exit()
+            # Whole-session discard is legal only for the final managed lease.
+            # GUI/shared sessions retain state and inherit finalization.
+            dirty = self._dirty_labels()
+            self._loading_screen = LoadingScreen(
+                "discarding", note="finalizing database leases…")
+            self.push_screen(self._loading_screen)
+            self._discard_then_exit(dirty)
         elif choice == "save":
             # Save with the overlay up: writing a big .i64 takes seconds, and
             # doing it during teardown would look like a hang with no UI left.
@@ -6135,6 +6300,31 @@ class IdaTui(App):
             self.push_screen(self._loading_screen)
             self._save_then_exit()
         # None: cancel, stay put
+
+    @work(thread=True, exclusive=True, group="save-exit")
+    def _discard_then_exit(self, dirty: list[str]) -> None:
+        try:
+            if self._pool is not None:
+                transferred = self._pool.discard_changes(dirty)
+            elif self.client is not None:
+                transferred = [] if self.client.discard_database() else dirty
+            else:
+                transferred = dirty
+        except Exception as exc:  # noqa: BLE001 -- keep the app open on failure
+            self.app.call_from_thread(self._discard_failed, str(exc))
+            return
+        self.app.call_from_thread(self._finish_discard, transferred)
+
+    def _discard_failed(self, why: str) -> None:
+        self._dismiss_loading()
+        self._status(f"discard failed: {why}", priority=True)
+
+    def _finish_discard(self, transferred: list[str]) -> None:
+        if transferred and self._loading_screen is not None:
+            labels = ", ".join(transferred)
+            self._loading_screen.update_note(
+                f"finalization transferred: {labels}")
+        self._finish_exit()
 
     @work(thread=True, exclusive=True, group="save-exit")
     def _save_then_exit(self) -> None:
@@ -6148,7 +6338,9 @@ class IdaTui(App):
         self.app.call_from_thread(self._finish_exit)
 
     def _finish_exit(self) -> None:
-        self._save_on_exit = False  # already written above
+        # Teardown must not save again: save, discard, or ownership transfer was
+        # already decided by the quit path.
+        self._save_on_exit = False
         self._dirty = False
         self.exit()
 
@@ -6215,6 +6407,7 @@ class IdaTui(App):
     def _after_switch(self, label, client, program, st, reuse) -> None:  # type: ignore[no-untyped-def]
         self.client = client
         self.program = program
+        self._start_idb_event_watch(client)
         self._binary = label
         self._pool.set_active(label)
         self._open_path = self._project.by_label(label).staged
@@ -6326,6 +6519,127 @@ class IdaTui(App):
             self._switch_then_goto(binary, addr)
             return
         self._goto_ea(addr, push=True)  # land on the literal in the listing
+
+    def action_refresh_view(self) -> None:
+        """Ctrl+R: discard cached data and reload the visible view in place."""
+        if self.program is None or self._cur is None:
+            self._status("nothing to refresh")
+            return
+        if self._prompt_active() or self.screen is not self.screen_stack[0]:
+            return
+
+        if self.is_hex:
+            hx = self.query_one(HexView)
+            if hx.model is None:
+                self._status("hex: nothing to refresh")
+                return
+            self._status("hex — refreshing…")
+            hx.model.invalidate()
+            # Re-read the visible blocks off the UI thread. ``center=False``
+            # preserves both the byte cursor and the viewport.
+            hx._prime(center=False)
+            return
+
+        cur = self._cur
+        mode = self._active
+        split = self._split
+        listing_anchor = None
+        if self.is_listing or split:
+            # _anchor() follows the active pane. In split mode pseudocode may be
+            # active, but the listing must still round-trip through addresses:
+            # row indices do not survive an external structure change.
+            lst = self.query_one(ListingView)
+            listing_anchor = ViewAnchor(view=ViewMode.LISTING,
+                                        cursor_x=lst.cursor_x)
+            model = lst.model
+            if model is not None:
+                listing_anchor.ea = lst._cursor_ea()
+                top = round(lst.scroll_offset.y)
+                h = model.cached_line(top) or model.get(top)
+                listing_anchor.top_ea = getattr(h, "ea", None)
+
+        refresh_decomp = self.is_decomp or split
+        if refresh_decomp:
+            # Keep the live pseudocode position; NavEntry is only updated when
+            # navigating away and may lag behind the widget.
+            dec = self.query_one(DecompView)
+            if dec.loaded_ea == cur.ea:
+                cur.dec_cursor = dec.cursor
+                cur.dec_cursor_x = dec.cursor_x
+                cur.dec_scroll_y = round(dec.scroll_offset.y)
+                cur.dec_scroll_x = round(dec.scroll_offset.x)
+            dec.loading = True
+
+        want_ea = (self.query_one(GraphView)._cursor_ea()
+                   if self.is_graph else None)
+        if self.is_graph:
+            self._graph_sticky = True
+            self._status(f"{cur.name} — refreshing graph…")
+        else:
+            self._status(f"{cur.name} — refreshing…")
+        self._refresh_view(cur, mode, split, listing_anchor,
+                           refresh_decomp, want_ea, self.program)
+
+    @work(thread=True, exclusive=True, group="refresh-view")
+    def _refresh_view(self, cur: NavEntry, mode: ViewMode, split: bool,
+                      anchor: ViewAnchor | None, refresh_decomp: bool,
+                      want_ea: int | None, program) -> None:  # type: ignore[no-untyped-def]
+        """Invalidate and rebuild without blocking Textual's event loop."""
+        try:
+            program.bump_items()
+            if refresh_decomp:
+                program.force_recompile(cur.ea)
+
+            model = None
+            cursor = top = -1
+            if anchor is not None:
+                target = anchor.ea if anchor.ea is not None else cur.ea
+                model = program.listing(target)
+                if model is not None:
+                    model.ensure_ea(target)
+                    cursor, top = self._anchor_rows(anchor, model, target)
+        except Exception as exc:  # noqa: BLE001 -- a refresh is recoverable
+            diag.note("refresh_view", exc)
+            self.app.call_from_thread(
+                self._view_refresh_failed, cur, program, str(exc))
+            return
+        self.app.call_from_thread(
+            self._apply_view_refresh, cur, mode, split, anchor,
+            refresh_decomp, want_ea, program, model, cursor, top)
+
+    def _view_refresh_failed(self, cur: NavEntry, program, error: str) -> None:  # type: ignore[no-untyped-def]
+        if self.program is program and self._cur is cur:
+            self.query_one(DecompView).loading = False
+            self._status(f"refresh failed: {error}", priority=True)
+
+    def _apply_view_refresh(self, cur: NavEntry, mode: ViewMode, split: bool,
+                            anchor: ViewAnchor | None, refresh_decomp: bool,
+                            want_ea: int | None, program, model, cursor: int,
+                            top: int) -> None:  # type: ignore[no-untyped-def]
+        # A binary switch or navigation completed while the refresh was in
+        # flight. Its newer view wins; never drag the user back.
+        if self.program is not program or self._cur is not cur:
+            return
+        self._active = mode
+        self._split = split
+
+        if self.is_graph:
+            self._load_graph(cur.ea, want_ea)
+            return
+
+        if anchor is not None and model is not None:
+            lst = self.query_one(ListingView)
+            cur.cursor = max(cursor, 0)
+            cur.cursor_x = anchor.cursor_x
+            cur.scroll_y = top
+            lst.load(model, cur.name, cursor=cur.cursor,
+                     cursor_x=cur.cursor_x,
+                     scroll_y=top if top >= 0 else None)
+        if refresh_decomp:
+            self.query_one(DecompView).loaded_ea = None
+        self._show_active()
+        if not refresh_decomp:
+            self._status(f"{cur.name} — refreshed", priority=True)
 
     def action_toggle_view(self) -> None:
         """Tab: switch the code pane between disassembly and pseudocode (or leave
@@ -8261,6 +8575,7 @@ class IdaTui(App):
 
     # -- teardown ---------------------------------------------------------- #
     async def on_unmount(self) -> None:
+        self._stop_idb_event_watch()
         if self._rpc is not None:
             await self._rpc.stop()
         if self._ka is not None:

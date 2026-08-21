@@ -24,7 +24,7 @@ per pane in the registry, so stop/list/capture/keys keep working across both
     python -m idatui.pane keys --pane <pane> Escape
 
 Requires: running inside tmux or zellij. Each pane leases a registered GUI or
-shared managed idalib database through Code Mode. Uses ~/ida-venv/bin/python for
+shared managed idalib database through IDA Nexus. Uses ~/ida-venv/bin/python for
 the TUI (needs textual) unless --python / IDATUI_PYTHON says otherwise.
 """
 from __future__ import annotations
@@ -250,8 +250,8 @@ def _pane_keys(pane: str, keys: list[str], mux: str | None = None) -> None:
         subprocess.run(["tmux", "send-keys", "-t", pane, *keys], check=True)
 
 
-# Code Mode owns database process lifetime: a closed pane drops its lease at the
-# socket/kernel boundary and Code Mode decides whether a managed worker still
+# IDA Nexus owns database process lifetime: a closed pane drops its lease at the
+# socket/kernel boundary and IDA Nexus decides whether a managed worker still
 # has clients. There is nothing for the pane layer to reap.
 
 
@@ -261,7 +261,7 @@ def _count_live_panes() -> int:
 
 
 def _reap_orphan_workers(force: bool = False) -> int:
-    """Compatibility no-op: Code Mode workers are shared and lease-managed."""
+    """Compatibility no-op: IDA Nexus workers are shared and lease-managed."""
     del force
     return 0
 
@@ -294,7 +294,7 @@ def spawn(args) -> int:
         print(f"error: no such project: {project}", file=sys.stderr)
         return 2
 
-    # The pane owns only the TUI. Code Mode's lease cleanup handles crashes;
+    # The pane owns only the TUI. IDA Nexus's lease cleanup handles crashes;
     # kill-pane must never reap a shared GUI/idalib database.
     if project is not None:
         # launch takes: --project FILE [binaries...]; extra binaries are added to
@@ -347,7 +347,7 @@ def _wait_ready(sock: str, timeout: float, pane: str,
                 stuck_after: float = 45.0, mux: str | None = None) -> dict[str, Any]:
     """Poll the socket + ping until the TUI reports ready (or timeout).
 
-    Emits a one-time hint if Code Mode discovery/opening is still not ready after
+    Emits a one-time hint if IDA Nexus discovery/opening is still not ready after
     ``stuck_after`` seconds.
     """
     start = time.time()
@@ -370,7 +370,7 @@ def _wait_ready(sock: str, timeout: float, pane: str,
             why = ("RPC socket not created yet" if not os.path.exists(sock)
                    else "TUI up but analysis not ready")
             print(f"still waiting ({int(time.time() - start)}s): {why}. "
-                  f"Check Code Mode registrations and worker logs.", file=sys.stderr)
+                  f"Check IDA Nexus registrations and worker logs.", file=sys.stderr)
         time.sleep(0.4)
     last = dict(last)
     last["ready"] = False
@@ -467,7 +467,7 @@ def list_panes(args) -> int:
 
 
 def reap(args) -> int:
-    """Deprecated no-op; shared Code Mode workers are managed by leases."""
+    """Deprecated no-op; shared IDA Nexus workers are managed by leases."""
     print(json.dumps({"reaped_workers": 0, "live_panes": _count_live_panes(),
                       "forced": args.force, "deprecated": True}))
     return 0
@@ -572,7 +572,7 @@ def main(argv: list[str]) -> int:
     ls.add_argument("--prune", action="store_true", help="drop dead panes (and their sockets)")
     ls.set_defaults(fn=list_panes)
 
-    rp = sub.add_parser("reap", help="deprecated no-op (Code Mode uses shared leases)")
+    rp = sub.add_parser("reap", help="deprecated no-op (IDA Nexus uses shared leases)")
     rp.add_argument("--force", action="store_true", help=argparse.SUPPRESS)
     rp.set_defaults(fn=reap)
 
