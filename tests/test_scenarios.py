@@ -1310,6 +1310,127 @@ async def s_refresh_view(c: Ctx):
     )
 
 
+@scenario("idb_event_refresh")
+async def s_idb_event_refresh(c: Ctx):
+    """An external edit burst refreshes the UI in place (event -> refresh).
+
+    The listener thread and its debounce are unit-tested in
+    test_nexus_client.py; this covers the app half it hands the batch to:
+    _refresh_idb_events must invalidate, reindex, and reload the active
+    surface without moving the cursor. The edit is made straight through the
+    client so no UI cache hears about it -- exactly what another client's
+    rename looks like from this process.
+    """
+    app, lst = c.app, c.lst
+    fn = await c.open_biggest("listing")
+    await c.press("down", "down", "down")  # mid-viewport: anchor is not degenerate
+    old_model = lst.model
+    old_ea = lst._cursor_ea()
+    old_top = round(lst.scroll_offset.y)
+    old_head = old_model.get(old_top) if old_model is not None else None
+    old_top_ea = getattr(old_head, "ea", None)
+
+    newname = f"ext_{os.getpid()}"
+    rr = app.program.client.call(
+        remote_ops.rename, batch={"func": {"addr": hex(fn.addr), "name": newname}}
+    )
+    c.check(
+        "out-of-band rename applied",
+        rr.get("summary", {}).get("ok", 0) == 1,
+        str(rr.get("summary")),
+    )
+
+    event = {"kind": "renamed", "ea": hex(fn.addr), "origin_id": "another-client"}
+    app._refresh_idb_events(app.client, (event,))
+    c.check(
+        "the status line says why the view is about to move",
+        "external database change" in c.status(),
+        c.status(),
+    )
+    landed = await c.wait(
+        lambda: (
+            lst.model is not old_model
+            and lst._cursor_ea() == old_ea
+            and app._cur is not None
+            and app._cur.name == newname
+        ),
+        25,
+    )
+    c.check(
+        "the event batch rebuilds the listing around the same cursor",
+        landed,
+        f"got={lst._cursor_ea()} want={old_ea} name={getattr(app._cur, 'name', None)}",
+    )
+    new_top = round(lst.scroll_offset.y)
+    new_head = lst.model.get(new_top) if lst.model is not None else None
+    c.check(
+        "the viewport is preserved by address",
+        getattr(new_head, "ea", None) == old_top_ea,
+        f"got={getattr(new_head, 'ea', None)} want={old_top_ea}",
+    )
+    await c.wait(
+        lambda: (
+            app._func_index.by_addr(fn.addr) is not None
+            and app._func_index.by_addr(fn.addr).name == newname
+        ),
+        25,
+    )
+    c.check(
+        "the function index was rebuilt with the external name",
+        app._func_index.by_addr(fn.addr).name == newname,
+        getattr(app._func_index.by_addr(fn.addr), "name", None),
+    )
+
+    # The decompiler half: pseudocode opened now must carry the new name (the
+    # refresh bumped the name generation), and a second external batch landing
+    # while decomp is active must reload it in place -- which also reverts the
+    # rename, so the scenario is idempotent.
+    await c.open(fn.addr, "decomp")
+    dec = c.dec
+    c.check(
+        "pseudocode decompiled after the event shows the external name",
+        bool(dec._texts) and newname in dec._texts[0],
+        dec._texts[0] if dec._texts else "(empty)",
+    )
+    rr = app.program.client.call(
+        remote_ops.rename, batch={"func": {"addr": hex(fn.addr), "name": fn.name}}
+    )
+    c.check(
+        "rename reverted out of band",
+        rr.get("summary", {}).get("ok", 0) == 1,
+        str(rr.get("summary")),
+    )
+    app._refresh_idb_events(app.client, (event,))
+    reverted = await c.wait(
+        lambda: (
+            app.is_decomp
+            and dec.loaded_ea == fn.addr
+            and not dec.loading
+            and bool(dec._texts)
+            and fn.name in dec._texts[0]
+        ),
+        25,
+    )
+    c.check(
+        "a batch landing in decomp view reloads the pseudocode in place",
+        reverted,
+        f"active={app._active} loaded={dec.loaded_ea} "
+        f"row0={dec._texts[0] if dec._texts else '(empty)'}",
+    )
+    await c.wait(
+        lambda: (
+            app._func_index.by_addr(fn.addr) is not None
+            and app._func_index.by_addr(fn.addr).name == fn.name
+        ),
+        25,
+    )
+    c.check(
+        "the index is back to the original name (idempotent)",
+        app._func_index.by_addr(fn.addr).name == fn.name,
+        getattr(app._func_index.by_addr(fn.addr), "name", None),
+    )
+
+
 @scenario("split_view")
 async def s_split_view(c: Ctx):
     app, lst, dec = c.app, c.lst, c.dec
