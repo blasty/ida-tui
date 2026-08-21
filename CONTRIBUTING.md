@@ -51,6 +51,20 @@ The IDA-backed suites need an interpreter that has `textual`, `idapro` and
 import instead of doing it at module top. Please don't break that — it's what
 keeps the fast gate fast and lets people without IDA contribute at all.
 
+## Formatting
+
+Python is formatted by ruff (`ruff.toml` pins the exact version; the config is
+deliberately default: black-style layout plus import sorting, nothing else).
+Install the pre-commit hook once and forget about it:
+
+```bash
+uv sync --extra dev                        # puts the pinned ruff in .venv
+git config core.hooksPath .githooks        # formats what you stage
+```
+
+Mechanical reformat commits are listed in `.git-blame-ignore-revs`;
+`git config blame.ignoreRevsFile .git-blame-ignore-revs` keeps blame useful.
+
 ## Sending a change
 
 - Run at least `python3 tests/run.py --fast` before you push. If your change

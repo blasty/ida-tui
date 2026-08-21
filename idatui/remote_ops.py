@@ -1,7 +1,6 @@
 """Typed remote operations executed through ida-nexus."""
 
 from __future__ import annotations
-# ruff: noqa
 
 import threading
 from collections.abc import Callable

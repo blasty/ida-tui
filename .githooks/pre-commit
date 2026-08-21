@@ -1,0 +1,53 @@
+#!/bin/sh
+# Format the Python being committed, so what lands in git is already formatted.
+# Imports sorted, then laid out -- both by ruff (ruff.toml pins the version).
+#
+# Install with `git config core.hooksPath .githooks`. Hooks are not versioned
+# by git, so a hook in a repo has to be a file somebody opts into -- there is
+# no way to ship one that runs on clone, and a repo that could would be a repo
+# that runs code on clone.
+#
+# Skip a commit with `git commit --no-verify` when you mean to.
+set -e
+
+py_files=$(git diff --cached --name-only --diff-filter=ACMR | grep -E '\.py$' || true)
+[ -n "$py_files" ] || exit 0
+
+# Where ruff is. The repo-local venv first, before $PATH: ruff.toml pins a
+# version, and a system ruff of the wrong one would refuse the commit while
+# the venv sitting right there has the version it asked for. Off the toplevel,
+# so this works from a subdirectory.
+root=$(git rev-parse --show-toplevel)
+if [ -x "$root/.venv/bin/ruff" ]; then
+  ruff="$root/.venv/bin/ruff"
+else
+  ruff=$(command -v ruff 2>/dev/null || true)
+fi
+if [ -z "$ruff" ]; then
+  echo "pre-commit: ruff is not installed, and this commit touches Python." >&2
+  echo "    uv sync --extra dev   (a venv in .venv, version pinned)" >&2
+  echo "  ...or commit with --no-verify if you know what you are doing." >&2
+  exit 1
+fi
+
+# A file with unstaged changes is the one case where formatting in place is
+# dangerous: the formatter rewrites the *working tree*, and re-staging
+# afterwards would commit work that was deliberately left out of the index.
+# So say so and stop, rather than quietly widening a commit somebody built
+# with `git add -p`.
+partial=""
+for f in $py_files; do
+  if ! git diff --quiet -- "$f"; then partial="$partial $f"; fi
+done
+if [ -n "$partial" ]; then
+  echo "pre-commit: these files are only partly staged, so formatting them" >&2
+  echo "  in place would add work you left out of the commit:" >&2
+  for f in $partial; do echo "    $f" >&2; done
+  echo "  stage them fully, stash the rest, or use --no-verify." >&2
+  exit 1
+fi
+
+cd "$root"
+"$ruff" check --select I --fix --quiet $py_files
+"$ruff" format --quiet $py_files
+git add $py_files
