@@ -1,0 +1,5 @@
+# Mechanical reformat commits, hidden from blame:
+#   git config blame.ignoreRevsFile .git-blame-ignore-revs
+
+# reformat: ruff format + import sort (adoption of ruff.toml)
+02d02417800184fb76cd0245cdaa94c437aa4081
