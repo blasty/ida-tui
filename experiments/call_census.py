@@ -11,6 +11,7 @@ Read it as: an action costing 1-8 calls is amortised (the snippet looped inside
 the database); an action whose call count scales with the number of rows or
 symbols on screen is a round-trip-per-item bug worth fixing.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -19,7 +20,9 @@ import os
 import sys
 import time
 
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "tests"))
+sys.path.insert(
+    0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "tests")
+)
 from _fixtures import fast_keys, staged  # noqa: E402
 
 fast_keys()
@@ -64,16 +67,21 @@ class _Span:
     def __exit__(self, *exc):
         ms = (time.perf_counter() - self.t0) * 1000
         used = self.c.ops - self.ops0
-        detail = " ".join(f"{k}x{v}" if v > 1 else k
-                          for k, v in sorted(used.items(), key=lambda kv: -kv[1]))
-        print(f"  {self.label:<34} {self.c.n - self.n0:>3} calls  {ms:7.1f}ms   {detail}")
+        detail = " ".join(
+            f"{k}x{v}" if v > 1 else k
+            for k, v in sorted(used.items(), key=lambda kv: -kv[1])
+        )
+        print(
+            f"  {self.label:<34} {self.c.n - self.n0:>3} calls  {ms:7.1f}ms   {detail}"
+        )
         return False
 
 
 async def main() -> int:
     binary = os.path.abspath(sys.argv[1] if len(sys.argv) > 1 else "targets/bash")
-    async with staged(binary, lambda p: IdaTui(open_path=p, keepalive=False),
-                      prefix="idatui-census-") as target:
+    async with staged(
+        binary, lambda p: IdaTui(open_path=p, keepalive=False), prefix="idatui-census-"
+    ) as target:
         app = IdaTui(open_path=target, keepalive=False)
         census = Census()
         try:
@@ -107,8 +115,10 @@ async def main() -> int:
                         await pilot.pause(0.05)
                     await pilot.pause(0.4)
                 drained = listing_done()
-                print(f"  {'(grower finished: ' + str(drained) + ')':<34}\n"
-                      f"  -- everything below is on a QUIET backend --\n")
+                print(
+                    f"  {'(grower finished: ' + str(drained) + ')':<34}\n"
+                    f"  -- everything below is on a QUIET backend --\n"
+                )
 
                 with census.span("scroll one page (pagedown)"):
                     await pilot.press("pagedown")

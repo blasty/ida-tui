@@ -21,6 +21,7 @@ three characters — it silently returns nothing rather than erroring — so sho
 queries fall back to LIKE. Without that, typing "e" then "er" would show "no
 matches" until the third keystroke.
 """
+
 from __future__ import annotations
 
 import os
@@ -81,7 +82,8 @@ class ProjectIndex:
     def stamp(self, label: str) -> tuple[int, int, int] | None:
         """(size, mtime, entry count) recorded when ``label`` was last indexed."""
         row = self._db.execute(
-            "SELECT size, mtime, n FROM stamps WHERE binary = ?", (label,)).fetchone()
+            "SELECT size, mtime, n FROM stamps WHERE binary = ?", (label,)
+        ).fetchone()
         return tuple(row) if row else None  # type: ignore[return-value]
 
     def is_stale(self, label: str, source: str) -> bool:
@@ -99,11 +101,11 @@ class ProjectIndex:
     def reindex(self, label: str, entries, source: str | None = None) -> int:
         """Replace ``label``'s entries with ``entries`` — (kind, addr, text)
         triples. Per-binary, so re-indexing one never touches the others."""
-        rows = [(text, label, kind, int(addr))
-                for kind, addr, text in entries if text]
+        rows = [(text, label, kind, int(addr)) for kind, addr, text in entries if text]
         self._db.execute("DELETE FROM entries WHERE binary = ?", (label,))
         self._db.executemany(
-            "INSERT INTO entries(text, binary, kind, addr) VALUES(?,?,?,?)", rows)
+            "INSERT INTO entries(text, binary, kind, addr) VALUES(?,?,?,?)", rows
+        )
         size = mtime = 0
         if source:
             try:
@@ -114,7 +116,8 @@ class ProjectIndex:
         self._db.execute(
             "INSERT INTO stamps(binary, size, mtime, n) VALUES(?,?,?,?) "
             "ON CONFLICT(binary) DO UPDATE SET size=?, mtime=?, n=?",
-            (label, size, mtime, len(rows), size, mtime, len(rows)))
+            (label, size, mtime, len(rows), size, mtime, len(rows)),
+        )
         self._db.commit()
         return len(rows)
 
@@ -125,8 +128,9 @@ class ProjectIndex:
         self._db.commit()
 
     # -- query -------------------------------------------------------------- #
-    def search(self, query: str, kind: str | None = None,
-               limit: int = 500) -> list[Hit]:
+    def search(
+        self, query: str, kind: str | None = None, limit: int = 500
+    ) -> list[Hit]:
         """Substring search across every indexed binary, newest-agnostic.
 
         Uses the trigram index at >= 3 characters and falls back to a LIKE scan
@@ -189,12 +193,12 @@ class ProjectIndex:
     # -- introspection ------------------------------------------------------ #
     def counts(self) -> dict[str, int]:
         """Indexed entry count per binary."""
-        return {b: n for b, n in
-                self._db.execute("SELECT binary, n FROM stamps").fetchall()}
+        return {
+            b: n for b, n in self._db.execute("SELECT binary, n FROM stamps").fetchall()
+        }
 
     def total(self) -> int:
-        return int(self._db.execute(
-            "SELECT count(*) FROM entries").fetchone()[0])
+        return int(self._db.execute("SELECT count(*) FROM entries").fetchone()[0])
 
     def close(self) -> None:
         try:

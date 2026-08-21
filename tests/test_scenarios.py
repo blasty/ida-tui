@@ -32,27 +32,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from _fixtures import fast_keys, staged  # noqa: E402
 
 fast_keys()  # ~85ms -> ~2ms per keypress; see _fixtures.fast_keys
-from idatui import remote_ops  # noqa: E402
-from idatui.app import (  # noqa: E402
-    ConfirmScreen,
-    DecompView,
-    FunctionsPanel,
-    GraphView,
-    HexView,
-    IdaTui,
-    HelpScreen,
-    ListingView,
-    QuitScreen,
-    SearchPalette,
-    StringsPalette,
-    StructEditor,
-    SymbolPalette,
-    XrefsScreen,
-    _HELP,
-    _str_display,
-    _word_occurrences,
-)
-from idatui.errors import IDAToolError  # noqa: E402
+from rich.text import Text  # noqa: E402
 from textual.widgets import (  # noqa: E402
     DataTable,
     Input,
@@ -60,8 +40,29 @@ from textual.widgets import (  # noqa: E402
     Static,
     TextArea,
 )
-from rich.text import Text  # noqa: E402
+
+from idatui import remote_ops  # noqa: E402
 from idatui._sync import settle, wait_for  # noqa: E402
+from idatui.app import (  # noqa: E402
+    _HELP,
+    ConfirmScreen,
+    DecompView,
+    FunctionsPanel,
+    GraphView,
+    HelpScreen,
+    HexView,
+    IdaTui,
+    ListingView,
+    QuitScreen,
+    SearchPalette,
+    StringsPalette,
+    StructEditor,
+    SymbolPalette,
+    XrefsScreen,
+    _str_display,
+    _word_occurrences,
+)
+from idatui.errors import IDAToolError  # noqa: E402
 
 PASS = FAIL = 0
 STOP_AFTER = None

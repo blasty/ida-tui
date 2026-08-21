@@ -31,7 +31,7 @@ LINES = [
     "rip=0x40100b,mw=0xff4:2a000000",
     "rax=0x2a,rip=0x40100e,mr=0xff4:2a000000",
     "rbp=0x0,rsp=0x1000,rip=0x401010,mr=0xff8:0000000000000000",
-    "rip=0x401000",          # loop back: 0x401000 executes twice
+    "rip=0x401000",  # loop back: 0x401000 executes twice
     "rip=0x401001",
 ]
 
@@ -56,148 +56,220 @@ def main() -> int:
         t = Trace.load(path)
 
         check("every line is one timestamp", t.length == len(LINES), f"{t.length}")
-        check("the sidecar .info is picked up",
-              t.info is not None and t.info.arch == "x86_64" and
-              t.info.start_code == 0x401000)
-        check("PC is tracked per timestamp",
-              [t.ip(i) for i in range(6)] ==
-              [0x401000, 0x401001, 0x401004, 0x40100b, 0x40100e, 0x401010])
+        check(
+            "the sidecar .info is picked up",
+            t.info is not None
+            and t.info.arch == "x86_64"
+            and t.info.start_code == 0x401000,
+        )
+        check(
+            "PC is tracked per timestamp",
+            [t.ip(i) for i in range(6)]
+            == [0x401000, 0x401001, 0x401004, 0x40100B, 0x40100E, 0x401010],
+        )
 
         # -- register reconstruction --------------------------------------- #
-        check("a register keeps its value until it changes",
-              t.register("rsp", 0) == 0x1000 and t.register("rsp", 1) == 0xff8
-              and t.register("rsp", 4) == 0xff8 and t.register("rsp", 5) == 0x1000)
-        check("the full first line seeds every register",
-              t.register("rbx", 3) == 0)
-        check("an unknown register is None, not 0",
-              t.register("r15", 0) is None)
-        check("changed() is what the INSTRUCTION did, not the state",
-              t.changed(4) == {"rax", "rip"}, f"{t.changed(4)}")
+        check(
+            "a register keeps its value until it changes",
+            t.register("rsp", 0) == 0x1000
+            and t.register("rsp", 1) == 0xFF8
+            and t.register("rsp", 4) == 0xFF8
+            and t.register("rsp", 5) == 0x1000,
+        )
+        check("the full first line seeds every register", t.register("rbx", 3) == 0)
+        check("an unknown register is None, not 0", t.register("r15", 0) is None)
+        check(
+            "changed() is what the INSTRUCTION did, not the state",
+            t.changed(4) == {"rax", "rip"},
+            f"{t.changed(4)}",
+        )
 
         # "which instruction set this register?" — the question a trace exists
         # to answer.
-        check("last_write finds the instruction that set a value",
-              t.last_write("rax", 5) == 4 and t.last_write("rbp", 4) == 2,
-              f"{t.last_write('rax', 5)}, {t.last_write('rbp', 4)}")
-        check("next_write looks forward",
-              t.next_write("rbp", 2) == 5 and t.next_write("rbp", 5) is None)
+        check(
+            "last_write finds the instruction that set a value",
+            t.last_write("rax", 5) == 4 and t.last_write("rbp", 4) == 2,
+            f"{t.last_write('rax', 5)}, {t.last_write('rbp', 4)}",
+        )
+        check(
+            "next_write looks forward",
+            t.next_write("rbp", 2) == 5 and t.next_write("rbp", 5) is None,
+        )
 
         # -- memory --------------------------------------------------------- #
         ops = t.memory_ops(3)
-        check("a write is captured with its bytes",
-              len(ops) == 1 and ops[0].write and ops[0].addr == 0xff4
-              and ops[0].data == bytes.fromhex("2a000000"), f"{ops}")
-        check("a read is captured and marked as a read",
-              [o.write for o in t.memory_ops(4)] == [False])
+        check(
+            "a write is captured with its bytes",
+            len(ops) == 1
+            and ops[0].write
+            and ops[0].addr == 0xFF4
+            and ops[0].data == bytes.fromhex("2a000000"),
+            f"{ops}",
+        )
+        check(
+            "a read is captured and marked as a read",
+            [o.write for o in t.memory_ops(4)] == [False],
+        )
         check("an instruction with no memory has none", t.memory_ops(2) == [])
 
         # -- memory state at a timestamp ------------------------------------ #
         # The trace wrote 2a000000 at 0xff4 (t=3) and read it back (t=4); it
         # pushed/popped 8 zero bytes at 0xff8 (t=1 write, t=5 read).
-        d, k = t.memory(0xff4, 4, 3)
-        check("memory reflects a write as of that timestamp",
-              d == bytes.fromhex("2a000000") and k == b"\x01" * 4, f"{d.hex()} {k.hex()}")
-        d, k = t.memory(0xff4, 4, 2)
-        check("and does NOT reflect it before the write happened",
-              k == b"\x00" * 4, f"{d.hex()} known={k.hex()}")
+        d, k = t.memory(0xFF4, 4, 3)
+        check(
+            "memory reflects a write as of that timestamp",
+            d == bytes.fromhex("2a000000") and k == b"\x01" * 4,
+            f"{d.hex()} {k.hex()}",
+        )
+        d, k = t.memory(0xFF4, 4, 2)
+        check(
+            "and does NOT reflect it before the write happened",
+            k == b"\x00" * 4,
+            f"{d.hex()} known={k.hex()}",
+        )
 
         # A trace only knows what it saw. A byte nobody touched is unknown, and
         # must not be reported as zero — that distinction is the entire reason
         # to read memory from a trace instead of from the database.
         d, k = t.memory(0x5000, 4, t.length - 1)
-        check("untouched memory is unknown, not zero",
-              k == b"\x00" * 4 and d == b"\x00" * 4, f"known={k.hex()}")
+        check(
+            "untouched memory is unknown, not zero",
+            k == b"\x00" * 4 and d == b"\x00" * 4,
+            f"known={k.hex()}",
+        )
         # 0xff2..0xff3 was never touched; 0xff4..0xff7 came from the write at
         # t=3 and 0xff8..0xff9 from the push at t=1 — a window can be knowable
         # from several accesses at different times, which is what makes this
         # worth a mask rather than a flag.
-        d, k = t.memory(0xff2, 8, 4)
-        check("a partially-covered window marks which bytes are known",
-              k == bytes([0, 0, 1, 1, 1, 1, 1, 1]), f"known={k.hex()}")
+        d, k = t.memory(0xFF2, 8, 4)
+        check(
+            "a partially-covered window marks which bytes are known",
+            k == bytes([0, 0, 1, 1, 1, 1, 1, 1]),
+            f"known={k.hex()}",
+        )
 
         # Reads are evidence too: an instruction reading a byte reveals what it
         # held at that moment.
-        d, k = t.memory(0xff8, 8, 5)
-        check("a read reveals memory contents",
-              k == b"\x01" * 8, f"known={k.hex()}")
+        d, k = t.memory(0xFF8, 8, 5)
+        check("a read reveals memory contents", k == b"\x01" * 8, f"known={k.hex()}")
 
-        check("memory_writes lists only the writers",
-              t.memory_writes(0xff4, 4) == [3], f"{t.memory_writes(0xff4, 4)}")
-        check("memory_accesses includes the readers",
-              t.memory_accesses(0xff4, 4) == [3, 4], f"{t.memory_accesses(0xff4, 4)}")
-        check("a never-touched range has no accesses",
-              t.memory_accesses(0x5000, 16) == [])
+        check(
+            "memory_writes lists only the writers",
+            t.memory_writes(0xFF4, 4) == [3],
+            f"{t.memory_writes(0xFF4, 4)}",
+        )
+        check(
+            "memory_accesses includes the readers",
+            t.memory_accesses(0xFF4, 4) == [3, 4],
+            f"{t.memory_accesses(0xFF4, 4)}",
+        )
+        check(
+            "a never-touched range has no accesses", t.memory_accesses(0x5000, 16) == []
+        )
 
         # -- execution queries: what painting is built on -------------------- #
-        check("executions lists every timestamp for an address",
-              list(t.executions(0x401000)) == [0, 6], f"{list(t.executions(0x401000))}")
-        check("a never-executed address has none", not len(t.executions(0xdead)))
-        check("executions_between windows the result",
-              t.executions_between(0x401000, 1, 7) == [6])
-        check("next/prev execution step between hits",
-              t.next_execution(0x401000, 0) == 6
-              and t.prev_execution(0x401000, 6) == 0
-              and t.next_execution(0x401000, 6) is None)
+        check(
+            "executions lists every timestamp for an address",
+            list(t.executions(0x401000)) == [0, 6],
+            f"{list(t.executions(0x401000))}",
+        )
+        check("a never-executed address has none", not len(t.executions(0xDEAD)))
+        check(
+            "executions_between windows the result",
+            t.executions_between(0x401000, 1, 7) == [6],
+        )
+        check(
+            "next/prev execution step between hits",
+            t.next_execution(0x401000, 0) == 6
+            and t.prev_execution(0x401000, 6) == 0
+            and t.next_execution(0x401000, 6) is None,
+        )
 
         # A pseudocode line covers MANY addresses, so the set form is the one
         # decompiler painting will call — per-address lookups would mean one
         # dict hit per instruction per repaint.
-        check("hits() counts a whole set of addresses at once",
-              t.hits([0x401000, 0x401001, 0x401004, 0xdead]) ==
-              {0x401000: 2, 0x401001: 2, 0x401004: 1},
-              f"{t.hits([0x401000, 0x401001, 0x401004, 0xdead])}")
+        check(
+            "hits() counts a whole set of addresses at once",
+            t.hits([0x401000, 0x401001, 0x401004, 0xDEAD])
+            == {0x401000: 2, 0x401001: 2, 0x401004: 1},
+            f"{t.hits([0x401000, 0x401001, 0x401004, 0xDEAD])}",
+        )
 
         # -- rebasing -------------------------------------------------------- #
         # A traced process is relocated; nothing lines up until the slide is
         # found. Page offsets survive relocation, which is what makes it
         # findable.
-        db = [0x1000 + (a - 0x401000) for a in
-              (0x401000, 0x401001, 0x401004, 0x40100b, 0x40100e, 0x401010)]
+        db = [
+            0x1000 + (a - 0x401000)
+            for a in (0x401000, 0x401001, 0x401004, 0x40100B, 0x40100E, 0x401010)
+        ]
         slide = t.rebase(db)
-        check("the slide between trace and database is found",
-              slide == 0x1000 - 0x401000, f"{slide:#x}")
+        check(
+            "the slide between trace and database is found",
+            slide == 0x1000 - 0x401000,
+            f"{slide:#x}",
+        )
         t.apply_slide(slide)
-        check("addresses come back in database terms",
-              t.ip(0) == 0x1000 and list(t.executions(0x1000)) == [0, 6],
-              f"{t.ip(0):#x}")
+        check(
+            "addresses come back in database terms",
+            t.ip(0) == 0x1000 and list(t.executions(0x1000)) == [0, 6],
+            f"{t.ip(0):#x}",
+        )
         # Memory addresses are NOT slid: the slide relocates the image, and
         # these are overwhelmingly stack/heap addresses with no database
         # counterpart — sliding a stack pointer by the image delta produced a
         # negative address in testing.
-        check("memory op addresses stay in trace space",
-              t.memory_ops(3)[0].addr == 0xff4, f"{t.memory_ops(3)[0].addr:#x}")
-        check("raw_ip still gives the traced address",
-              t.raw_ip(0) == 0x401000)
+        check(
+            "memory op addresses stay in trace space",
+            t.memory_ops(3)[0].addr == 0xFF4,
+            f"{t.memory_ops(3)[0].addr:#x}",
+        )
+        check("raw_ip still gives the traced address", t.raw_ip(0) == 0x401000)
 
         t2 = Trace.load(path)
         # Page offsets that appear nowhere in the trace. (0xdead0000/0xdead0004
         # would NOT do: they sit at the same offsets as two traced addresses and
         # so legitimately agree on a slide — a reminder that this matches on
         # offsets, not on addresses looking plausible.)
-        check("no match means no slide, not a wrong one",
-              t2.rebase([0xdead0555, 0xbeef0777]) == 0,
-              f"{t2.rebase([0xdead0555, 0xbeef0777]):#x}")
-        check("one lone agreeing address is not enough to claim a slide",
-              t2.rebase([0x1000]) == 0, f"{t2.rebase([0x1000]):#x}")
+        check(
+            "no match means no slide, not a wrong one",
+            t2.rebase([0xDEAD0555, 0xBEEF0777]) == 0,
+            f"{t2.rebase([0xDEAD0555, 0xBEEF0777]):#x}",
+        )
+        check(
+            "one lone agreeing address is not enough to claim a slide",
+            t2.rebase([0x1000]) == 0,
+            f"{t2.rebase([0x1000]):#x}",
+        )
         check("an empty database is harmless", t2.rebase([]) == 0)
 
         # -- robustness ------------------------------------------------------ #
         p2 = os.path.join(tmp, "odd.0.log")
         with open(p2, "w") as f:
-            f.write("\n".join([
-                FULL + ",rip=0x401000",
-                "",                              # blank line
-                "rax=0xnothex,rip=0x401001",     # unparseable value
-                "rbx=0x1",                       # no PC at all
-                "rip=0x401002,mw=0x10:zz",       # unparseable memory
-            ]) + "\n")
+            f.write(
+                "\n".join(
+                    [
+                        FULL + ",rip=0x401000",
+                        "",  # blank line
+                        "rax=0xnothex,rip=0x401001",  # unparseable value
+                        "rbx=0x1",  # no PC at all
+                        "rip=0x401002,mw=0x10:zz",  # unparseable memory
+                    ]
+                )
+                + "\n"
+            )
         t3 = Trace.load(p2)
-        check("a malformed trace loads instead of raising", t3.length == 4,
-              f"{t3.length}")
-        check("a line with no PC inherits the previous one",
-              t3.ip(2) == 0x401001, f"{t3.ip(2):#x}")
-        check("an unparseable memory entry is dropped, not fatal",
-              t3.memory_ops(3) == [])
+        check(
+            "a malformed trace loads instead of raising", t3.length == 4, f"{t3.length}"
+        )
+        check(
+            "a line with no PC inherits the previous one",
+            t3.ip(2) == 0x401001,
+            f"{t3.ip(2):#x}",
+        )
+        check(
+            "an unparseable memory entry is dropped, not fatal", t3.memory_ops(3) == []
+        )
 
     print(f"\n{PASS} passed, {FAIL} failed")
     return 1 if FAIL else 0

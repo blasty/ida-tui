@@ -3,6 +3,7 @@
 
 Pure: no IDA, no worker, no Textual.
 """
+
 from __future__ import annotations
 
 import os
@@ -41,10 +42,16 @@ def t_swallow_keeps_going():
     r = diag.recent()
     check("the error is recorded", len(r) == 1, str(r))
     check("with what was being attempted", r[0]["what"] == "a thing", str(r[0]))
-    check("and the exception type and message",
-          r[0]["error"] == "ValueError: nope", r[0]["error"])
-    check("and where it was actually raised",
-          r[0]["where"].startswith("test_diag.py:"), r[0]["where"])
+    check(
+        "and the exception type and message",
+        r[0]["error"] == "ValueError: nope",
+        r[0]["error"],
+    )
+    check(
+        "and where it was actually raised",
+        r[0]["where"].startswith("test_diag.py:"),
+        r[0]["where"],
+    )
 
 
 def t_reraise():
@@ -61,8 +68,11 @@ def t_reraise():
         check("reraise lets the listed type through", False, "not raised")
     except Wanted:
         check("reraise lets the listed type through", True)
-    check("and a reraised error is not recorded twice",
-          diag.recent() == [], str(diag.recent()))
+    check(
+        "and a reraised error is not recorded twice",
+        diag.recent() == [],
+        str(diag.recent()),
+    )
     with diag.swallow("still swallows others", reraise=(Wanted,)):
         raise ValueError("other")
     check("other types are still swallowed", len(diag.recent()) == 1)
@@ -74,12 +84,21 @@ def t_ring_is_bounded():
         diag.note(f"item {i}", RuntimeError(str(i)))
     r = diag.recent(1000)
     check("the ring is bounded", len(r) == diag._MAX, f"{len(r)}")
-    check("it keeps the NEWEST entries",
-          r[-1]["what"] == f"item {diag._MAX + 24}", r[-1]["what"])
-    check("recent(n) returns the last n, newest last",
-          [e["what"] for e in diag.recent(3)]
-          == [f"item {diag._MAX + 22}", f"item {diag._MAX + 23}",
-              f"item {diag._MAX + 24}"], str(diag.recent(3)))
+    check(
+        "it keeps the NEWEST entries",
+        r[-1]["what"] == f"item {diag._MAX + 24}",
+        r[-1]["what"],
+    )
+    check(
+        "recent(n) returns the last n, newest last",
+        [e["what"] for e in diag.recent(3)]
+        == [
+            f"item {diag._MAX + 22}",
+            f"item {diag._MAX + 23}",
+            f"item {diag._MAX + 24}",
+        ],
+        str(diag.recent(3)),
+    )
 
 
 def t_log_file():
@@ -95,8 +114,11 @@ def t_log_file():
         body = open(path, encoding="utf-8").read()
         check("the log records what was attempted", "logged thing" in body, body[:200])
         check("and the error", "KeyError" in body, body[:200])
-        check("and a traceback, which the ring doesn't carry",
-              "Traceback" in body and "t_log_file" in body, body[:300])
+        check(
+            "and a traceback, which the ring doesn't carry",
+            "Traceback" in body and "t_log_file" in body,
+            body[:300],
+        )
 
 
 def t_log_is_off_by_default():
@@ -104,8 +126,10 @@ def t_log_is_off_by_default():
     os.environ.pop("IDATUI_LOG", None)
     with diag.swallow("unlogged"):
         raise ValueError("x")
-    check("without $IDATUI_LOG nothing is written, but the ring still has it",
-          len(diag.recent()) == 1)
+    check(
+        "without $IDATUI_LOG nothing is written, but the ring still has it",
+        len(diag.recent()) == 1,
+    )
 
 
 def t_broken_log_path_is_harmless():
@@ -116,8 +140,7 @@ def t_broken_log_path_is_harmless():
         with diag.swallow("still fine"):
             raise ValueError("boom")
         check("an unwritable log path doesn't raise", True)
-        check("and the error is still recorded in the ring",
-              len(diag.recent()) == 1)
+        check("and the error is still recorded in the ring", len(diag.recent()) == 1)
     finally:
         os.environ.pop("IDATUI_LOG", None)
 
@@ -128,41 +151,55 @@ def t_env_read_per_call():
     diag.clear()
     with tempfile.TemporaryDirectory() as d:
         path = os.path.join(d, "late.log")
-        os.environ["IDATUI_LOG"] = path      # set AFTER import
+        os.environ["IDATUI_LOG"] = path  # set AFTER import
         try:
             diag.log("hello")
         finally:
             os.environ.pop("IDATUI_LOG", None)
-        check("a log path set after import is honoured",
-              os.path.exists(path) and "hello" in open(path).read())
+        check(
+            "a log path set after import is honoured",
+            os.path.exists(path) and "hello" in open(path).read(),
+        )
 
 
 def t_thread_safe():
     diag.clear()
+
     def go(n):
         for i in range(40):
             diag.note(f"t{n}-{i}", RuntimeError("x"))
+
     ts = [threading.Thread(target=go, args=(n,)) for n in range(6)]
     for t in ts:
         t.start()
     for t in ts:
         t.join(10)
     r = diag.recent(1000)
-    check("concurrent notes don't corrupt the ring",
-          len(r) == diag._MAX and all("what" in e for e in r), f"{len(r)}")
-    check("the recording thread is captured",
-          all(e["thread"] for e in r))
+    check(
+        "concurrent notes don't corrupt the ring",
+        len(r) == diag._MAX and all("what" in e for e in r),
+        f"{len(r)}",
+    )
+    check("the recording thread is captured", all(e["thread"] for e in r))
 
 
 def main() -> int:
-    for fn in (t_swallow_keeps_going, t_reraise, t_ring_is_bounded, t_log_file,
-               t_log_is_off_by_default, t_broken_log_path_is_harmless,
-               t_env_read_per_call, t_thread_safe):
+    for fn in (
+        t_swallow_keeps_going,
+        t_reraise,
+        t_ring_is_bounded,
+        t_log_file,
+        t_log_is_off_by_default,
+        t_broken_log_path_is_harmless,
+        t_env_read_per_call,
+        t_thread_safe,
+    ):
         print(f"\n{fn.__name__}")
         try:
             fn()
         except Exception as e:  # noqa: BLE001
             import traceback
+
             check(f"{fn.__name__} did not crash", False, f"{type(e).__name__}: {e}")
             traceback.print_exc()
     diag.clear()

@@ -5,15 +5,15 @@ from __future__ import annotations
 import os
 import queue
 import sys
+import tempfile
 import threading
 import time
-import tempfile
 from dataclasses import dataclass
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from idatui.errors import IDAConnectionError, IDAToolError  # noqa: E402
-from idatui import remote_ops  # noqa: E402
 import idatui.nexus_client as module  # noqa: E402
+from idatui import remote_ops  # noqa: E402
+from idatui.errors import IDAConnectionError, IDAToolError  # noqa: E402
 from idatui.nexus_client import NexusClient, _parse_load_args  # noqa: E402
 
 #: Pure: fakes the DatabaseHandle, never touches IDA or the IDA Nexus library.
@@ -215,10 +215,7 @@ class FakeRemoteModule:
                 operation_label=label,
             )
             result = response["result"]
-            if (
-                isinstance(result, dict)
-                and result.get("__remote_ida_status__") == "ok"
-            ):
+            if isinstance(result, dict) and result.get("__remote_ida_status__") == "ok":
                 return result.get("__remote_ida_value__")
             raise module.RemoteError(name, f"remote call failed: {result!r}", 500)
 
@@ -232,6 +229,7 @@ def _open_kwargs_are_real(sent: dict):
     """
     try:
         import inspect
+
         from ida_nexus import DatabaseHandle as Real
     except ImportError:
         return True, "ida_nexus not installed - signature not checked"
@@ -249,6 +247,7 @@ def _option_fields_are_real(options):
     """
     try:
         import dataclasses
+
         from ida_nexus import DatabaseOpenOptions as Real
     except ImportError:
         return True, "ida_nexus not installed - fields not checked"

@@ -37,26 +37,28 @@ from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.geometry import Region, Size
 from textual.message import Message
 from textual.reactive import reactive
-from textual.theme import Theme
 from textual.screen import ModalScreen
 from textual.scroll_view import ScrollView
 from textual.strip import Strip
+from textual.theme import Theme
 from textual.widgets import (
-    DataTable, Input, OptionList, Static, TextArea,
+    DataTable,
+    Input,
+    OptionList,
+    Static,
+    TextArea,
 )
 from textual.widgets.option_list import Option
 
-from . import diag, graph, kittygfx
+from . import diag, findings, graph, kittygfx, search
+from .domain import Func, Head, ListingModel, Program, Struct
 from .edit_ctl import EditController
-from .prompt import PromptBar
-from .trace_ctl import TraceController
-from . import findings, search
+from .errors import IDAConnectionError
 from .highlight import CTextArea, highlight_c
 from .journal import Journal
-
-from .errors import IDAConnectionError
 from .nexus_client import NexusClient, registered_database
-from .domain import Func, Head, ListingModel, Program, Struct
+from .prompt import PromptBar
+from .trace_ctl import TraceController
 
 # Styles for the disassembly listing.
 _S_ADDR = Style(color="#6b7684")
@@ -68,28 +70,28 @@ _S_INSN = Style(color="#c3cad3")
 #: text), HUES only where they mean something (numbers, strings, symbols),
 #: structure recedes so brackets and commas stop competing with operands.
 _S_SPAN = {
-    "insn": Style(color="#e8ecf2"),      # 15.3:1  mnemonic / directive
-    "reg": Style(color="#c3cad3"),       # 11.0:1  registers = body weight
-    "num": Style(color="#d8a657"),       #  8.2:1  immediates, offsets
-    "str": Style(color="#9ece6a"),       #  9.9:1  string literals
-    "name": Style(color="#7aa2f7"),      #  7.2:1  symbols / xref targets
-    "seg": Style(color="#93aee0"),       #  8.1:1  segment names
-    "cmt": Style(color="#7c8b9e", italic=True),   # 5.2:1
-    "punct": Style(color="#626c7a"),     #  3.4:1  brackets, commas, +/-
-    "err": Style(color="#c9762f"),       #         IDA's own error marker
-    "text": Style(color="#c3cad3"),      # 11.0:1  anything unclassified
+    "insn": Style(color="#e8ecf2"),  # 15.3:1  mnemonic / directive
+    "reg": Style(color="#c3cad3"),  # 11.0:1  registers = body weight
+    "num": Style(color="#d8a657"),  #  8.2:1  immediates, offsets
+    "str": Style(color="#9ece6a"),  #  9.9:1  string literals
+    "name": Style(color="#7aa2f7"),  #  7.2:1  symbols / xref targets
+    "seg": Style(color="#93aee0"),  #  8.1:1  segment names
+    "cmt": Style(color="#7c8b9e", italic=True),  # 5.2:1
+    "punct": Style(color="#626c7a"),  #  3.4:1  brackets, commas, +/-
+    "err": Style(color="#c9762f"),  #         IDA's own error marker
+    "text": Style(color="#c3cad3"),  # 11.0:1  anything unclassified
 }
 _S_MNEM = Style(color="#e8ecf2")
 _S_OPBYTES = Style(color="#5e6875")  # raw opcode bytes column
 _S_DATA = Style(color="#d8a657")
 _S_UNK = Style(color="#7c8b9e", italic=True)  # undefined bytes in the flat listing
 _S_MEMBER = Style(color="#93aee0")
-_S_SEP = Style(color="#5e6875")      # function boundary separators / banners
+_S_SEP = Style(color="#5e6875")  # function boundary separators / banners
 _S_FUNCHDR = Style(color="#7aa2f7", bold=True)  # 'name proc'/'endp' headers
 
-_LST_INDENT = "    "   # one depth level: function names sit at level 0, code at 1
-_OP_LIMIT = 8         # opcode bytes shown in the 'limited' column mode
-_JUMP_CONTEXT = 4     # lines of context kept above a jump target (cursor stays on it)
+_LST_INDENT = "    "  # one depth level: function names sit at level 0, code at 1
+_OP_LIMIT = 8  # opcode bytes shown in the 'limited' column mode
+_JUMP_CONTEXT = 4  # lines of context kept above a jump target (cursor stays on it)
 _SPLIT_MIN_WIDTH = 100  # need room for two usable code panes side by side
 
 
@@ -117,10 +119,10 @@ class ViewMode(StrEnum):
     the next one has fewer places to reach.
     """
 
-    LISTING = "listing"   # the unified continuous listing (code + data)
-    DECOMP = "decomp"     # Hex-Rays pseudocode
-    HEX = "hex"           # the hex viewer
-    GRAPH = "graph"       # the CFG graph view
+    LISTING = "listing"  # the unified continuous listing (code + data)
+    DECOMP = "decomp"  # Hex-Rays pseudocode
+    HEX = "hex"  # the hex viewer
+    GRAPH = "graph"  # the CFG graph view
 
     #: The two that show a code view over a NavEntry, i.e. where a follow, an
     #: xref or a rename makes sense.
@@ -128,21 +130,47 @@ class ViewMode(StrEnum):
     def code_modes(cls) -> frozenset["ViewMode"]:
         return frozenset({cls.LISTING, cls.DECOMP, cls.GRAPH})
 
+
 # Tokens that look like identifiers but aren't renamable symbols (so 'n' on them
 # in the listing names the address instead of trying to rename the token).
-_ASM_KEYWORDS = frozenset({
-    "db", "dw", "dd", "dq", "dt", "byte", "word", "dword", "qword", "tbyte",
-    "offset", "short", "near", "far", "ptr", "dup", "cs", "ds", "es", "fs",
-    "gs", "ss", "align", "public", "assume", "end",
-})
+_ASM_KEYWORDS = frozenset(
+    {
+        "db",
+        "dw",
+        "dd",
+        "dq",
+        "dt",
+        "byte",
+        "word",
+        "dword",
+        "qword",
+        "tbyte",
+        "offset",
+        "short",
+        "near",
+        "far",
+        "ptr",
+        "dup",
+        "cs",
+        "ds",
+        "es",
+        "fs",
+        "gs",
+        "ss",
+        "align",
+        "public",
+        "assume",
+        "end",
+    }
+)
 _S_CURSOR = Style(bgcolor="#2a313c")
 #: Execution trails. Deliberately faint: they sit UNDER the code palette and
 #: must not compete with it — the trail says "you came through here", the text
 #: still has to be readable as code. Now is the loudest because there is exactly
 #: one of it.
 _S_TRAIL_NOW = Style(bgcolor="#3f3410")
-_S_TRAIL_PAST = Style(bgcolor="#2b1c17")     # warm: behind you
-_S_TRAIL_FUTURE = Style(bgcolor="#152230")   # cool: ahead of you
+_S_TRAIL_PAST = Style(bgcolor="#2b1c17")  # warm: behind you
+_S_TRAIL_FUTURE = Style(bgcolor="#152230")  # cool: ahead of you
 #: Hex with a trace loaded: bytes the trace SAW at this timestamp vs bytes we're
 #: still showing from the file. The distinction matters more than the values —
 #: one is evidence, the other is an assumption.
@@ -157,12 +185,12 @@ _S_WORD = Style(bgcolor="#2a3f5f")  # identifier under the cursor
 #: _S_WORD (which marks every occurrence of an identifier): this marks ONE span,
 #: the thing a keypress acts on, so it reads as a selection rather than a match.
 _S_OPERAND = Style(bgcolor="#3a3560", underline=True)
-_S_CELL = Style(reverse=True)      # the block cursor cell
-_S_LINENO = Style(color="#626c7a")             # pseudocode line-number gutter
+_S_CELL = Style(reverse=True)  # the block cursor cell
+_S_LINENO = Style(color="#626c7a")  # pseudocode line-number gutter
 _S_LINENO_CUR = Style(color="#c3cad3", bold=True)  # gutter on the cursor line
-_S_DECOMP_SPIN = Style(color="#d0a215", bold=True)   # 'decompiling' spinner glyph
+_S_DECOMP_SPIN = Style(color="#d0a215", bold=True)  # 'decompiling' spinner glyph
 _S_DECOMP_WAIT = Style(color="#7c8b9e", italic=True)  # 'decompiling' label
-_S_DECOMP_DOTS = Style(color="#626c7a")               # trailing ellipsis
+_S_DECOMP_DOTS = Style(color="#626c7a")  # trailing ellipsis
 _S_LINK = Style(bgcolor="#233044")  # split view: rows linked to the other pane's cursor
 
 # Hex-Rays appends a `/*0xEA*/` address marker to each pseudocode line (we fetch
@@ -206,8 +234,8 @@ class ViewAnchor:
     """
 
     view: str = "listing"
-    ea: int | None = None          # cursor address
-    top_ea: int | None = None      # first visible address
+    ea: int | None = None  # cursor address
+    top_ea: int | None = None  # first visible address
     cursor_x: int = 0
     flash: str | None = None
     #: The edit changed which functions exist, so the index must be rebuilt.
@@ -218,12 +246,12 @@ class ViewAnchor:
 class NavEntry:
     ea: int
     name: str
-    cursor: int = 0        # disasm line (instruction index)
-    cursor_x: int = 0      # disasm column
-    scroll_y: int = -1     # disasm viewport top (-1 = derive from cursor)
-    dec_cursor: int = 0    # pseudocode line
+    cursor: int = 0  # disasm line (instruction index)
+    cursor_x: int = 0  # disasm column
+    scroll_y: int = -1  # disasm viewport top (-1 = derive from cursor)
+    dec_cursor: int = 0  # pseudocode line
     dec_cursor_x: int = 0  # pseudocode column
-    dec_scroll_y: int = -1 # pseudocode viewport top (-1 = derive)
+    dec_scroll_y: int = -1  # pseudocode viewport top (-1 = derive)
     dec_scroll_x: int = 0  # pseudocode horizontal scroll
     is_region: bool = False  # not inside a function (flat listing view)
     view: str = "listing"  # which code view to restore this entry in
@@ -417,7 +445,9 @@ def _overlay_over(strip: Strip, ranges: list[tuple[int, int]], style: Style) -> 
         if a > pos:
             parts.append(strip.crop(pos, a))
         mid = strip.crop(a, b)
-        parts.append(Strip([Segment(s.text, (s.style or Style()) + style) for s in mid]))
+        parts.append(
+            Strip([Segment(s.text, (s.style or Style()) + style) for s in mid])
+        )
         pos = b
     if pos < total:
         parts.append(strip.crop(pos, total))
@@ -638,11 +668,11 @@ class _MatchRanges:
     __slots__ = ("_lines", "_needle", "_n", "_ci", "_text", "_cache")
 
     def __init__(self, lines, needle: str, n: int, ci: bool, text) -> None:
-        self._lines = lines            # set[int]
-        self._needle = needle          # already case-folded when ci
-        self._n = n                    # len(term); the needle may be folded
+        self._lines = lines  # set[int]
+        self._needle = needle  # already case-folded when ci
+        self._n = n  # len(term); the needle may be folded
         self._ci = ci
-        self._text = text              # callable: line index -> str | None
+        self._text = text  # callable: line index -> str | None
         self._cache: dict[int, list[tuple[int, int]]] = {}
 
     def _find(self, i: int) -> list[tuple[int, int]]:
@@ -770,7 +800,7 @@ class SearchMixin:
                 starts.append(pos)
                 parts.append(s)
                 pos += len(s) + 1
-        while len(starts) < count:      # a short window: keep the indices lined up
+        while len(starts) < count:  # a short window: keep the indices lined up
             starts.append(pos)
             parts.append("")
             pos += 1
@@ -831,8 +861,11 @@ class SearchMixin:
     def _after_incremental(self) -> None:
         self._compute_matches()
         self.refresh()
-        self._jump_from(getattr(self, "_search_origin", 0),
-                        getattr(self, "_search_dir", 1), include_current=True)
+        self._jump_from(
+            getattr(self, "_search_origin", 0),
+            getattr(self, "_search_dir", 1),
+            include_current=True,
+        )
         n = len(self._matches)
         self._app_status(f"/{self._term}   {n} match{'' if n == 1 else 'es'}")
 
@@ -840,13 +873,23 @@ class SearchMixin:
         if not self._matches:
             return
         if direction >= 0:
-            nxt = next((m for m in self._matches
-                        if (m >= origin if include_current else m > origin)),
-                       self._matches[0])
+            nxt = next(
+                (
+                    m
+                    for m in self._matches
+                    if (m >= origin if include_current else m > origin)
+                ),
+                self._matches[0],
+            )
         else:
-            nxt = next((m for m in reversed(self._matches)
-                        if (m <= origin if include_current else m < origin)),
-                       self._matches[-1])
+            nxt = next(
+                (
+                    m
+                    for m in reversed(self._matches)
+                    if (m <= origin if include_current else m < origin)
+                ),
+                self._matches[-1],
+            )
         self._goto_line(nxt)
 
     def search_commit(self) -> None:
@@ -860,7 +903,9 @@ class SearchMixin:
         self._reset_search_cache()
         self.cursor = getattr(self, "_search_origin", self.cursor)
         self.cursor_x = getattr(self, "_search_origin_x", self.cursor_x)
-        self.scroll_to(y=max(self.cursor - self._visible_height() // 2, 0), animate=False)
+        self.scroll_to(
+            y=max(self.cursor - self._visible_height() // 2, 0), animate=False
+        )
         self.refresh()
 
     def repeat_last(self, direction: int) -> None:
@@ -870,8 +915,13 @@ class SearchMixin:
             return
         self._term = term
         self._ci = term.islower()
-        self._search_ensure(lambda: (self._compute_matches(), self.refresh(),
-                                     self.search_repeat(direction)))
+        self._search_ensure(
+            lambda: (
+                self._compute_matches(),
+                self.refresh(),
+                self.search_repeat(direction),
+            )
+        )
 
     def _compute_matches(self) -> None:
         term = self._term
@@ -910,8 +960,7 @@ class SearchMixin:
                 # finding every further occurrence in it.
                 nxt = starts[line + 1] if line + 1 < nlines else blen
                 j = body.find(needle, nxt)
-            ranges = _MatchRanges(set(matches), needle, n, ci,
-                                  self._search_line_text)
+            ranges = _MatchRanges(set(matches), needle, n, ci, self._search_line_text)
         else:
             # Typing forward can only ever REMOVE lines: a line holding "mov"
             # holds "mo". So when the term just grew (and nothing else moved --
@@ -923,8 +972,14 @@ class SearchMixin:
             # been looked at, and narrowing would silently never find them.
             rows: object = range(count)
             prev = self._matched_key
-            if (prev is not None and prev[2] == count and prev[3] == src
-                    and prev[1] == ci and term.startswith(prev[0]) and prev[0]):
+            if (
+                prev is not None
+                and prev[2] == count
+                and prev[3] == src
+                and prev[1] == ci
+                and term.startswith(prev[0])
+                and prev[0]
+            ):
                 rows = self._matches
             text_of = self._search_line_text
             for i in rows:
@@ -948,10 +1003,18 @@ class SearchMixin:
             return
         cur = self.cursor
         if direction >= 0:
-            nxt = next((m for m in self._matches
-                        if (m >= cur if include_current else m > cur)), self._matches[0])
+            nxt = next(
+                (
+                    m
+                    for m in self._matches
+                    if (m >= cur if include_current else m > cur)
+                ),
+                self._matches[0],
+            )
         else:
-            nxt = next((m for m in reversed(self._matches) if m < cur), self._matches[-1])
+            nxt = next(
+                (m for m in reversed(self._matches) if m < cur), self._matches[-1]
+            )
         self._goto_line(nxt)
         k = self._matches.index(nxt) + 1
         self._app_status(f"/{self._term}/  {k}/{len(self._matches)}  line {nxt}")
@@ -963,7 +1026,9 @@ class SearchMixin:
         ranges = self._ranges.get(self.cursor)
         if ranges:
             self.cursor_x = ranges[0][0]
-        self.scroll_to(y=max(self.cursor - self._visible_height() // 2, 0), animate=False)
+        self.scroll_to(
+            y=max(self.cursor - self._visible_height() // 2, 0), animate=False
+        )
         self._hscroll()  # bring the match column into horizontal view
         self.refresh()
         self._refresh_hl()
@@ -1054,8 +1119,8 @@ class ListingView(SearchMixin, NavMixin, ColumnCursor, ScrollView, can_focus=Tru
         self._term = ""
         self._matches: list[int] = []
         self._ranges: dict[int, list[tuple[int, int]]] = {}
-        self._op_mode = 1       # opcode column: 0=off, 1=limited, 2=full ('o' cycles)
-        self._op_w = 0          # char width of the hex-bytes field (excl. gap)
+        self._op_mode = 1  # opcode column: 0=off, 1=limited, 2=full ('o' cycles)
+        self._op_w = 0  # char width of the hex-bytes field (excl. gap)
         self._search_loading = False
         self._search_pending: list = []  # done-callbacks awaiting the load
         self._link_rows: set[int] = set()  # split-view: linked instruction rows
@@ -1161,9 +1226,15 @@ class ListingView(SearchMixin, NavMixin, ColumnCursor, ScrollView, can_focus=Tru
         self._refresh_hl()
 
     # -- public API -------------------------------------------------------- #
-    def load(self, model: ListingModel, name: str, cursor: int = 0,
-             cursor_x: int = 0, scroll_y: int | None = None,
-             focus: str | None = None) -> None:
+    def load(
+        self,
+        model: ListingModel,
+        name: str,
+        cursor: int = 0,
+        cursor_x: int = 0,
+        scroll_y: int | None = None,
+        focus: str | None = None,
+    ) -> None:
         previous, self.model = self.model, model
         self._name = name
         self.total = 0
@@ -1265,8 +1336,10 @@ class ListingView(SearchMixin, NavMixin, ColumnCursor, ScrollView, can_focus=Tru
         self._reset_search_cache(body=True)
         self._clamp_x()
         self.refresh()
-        self._app_status("opcodes: " + {0: "off", 1: f"limited ({_OP_LIMIT} bytes)",
-                                        2: "full"}[self._op_mode])
+        self._app_status(
+            "opcodes: "
+            + {0: "off", 1: f"limited ({_OP_LIMIT} bytes)", 2: "full"}[self._op_mode]
+        )
 
     @work(thread=True, exclusive=True, group="listing-grow")
     def _grow(self) -> None:
@@ -1355,20 +1428,28 @@ class ListingView(SearchMixin, NavMixin, ColumnCursor, ScrollView, can_focus=Tru
         if h is None:
             strip = Strip([Segment(f"  {idx:>8}  …", _S_DIM)])
         elif h.kind == "sep":
-            strip = Strip([Segment(f"{h.ea:08X}  ", _S_ADDR),
-                           Segment(_LST_INDENT + h.text, _S_SEP)])
+            strip = Strip(
+                [
+                    Segment(f"{h.ea:08X}  ", _S_ADDR),
+                    Segment(_LST_INDENT + h.text, _S_SEP),
+                ]
+            )
         elif h.kind == "funchdr":
             # depth-0: address + 'name proc'/'endp' (no indent)
-            strip = Strip([Segment(f"{h.ea:08X}  ", _S_ADDR),
-                           Segment(h.text, _S_FUNCHDR)])
+            strip = Strip(
+                [Segment(f"{h.ea:08X}  ", _S_ADDR), Segment(h.text, _S_FUNCHDR)]
+            )
         elif h.kind == "label":
             # depth-0: address + 'loc_XXX:' on its own line
-            strip = Strip([Segment(f"{h.ea:08X}  ", _S_ADDR),
-                           Segment(h.text, _S_LABEL)])
+            strip = Strip(
+                [Segment(f"{h.ea:08X}  ", _S_ADDR), Segment(h.text, _S_LABEL)]
+            )
         else:
             # depth-1: address, one indent, then opcode+text
-            segs: list[Segment] = [Segment(f"{h.ea:08X}  ", _S_ADDR),
-                                   Segment(_LST_INDENT, _S_INSN)]
+            segs: list[Segment] = [
+                Segment(f"{h.ea:08X}  ", _S_ADDR),
+                Segment(_LST_INDENT, _S_INSN),
+            ]
             op = self._op_field(h)
             if op:
                 segs.append(Segment(op, _S_OPBYTES))
@@ -1389,8 +1470,12 @@ class ListingView(SearchMixin, NavMixin, ColumnCursor, ScrollView, can_focus=Tru
             kind = self.trail.get(h.ea)
             if kind is not None:
                 strip = strip.apply_style(
-                    _S_TRAIL_NOW if kind == "now" else
-                    _S_TRAIL_PAST if kind == "past" else _S_TRAIL_FUTURE)
+                    _S_TRAIL_NOW
+                    if kind == "now"
+                    else _S_TRAIL_PAST
+                    if kind == "past"
+                    else _S_TRAIL_FUTURE
+                )
         plain = self._line_plain(idx) if (self._hl_word or idx == self.cursor) else None
         if idx in self._ranges:
             strip = _overlay_ranges(strip, self._ranges[idx], self._match_style(idx))
@@ -1686,8 +1771,15 @@ class DecompView(SearchMixin, NavMixin, ColumnCursor, ScrollView, can_focus=True
         elif self.cursor_x >= sx + width:
             self.scroll_to(x=self.cursor_x - width + 1, animate=False)
 
-    def show(self, ea: int, text: str, cursor: int = 0, cursor_x: int = 0,
-             scroll_y: int = -1, scroll_x: int = 0) -> None:
+    def show(
+        self,
+        ea: int,
+        text: str,
+        cursor: int = 0,
+        cursor_x: int = 0,
+        scroll_y: int = -1,
+        scroll_x: int = 0,
+    ) -> None:
         # Pull each line's `/*0xEA*/` marker into _line_eas, then strip it from
         # the displayed text (clutter) before highlighting. Stripping only edits
         # within lines, so line indices still align with the domain's raw code.
@@ -1725,8 +1817,9 @@ class DecompView(SearchMixin, NavMixin, ColumnCursor, ScrollView, can_focus=True
             self._hscroll()
         self.refresh()
 
-    def goto(self, cursor: int, cursor_x: int = 0, scroll_y: int = -1,
-             scroll_x: int = 0) -> None:
+    def goto(
+        self, cursor: int, cursor_x: int = 0, scroll_y: int = -1, scroll_x: int = 0
+    ) -> None:
         """Move the cursor/scroll on the already-loaded text (no re-highlight).
         Used to jump to a target inside the function already displayed, e.g. an
         xref/goto that resolves to this same function.
@@ -1778,7 +1871,9 @@ class DecompView(SearchMixin, NavMixin, ColumnCursor, ScrollView, can_focus=True
         return self._line_eas[idx] if 0 <= idx < len(self._line_eas) else None
 
     def _after_cursor_move(self) -> None:
-        self.post_message(DecompView.CursorMoved(self.cursor, self._line_ea(self.cursor)))
+        self.post_message(
+            DecompView.CursorMoved(self.cursor, self._line_ea(self.cursor))
+        )
 
     @property
     def total(self) -> int:
@@ -1808,8 +1903,12 @@ class DecompView(SearchMixin, NavMixin, ColumnCursor, ScrollView, can_focus=True
         kind = self.trail.get(idx) if self.trail else None
         if kind is not None:
             base = base.apply_style(
-                _S_TRAIL_NOW if kind == "now" else
-                _S_TRAIL_PAST if kind == "past" else _S_TRAIL_FUTURE)
+                _S_TRAIL_NOW
+                if kind == "now"
+                else _S_TRAIL_PAST
+                if kind == "past"
+                else _S_TRAIL_FUTURE
+            )
         if idx in self._ranges:
             base = _overlay_ranges(base, self._ranges[idx], self._match_style(idx))
         if self._hl_word:
@@ -1818,12 +1917,13 @@ class DecompView(SearchMixin, NavMixin, ColumnCursor, ScrollView, can_focus=True
                 base = _overlay_ranges(base, occ, _S_WORD)
         if idx == self.cursor:
             base = _cursor_decorate(base, self._texts[idx], self.cursor_x)
-            span = self._cursor_literal(idx)   # the literal `o` would reformat
-            if span is not None:               # (last: see ListingView)
+            span = self._cursor_literal(idx)  # the literal `o` would reformat
+            if span is not None:  # (last: see ListingView)
                 base = _overlay_over(base, [span], _S_OPERAND)
         code_w = max(width - gw, 0)
         code = base.crop(x, x + code_w).adjust_cell_length(
-            code_w, _S_LINK if linked else None)
+            code_w, _S_LINK if linked else None
+        )
         if gw <= 0:
             return code
         style = _S_LINENO_CUR if idx == self.cursor else _S_LINENO
@@ -2104,16 +2204,16 @@ class HexView(ScrollView, can_focus=True):
         panes. Matches ``render_line``'s layout: addr(9) + file-offset(10) + 16
         hex cells of 3 cols (with a 1-col gap before byte 8), then ' |' + ASCII."""
         HEX, ASCII = 19, 70
-        if x < HEX:                 # clicked the address/offset gutter -> row start
+        if x < HEX:  # clicked the address/offset gutter -> row start
             return 0
-        if x < HEX + 49:            # hex byte region
+        if x < HEX + 49:  # hex byte region
             rel = x - HEX
-            if rel >= 24:           # collapse the 1-col gap between the two halves
+            if rel >= 24:  # collapse the 1-col gap between the two halves
                 rel -= 1
             return min(rel // 3, 15)
-        if x < ASCII:               # the ' |' separator -> last byte of the row
+        if x < ASCII:  # the ' |' separator -> last byte of the row
             return 15
-        return min(x - ASCII, 15)   # ASCII pane (and anything past it)
+        return min(x - ASCII, 15)  # ASCII pane (and anything past it)
 
     def on_click(self, event) -> None:  # type: ignore[no-untyped-def]
         if self.model is None or self.model.size == 0:
@@ -2240,12 +2340,12 @@ class HexView(ScrollView, can_focus=True):
 # --------------------------------------------------------------------------- #
 # Graph view
 # --------------------------------------------------------------------------- #
-_S_GBORDER = Style(color="#4b5565")                  # box border, idle
-_S_GBORDER_CUR = Style(color="#7aa2f7", bold=True)   # box border, cursor block
-_S_GLABEL = Style(color="#7aa2f7", bold=True)        # loc_XXXX in the border
+_S_GBORDER = Style(color="#4b5565")  # box border, idle
+_S_GBORDER_CUR = Style(color="#7aa2f7", bold=True)  # box border, cursor block
+_S_GLABEL = Style(color="#7aa2f7", bold=True)  # loc_XXXX in the border
 _S_GLABEL_CUR = Style(color="#c0caf5", bold=True)
 _S_GDIM = Style(color="#5e6875")
-_S_GENTRY = Style(color="#9ece6a", bold=True)        # the entry block's label
+_S_GENTRY = Style(color="#9ece6a", bold=True)  # the entry block's label
 #: Edge colours follow IDA's convention: green = branch taken, red = falls
 #: through, blue = the block's only successor, purple = loops back.
 _S_EDGE = {
@@ -2269,7 +2369,7 @@ _S_MINI_CUR = Style(bgcolor="#161b22", color="#9ece6a", bold=True)
 _S_MINI_VIEW = Style(bgcolor="#233044", color="#c0caf5")
 _S_MINI_EDGE = Style(bgcolor="#161b22", color="#2f3945")
 
-_GPAD = 1          # columns of padding inside a box
+_GPAD = 1  # columns of padding inside a box
 _MINI_W, _MINI_H = 30, 14
 
 
@@ -2317,7 +2417,7 @@ class _CellRow:
             b = self.width
         if b <= a:
             return
-        self.ch[a:b] = s[a - i:b - i]
+        self.ch[a:b] = s[a - i : b - i]
         self.st[a:b] = [style] * (b - a)
 
     def restyle(self, a: int, b: int, style: Style) -> None:
@@ -2403,7 +2503,7 @@ class GraphView(NavMixin, ScrollView, can_focus=True):
 
     def __init__(self) -> None:
         super().__init__()
-        self.fc = None                  # domain.Flowchart
+        self.fc = None  # domain.Flowchart
         self.lay: graph.Layout | None = None
         self.loaded_ea: int | None = None
         self._blocks: dict[int, object] = {}
@@ -2414,7 +2514,7 @@ class GraphView(NavMixin, ScrollView, can_focus=True):
         self._engine = "auto"
         self._mini_cache: tuple | None = None
         self._drag: tuple[int, int, float, float] | None = None
-        self._drag_map = False      # the drag started on the minimap
+        self._drag_map = False  # the drag started on the minimap
         self._hl_word = ""
         self.trail: dict[int, str] | None = None
 
@@ -2445,10 +2545,13 @@ class GraphView(NavMixin, ScrollView, can_focus=True):
             self.lay = None
             self.virtual_size = Size(0, 0)
             return
-        blocks = [graph.Block(id=b.id, start=b.start, end=b.end,
-                              succs=list(b.succs)) for b in self.fc.blocks]
-        self.lay = graph.layout(blocks, self._sizer, entry=self.fc.entry,
-                                engine=self._engine)
+        blocks = [
+            graph.Block(id=b.id, start=b.start, end=b.end, succs=list(b.succs))
+            for b in self.fc.blocks
+        ]
+        self.lay = graph.layout(
+            blocks, self._sizer, entry=self.fc.entry, engine=self._engine
+        )
         self.virtual_size = Size(self.lay.width + 2, self.lay.height + 1)
 
     def _rows(self, nid: int):
@@ -2457,7 +2560,7 @@ class GraphView(NavMixin, ScrollView, can_focus=True):
         if b is None:
             return []
         if self._zoom == 2:
-            return [None]                     # one synthetic summary row
+            return [None]  # one synthetic summary row
         return b.rows
 
     def _row_plain(self, nid: int, i: int) -> str:
@@ -2477,15 +2580,16 @@ class GraphView(NavMixin, ScrollView, can_focus=True):
 
     @staticmethod
     def _head_text(h) -> str:
-        return (f"{h.name}  {h.text}" if h.name else h.text)
+        return f"{h.name}  {h.text}" if h.name else h.text
 
     def _sizer(self, b: graph.Block) -> tuple[int, int]:
         nid = b.id
         rows = self._rows(nid)
         n = max(len(rows), 1)
         label = f"loc_{b.start:X}"
-        widest = max([len(label) + 4]
-                     + [len(self._row_plain(nid, i)) for i in range(n)])
+        widest = max(
+            [len(label) + 4] + [len(self._row_plain(nid, i)) for i in range(n)]
+        )
         return (widest + 2 * _GPAD + 2, n + 2)
 
     # -- geometry --------------------------------------------------------- #
@@ -2647,8 +2751,10 @@ class GraphView(NavMixin, ScrollView, can_focus=True):
         y0 = int(self.scroll_offset.y)
         x0 = int(self.scroll_offset.x)
         y1, x1 = y0 + self.size.height, x0 + self.size.width
-        return any(n.y <= y1 and y0 <= n.bottom and n.x <= x1 and x0 <= n.right
-                   for n in self.lay.nodes)
+        return any(
+            n.y <= y1 and y0 <= n.bottom and n.x <= x1 and x0 <= n.right
+            for n in self.lay.nodes
+        )
 
     def _snap_into_view(self) -> None:
         """After a pan, if the viewport holds no block at all, ease to the
@@ -2675,7 +2781,7 @@ class GraphView(NavMixin, ScrollView, can_focus=True):
         self._clamp_cursor()
         self._center_cursor()
         self.refresh(layout=True)
-        self.app._graph_status()      # keeps the function name; names the zoom
+        self.app._graph_status()  # keeps the function name; names the zoom
 
     def action_minimap(self) -> None:
         self._show_minimap = not self._show_minimap
@@ -2691,8 +2797,10 @@ class GraphView(NavMixin, ScrollView, can_focus=True):
         function. Cheaper to look than to argue.
         """
         from . import graph_triskel
-        choices = ["auto", "native"] + (["triskel"] if graph_triskel.available()
-                                         else [])
+
+        choices = ["auto", "native"] + (
+            ["triskel"] if graph_triskel.available() else []
+        )
         self._engine = choices[(choices.index(self._engine) + 1) % len(choices)]
         self._relayout()
         self._clamp_cursor()
@@ -2702,8 +2810,9 @@ class GraphView(NavMixin, ScrollView, can_focus=True):
         # Name the interpreter. The launcher runs $IDATUI_PYTHON (default
         # ~/ida-venv), which is NOT the repo .venv the tests use, so "not
         # installed" on its own sends people to check the wrong python.
-        note = ("" if graph_triskel.available()
-                else f" (no pytriskel in {sys.executable})")
+        note = (
+            "" if graph_triskel.available() else f" (no pytriskel in {sys.executable})"
+        )
         # A fallback with no reason is a bug report nobody can file.
         if self.lay and self.lay.stats.get("engine_error"):
             note = f" \u2014 {self.lay.stats['engine_error']}"
@@ -2781,10 +2890,12 @@ class GraphView(NavMixin, ScrollView, can_focus=True):
         self.scroll_to(y=y, x=x, animate=False)
         if not defer:
             return
+
         # Setting virtual_size then scrolling immediately clamps to 0 (max_scroll
         # isn't recomputed until layout), so apply it again after the refresh.
         def _again() -> None:
             self.scroll_to(y=y, x=x, animate=False)
+
         self.call_after_refresh(_again)
 
     def _center_cursor(self) -> None:
@@ -2818,11 +2929,17 @@ class GraphView(NavMixin, ScrollView, can_focus=True):
             return None
         best, best_d = None, None
         for n in self.lay.nodes:
-            dx = 0.0 if n.x <= col <= n.right else min(abs(col - n.x),
-                                                       abs(col - n.right))
-            dy = 0.0 if n.y <= row <= n.bottom else min(abs(row - n.y),
-                                                        abs(row - n.bottom))
-            d = (dx * 0.5) ** 2 + dy ** 2
+            dx = (
+                0.0
+                if n.x <= col <= n.right
+                else min(abs(col - n.x), abs(col - n.right))
+            )
+            dy = (
+                0.0
+                if n.y <= row <= n.bottom
+                else min(abs(row - n.y), abs(row - n.bottom))
+            )
+            d = (dx * 0.5) ** 2 + dy**2
             if best_d is None or d < best_d:
                 best, best_d = n, d
         return best
@@ -2845,21 +2962,23 @@ class GraphView(NavMixin, ScrollView, can_focus=True):
             return False
         left, top, _w, _h = rect
         gw, gh = _MINI_W - 2, _MINI_H - 2
-        c, r = x - left - 1, y - top - 1        # inside the border
+        c, r = x - left - 1, y - top - 1  # inside the border
         if not (0 <= c < gw and 0 <= r < gh):
             return False
         lay = self.lay
         sx = max(lay.width / gw, 1e-9)
         sy = max(lay.height / gh, 1e-9)
-        cx, cy = (c + 0.5) * sx, (r + 0.5) * sy   # centre of that mini-cell
+        cx, cy = (c + 0.5) * sx, (r + 0.5) * sy  # centre of that mini-cell
         n = self._nearest_node(cy, cx)
         if n is None:
-            self.scroll_to(x=max(0, int(cx - self.size.width / 2)),
-                           y=max(0, int(cy - self.size.height / 2)),
-                           animate=False)
+            self.scroll_to(
+                x=max(0, int(cx - self.size.width / 2)),
+                y=max(0, int(cy - self.size.height / 2)),
+                animate=False,
+            )
             return True
         if n.id == self.cursor_node:
-            return True        # already there; don't churn while dragging
+            return True  # already there; don't churn while dragging
         self.cursor_node = n.id
         self.cursor_row = 0
         self.cursor_x = 0
@@ -2876,7 +2995,7 @@ class GraphView(NavMixin, ScrollView, can_focus=True):
             return
         if self._minimap_seek(off.x, off.y):
             self._drag = None
-            self._drag_map = True    # keep scrubbing while the button is held
+            self._drag_map = True  # keep scrubbing while the button is held
             return
         self._drag_map = False
         self._drag = (off.x, off.y, self.scroll_offset.x, self.scroll_offset.y)
@@ -2886,7 +3005,7 @@ class GraphView(NavMixin, ScrollView, can_focus=True):
         self._drag = None
         self._drag_map = False
         if was_pan:
-            self._snap_into_view()   # don't leave them adrift in the padding
+            self._snap_into_view()  # don't leave them adrift in the padding
 
     def on_mouse_move(self, event) -> None:  # type: ignore[no-untyped-def]
         if not event.button:
@@ -2901,8 +3020,9 @@ class GraphView(NavMixin, ScrollView, can_focus=True):
         if self._drag is None:
             return
         x0, y0, sx, sy = self._drag
-        self.scroll_to(x=max(0, sx + (x0 - off.x)), y=max(0, sy + (y0 - off.y)),
-                       animate=False)
+        self.scroll_to(
+            x=max(0, sx + (x0 - off.x)), y=max(0, sy + (y0 - off.y)), animate=False
+        )
 
     def on_click(self, event) -> None:  # type: ignore[no-untyped-def]
         if self.lay is None:
@@ -2923,8 +3043,7 @@ class GraphView(NavMixin, ScrollView, can_focus=True):
             return
         self.focus()
         self.cursor_node = n.id
-        self.cursor_row = max(0, min(row - n.y - 1,
-                                     max(len(self._rows(n.id)) - 1, 0)))
+        self.cursor_row = max(0, min(row - n.y - 1, max(len(self._rows(n.id)) - 1, 0)))
         self.cursor_x = max(0, col - n.x - 1 - _GPAD)
         self._clamp_cursor()
         self.refresh()
@@ -2948,7 +3067,8 @@ class GraphView(NavMixin, ScrollView, can_focus=True):
 
         # 1. edge cells (an index query, never a painted canvas)
         for col, (ch, kind, eid) in self.lay.painting.cells_at_row(
-                row, col0, col0 + width).items():
+            row, col0, col0 + width
+        ).items():
             st = (_S_EDGE_HOT if eid in hot else base).get(kind, _S_GDIM)
             out.put(col - col0, ch, st)
 
@@ -2961,8 +3081,7 @@ class GraphView(NavMixin, ScrollView, can_focus=True):
             self._draw_minimap_row(out, y, width)
         return out.strip().adjust_cell_length(width, _S_INSN)
 
-    def _draw_node_row(self, out: _CellRow, n: graph.Node, row: int,
-                       col0: int) -> None:
+    def _draw_node_row(self, out: _CellRow, n: graph.Node, row: int, col0: int) -> None:
         cur = n.id == self.cursor_node
         bs = _S_GBORDER_CUR if cur else _S_GBORDER
         left = n.x - col0
@@ -2973,19 +3092,24 @@ class GraphView(NavMixin, ScrollView, can_focus=True):
             label = f"loc_{n.block.start:X}" if n.block else ""
             if b is not None and b.rows and b.rows[0].name:
                 label = b.rows[0].name
-            out.text(left, graph.BOX["tl"] + graph.BOX["h"] * (w - 2)
-                     + graph.BOX["tr"], bs)
+            out.text(
+                left, graph.BOX["tl"] + graph.BOX["h"] * (w - 2) + graph.BOX["tr"], bs
+            )
             tag = f" {label} "
             if len(tag) <= w - 4:
-                st = _S_GENTRY if (self.fc and n.id == self.fc.entry) else (
-                    _S_GLABEL_CUR if cur else _S_GLABEL)
+                st = (
+                    _S_GENTRY
+                    if (self.fc and n.id == self.fc.entry)
+                    else (_S_GLABEL_CUR if cur else _S_GLABEL)
+                )
                 out.text(left + 2, tag, st)
             if n.block is not None and n.block.selfloop:
                 out.put(left + w - 2, "↺", _S_EDGE[graph.E_BACK])
             return
         if row == n.y + n.h - 1:
-            out.text(left, graph.BOX["bl"] + graph.BOX["h"] * (w - 2)
-                     + graph.BOX["br"], bs)
+            out.text(
+                left, graph.BOX["bl"] + graph.BOX["h"] * (w - 2) + graph.BOX["br"], bs
+            )
             return
         out.put(left, graph.BOX["v"], bs)
         out.put(left + w - 1, graph.BOX["v"], bs)
@@ -2997,7 +3121,7 @@ class GraphView(NavMixin, ScrollView, can_focus=True):
         text_col = left + 1 + _GPAD
         h = rows[i]
         plain = self._row_plain(n.id, i)
-        if h is None:                                   # collapsed summary
+        if h is None:  # collapsed summary
             out.text(text_col, plain, _S_GDIM)
         else:
             c = text_col
@@ -3019,9 +3143,15 @@ class GraphView(NavMixin, ScrollView, can_focus=True):
         if self.trail is not None and h is not None:
             k = self.trail.get(h.ea)
             if k is not None:
-                out.restyle(inner_a, inner_b,
-                            _S_TRAIL_NOW if k == "now" else
-                            _S_TRAIL_PAST if k == "past" else _S_TRAIL_FUTURE)
+                out.restyle(
+                    inner_a,
+                    inner_b,
+                    _S_TRAIL_NOW
+                    if k == "now"
+                    else _S_TRAIL_PAST
+                    if k == "past"
+                    else _S_TRAIL_FUTURE,
+                )
         if self._hl_word and plain:
             for a, bb in _word_occurrences(plain, self._hl_word):
                 out.restyle(text_col + a, text_col + bb, _S_WORD)
@@ -3049,8 +3179,9 @@ class GraphView(NavMixin, ScrollView, can_focus=True):
             sy = max(lay.height / gh, 1e-9)
             for lo, hi, col, _kind, _eid in lay.painting.vruns:
                 c = min(int(col / sx), gw - 1)
-                for r in range(min(int(lo / sy), gh - 1),
-                               min(int(hi / sy), gh - 1) + 1):
+                for r in range(
+                    min(int(lo / sy), gh - 1), min(int(hi / sy), gh - 1) + 1
+                ):
                     if not grid[r][c]:
                         grid[r][c] = 1
             for n in lay.nodes:
@@ -3069,7 +3200,7 @@ class GraphView(NavMixin, ScrollView, can_focus=True):
         # column, which otherwise eats the minimap's right border.
         if self._minimap_rect() is None or not (0 <= y < _MINI_H):
             return
-        left = self._minimap_rect()[0]   # one source of truth with the hit-test
+        left = self._minimap_rect()[0]  # one source of truth with the hit-test
         grid = self._minimap()
         gw, gh = _MINI_W - 2, _MINI_H - 2
         lay = self.lay
@@ -3118,7 +3249,9 @@ class GraphView(NavMixin, ScrollView, can_focus=True):
 # --------------------------------------------------------------------------- #
 class FunctionsPanel(Vertical):
     def compose(self) -> ComposeResult:
-        self._filter = Input(placeholder="filter (glob, e.g. sub_*)  —  Enter to apply", id="func-filter")
+        self._filter = Input(
+            placeholder="filter (glob, e.g. sub_*)  —  Enter to apply", id="func-filter"
+        )
         self._filter.display = False
         yield self._filter
         table = DataTable(id="func-table", cursor_type="row", zebra_stripes=True)
@@ -3188,8 +3321,9 @@ class XrefsScreen(ModalScreen):
 
     BINDINGS = [Binding("escape", "close", "Close")]
 
-    def __init__(self, label: str, items: list[tuple[object, str]],
-                 preselect: int = 0) -> None:
+    def __init__(
+        self, label: str, items: list[tuple[object, str]], preselect: int = 0
+    ) -> None:
         # payload is an int address, or (binary, address) for a caller in another
         # project binary; dismiss() hands it back untouched.
         super().__init__()
@@ -3271,8 +3405,8 @@ class SymbolPalette(OptionListNav, ModalScreen):
     def __init__(self, funcs: list[Func], index=None, binary=None) -> None:
         super().__init__()
         self._funcs = funcs
-        self._index = index      # ProjectIndex, when this is a project
-        self._binary = binary    # label of the binary we're currently in
+        self._index = index  # ProjectIndex, when this is a project
+        self._binary = binary  # label of the binary we're currently in
         self._project_scope = False
         #: (binary|None, addr, name) — binary is None for a local hit
         self._results: list[tuple] = []
@@ -3280,8 +3414,10 @@ class SymbolPalette(OptionListNav, ModalScreen):
     def compose(self) -> ComposeResult:
         with Vertical(id="pal-box") as box:
             box.border_title = Text("symbols")
-            yield Input(placeholder="fuzzy find symbol…  ↑↓ select · Enter open · Esc close",
-                        id="pal-input")
+            yield Input(
+                placeholder="fuzzy find symbol…  ↑↓ select · Enter open · Esc close",
+                id="pal-input",
+            )
             yield OptionList(id="pal-list")
 
     def on_mount(self) -> None:
@@ -3306,13 +3442,17 @@ class SymbolPalette(OptionListNav, ModalScreen):
         # rows: (binary|None, addr, name, match positions)
         if self._project_scope and self._index is not None:
             from .index import KIND_FUNC
+
             # The trigram index already guarantees every hit CONTAINS the query,
             # so ranking only has to order them — an exact-substring rank (match
             # position, then name length) costs a find() per row instead of a
             # full fuzzy pass, and fetching 3x the display limit rather than 10x
             # keeps the per-keystroke work down on a big project.
-            hits = self._index.search(query, kind=KIND_FUNC,
-                                      limit=self.PROJECT_LIMIT * 3) if query else []
+            hits = (
+                self._index.search(query, kind=KIND_FUNC, limit=self.PROJECT_LIMIT * 3)
+                if query
+                else []
+            )
             q = query.lower()
             scored = []
             for h in hits:
@@ -3322,9 +3462,15 @@ class SymbolPalette(OptionListNav, ModalScreen):
             # on (position, length, text), and a bare sort() would then fall
             # through to comparing Hit objects, which aren't orderable.
             scored.sort(key=lambda t: (t[0], t[1], t[2], t[3].binary, t[3].addr))
-            rows = [(h.binary, h.addr, h.text,
-                     tuple(range(at, at + len(q))) if at < (1 << 30) else ())
-                    for at, _, _, h in scored[:self.PROJECT_LIMIT]]
+            rows = [
+                (
+                    h.binary,
+                    h.addr,
+                    h.text,
+                    tuple(range(at, at + len(q))) if at < (1 << 30) else (),
+                )
+                for at, _, _, h in scored[: self.PROJECT_LIMIT]
+            ]
         elif query:
             scored = []
             for f in self._funcs:
@@ -3332,9 +3478,9 @@ class SymbolPalette(OptionListNav, ModalScreen):
                 if m is not None:
                     scored.append((m[0], m[1], f))
             scored.sort(key=lambda t: (-t[0], t[2].name))
-            rows = [(None, f.addr, f.name, pos) for _, pos, f in scored[:self.LIMIT]]
+            rows = [(None, f.addr, f.name, pos) for _, pos, f in scored[: self.LIMIT]]
         else:
-            rows = [(None, f.addr, f.name, ()) for f in self._funcs[:self.LIMIT]]
+            rows = [(None, f.addr, f.name, ()) for f in self._funcs[: self.LIMIT]]
         self._results = [(b, a, n) for b, a, n, _ in rows]
         ol = self.query_one(OptionList)
         ol.clear_options()
@@ -3356,10 +3502,14 @@ class SymbolPalette(OptionListNav, ModalScreen):
         scope = "project" if self._project_scope else "this binary"
         cap = self.PROJECT_LIMIT if self._project_scope else self.LIMIT
         more = "+" if len(self._results) == cap else ""
-        hint = "  (F2: this binary)" if self._project_scope else (
-            "  (F2: whole project)" if self._index is not None else "")
+        hint = (
+            "  (F2: this binary)"
+            if self._project_scope
+            else ("  (F2: whole project)" if self._index is not None else "")
+        )
         self.query_one("#pal-box").border_title = Text(
-            f"symbols [{scope}]: {len(self._results)}{more}{hint}")
+            f"symbols [{scope}]: {len(self._results)}{more}{hint}"
+        )
 
     def action_choose(self) -> None:
         ol = self.query_one(OptionList)
@@ -3380,8 +3530,12 @@ class SymbolPalette(OptionListNav, ModalScreen):
 def _str_display(text: str, limit: int = 200) -> str:
     """One-line, printable rendering of a string literal for the browser: escape
     the common control chars, drop the rest, and clip long bodies."""
-    out = (text.replace("\\", "\\\\").replace("\n", "\\n")
-               .replace("\r", "\\r").replace("\t", "\\t"))
+    out = (
+        text.replace("\\", "\\\\")
+        .replace("\n", "\\n")
+        .replace("\r", "\\r")
+        .replace("\t", "\\t")
+    )
     out = "".join(ch if ch.isprintable() else "." for ch in out)
     return out[:limit] + ("\u2026" if len(out) > limit else "")
 
@@ -3412,7 +3566,7 @@ class SearchPalette(OptionListNav, ModalScreen):
         super().__init__()
         self._program = program
         self._initial = initial
-        self._forced: str | None = None   # F2: pin the mode
+        self._forced: str | None = None  # F2: pin the mode
         self._hits: list = []
         self._searched: tuple[str, str] | None = None  # (mode, query) on screen
         self._busy = False
@@ -3420,9 +3574,11 @@ class SearchPalette(OptionListNav, ModalScreen):
     def compose(self) -> ComposeResult:
         with Vertical(id="pal-box") as box:
             box.border_title = Text("search")
-            yield Input(placeholder="text, or bytes like 48 8b ?? c3  \u00b7  "
-                                    "Enter search \u00b7 F2 mode \u00b7 Esc close",
-                        id="pal-input")
+            yield Input(
+                placeholder="text, or bytes like 48 8b ?? c3  \u00b7  "
+                "Enter search \u00b7 F2 mode \u00b7 Esc close",
+                id="pal-input",
+            )
             yield OptionList(id="pal-list")
 
     def on_mount(self) -> None:
@@ -3453,16 +3609,17 @@ class SearchPalette(OptionListNav, ModalScreen):
             elif q:
                 state = "Enter searches"
         self.query_one("#pal-box").border_title = Text(
-            f"search [{mode}{pinned}]" + (f": {state}" if state else ""))
+            f"search [{mode}{pinned}]" + (f": {state}" if state else "")
+        )
 
     def action_mode(self) -> None:
         mode, _ = self._mode_query()
         self._forced = search.TEXT if mode == search.BYTES else search.BYTES
-        self._searched = None      # the results on screen are for the old mode
+        self._searched = None  # the results on screen are for the old mode
         self._retitle()
 
     def on_input_changed(self, event: Input.Changed) -> None:
-        event.stop()   # modal inputs bubble to the app's own #search handler
+        event.stop()  # modal inputs bubble to the app's own #search handler
         self._retitle()
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
@@ -3495,14 +3652,14 @@ class SearchPalette(OptionListNav, ModalScreen):
     @work(thread=True, exclusive=True, group="dbsearch")
     def _search(self, mode: str, query: str) -> None:
         try:
-            hits, err, truncated = self._program.search(query, mode,
-                                                        limit=self.LIMIT)
+            hits, err, truncated = self._program.search(query, mode, limit=self.LIMIT)
         except Exception as e:  # noqa: BLE001 -- a search must not kill the app
             hits, err, truncated = [], str(e), False
         self.app.call_from_thread(self._present, mode, query, hits, err, truncated)
 
-    def _present(self, mode: str, query: str, hits: list, err: str | None,
-                 truncated: bool) -> None:
+    def _present(
+        self, mode: str, query: str, hits: list, err: str | None, truncated: bool
+    ) -> None:
         self._busy = False
         self._hits = hits
         # Remember what these results ARE, not what the box says now: the user
@@ -3533,8 +3690,10 @@ class SearchPalette(OptionListNav, ModalScreen):
             self._retitle("no match")
         else:
             n = len(hits)
-            self._retitle(f"{n}{'+' if truncated else ''} "
-                          f"hit{'' if n == 1 else 's'} \u2014 Enter opens")
+            self._retitle(
+                f"{n}{'+' if truncated else ''} "
+                f"hit{'' if n == 1 else 's'} \u2014 Enter opens"
+            )
 
     # -- moving / choosing --------------------------------------------------- #
     def action_choose(self) -> None:
@@ -3569,9 +3728,10 @@ class StringsPalette(OptionListNav, ModalScreen):
         super().__init__()
         # Pre-render + pre-lower once: filtering runs on every keystroke and a
         # big binary has tens of thousands of strings.
-        self._rows = [(s, d, d.lower())
-                      for s in strings for d in (_str_display(s.text),)]
-        self._index = index      # ProjectIndex, when this is a project
+        self._rows = [
+            (s, d, d.lower()) for s in strings for d in (_str_display(s.text),)
+        ]
+        self._index = index  # ProjectIndex, when this is a project
         self._binary = binary
         self._project_scope = False
         #: (binary|None, addr, display text) — binary is None for a local hit
@@ -3580,8 +3740,11 @@ class StringsPalette(OptionListNav, ModalScreen):
     def compose(self) -> ComposeResult:
         with Vertical(id="pal-box") as box:
             box.border_title = Text("strings")
-            yield Input(placeholder="filter strings\u2026  \u2191\u2193 select \u00b7 "
-                                    "Enter jump \u00b7 Esc close", id="pal-input")
+            yield Input(
+                placeholder="filter strings\u2026  \u2191\u2193 select \u00b7 "
+                "Enter jump \u00b7 Esc close",
+                id="pal-input",
+            )
             yield OptionList(id="pal-list")
 
     def on_mount(self) -> None:
@@ -3607,19 +3770,23 @@ class StringsPalette(OptionListNav, ModalScreen):
         # rows: (binary|None, addr, length, display text, match offset)
         if self._project_scope and self._index is not None:
             from .index import KIND_STRING
-            hits = self._index.search(query, kind=KIND_STRING,
-                                      limit=self.PROJECT_LIMIT * 3) if query else []
+
+            hits = (
+                self._index.search(
+                    query, kind=KIND_STRING, limit=self.PROJECT_LIMIT * 3
+                )
+                if query
+                else []
+            )
             rows = []
             for h in hits:
                 disp = _str_display(h.text)
-                rows.append((h.binary, h.addr, len(h.text), disp,
-                             disp.lower().find(q)))
+                rows.append((h.binary, h.addr, len(h.text), disp, disp.lower().find(q)))
             # the index already guarantees a match, so ranking only orders them:
             # earliest match, then shortest, with a stable (binary, addr) tiebreak
             # (a literal shared by two binaries would otherwise be unordered).
-            rows.sort(key=lambda r: (r[4] if r[4] >= 0 else 1 << 30,
-                                     r[2], r[0], r[1]))
-            rows = rows[:self.PROJECT_LIMIT]
+            rows.sort(key=lambda r: (r[4] if r[4] >= 0 else 1 << 30, r[2], r[0], r[1]))
+            rows = rows[: self.PROJECT_LIMIT]
         else:
             rows = []
             for s, disp, low in self._rows:
@@ -3650,10 +3817,14 @@ class StringsPalette(OptionListNav, ModalScreen):
         scope = "project" if self._project_scope else "this binary"
         cap = self.PROJECT_LIMIT if self._project_scope else self.LIMIT
         more = "+" if len(rows) == cap else ""
-        hint = "  (F2: this binary)" if self._project_scope else (
-            "  (F2: whole project)" if self._index is not None else "")
+        hint = (
+            "  (F2: this binary)"
+            if self._project_scope
+            else ("  (F2: whole project)" if self._index is not None else "")
+        )
         self.query_one("#pal-box").border_title = Text(
-            f"strings [{scope}]: {len(self._results)}{more} of {len(self._rows)}{hint}")
+            f"strings [{scope}]: {len(self._results)}{more} of {len(self._rows)}{hint}"
+        )
 
     def action_choose(self) -> None:
         ol = self.query_one(OptionList)
@@ -3674,74 +3845,92 @@ class StringsPalette(OptionListNav, ModalScreen):
 #: The keyboard cheatsheet (F1). Grouped by task rather than by widget, which is
 #: what makes it readable; keep it in step with the BINDINGS above it.
 _HELP = (
-    ("Navigate", (
-        ("Enter", "follow the symbol under the cursor"),
-        ("Esc", "back (navigation history)"),
-        ("g", "goto address or symbol"),
-        ("Ctrl+N", "find symbol (fuzzy)"),
-        ("\"", "strings browser"),
-        ("x", "cross-references to the symbol"),
-        ("L", "continuous listing at the cursor"),
-        ("Ctrl+O", "switch binary (projects)"),
-    )),
-    ("Views", (
-        ("Tab / F5", "disassembly \u21c4 pseudocode"),
-        ("Space", "control-flow graph \u21c4 text"),
-        ("s", "split view: listing + pseudocode"),
-        ("Tab", "in split: switch the driving pane"),
-        ("\\", "hex view"),
-        ("B", "cycle the opcode-bytes column"),
-        ("Ctrl+B", "show/hide the names pane"),
-        ("Ctrl+T", "structs / types editor"),
-        ("Ctrl+F", "search the database: text or bytes"),
-        ("Ctrl+R", "refresh the current view in place"),
-        ("Ctrl+E", "export findings as markdown"),
-        ("Ctrl+P", "command palette"),
-    )),
-    ("Move", (
-        ("j / k", "down / up"),
-        ("Ctrl+D / Ctrl+U", "half page down / up"),
-        ("PgDn / PgUp", "page down / up"),
-        ("Ctrl+Home / Ctrl+End", "top / bottom (G also)"),
-        ("Home / End", "start / end of line"),
-        ("Shift+Home", "start of the instruction / code"),
-        ("h / l", "column left / right"),
-        ("w / b", "word forward / back"),
-    )),
-    ("Edit", (
-        ("n", "rename"),
-        ("y", "set type (prototype, local or global)"),
-        (";", "comment"),
-        ("c", "make code"),
-        ("p", "make function"),
-        ("d", "make data"),
-        ("a", "make string"),
-        ("u", "undefine"),
-        ("o / O", "literal format: hex/dec/bin/char/offset"),
-        ("Ctrl+S", "save the database"),
-    )),
-    ("Search", (
-        ("/", "search forward (repeat to continue)"),
-        ("?", "search backward"),
-        ("N", "previous match"),
-        ("Ctrl+Y", "copy the current line"),
-        ("F1 / H", "this cheatsheet"),
-        ("q", "quit"),
-    )),
-    ("Graph (Space)", (
-        ("j / k", "line up/down, crossing blocks"),
-        ("h / l", "column left / right"),
-        ("J / K", "follow an edge to a successor / predecessor"),
-        ("w / b", "next / previous block in layout order"),
-        ("0", "jump to the entry block"),
-        ("z", "zoom: full \u2192 compact \u2192 collapsed"),
-        ("m", "show/hide the minimap"),
-        ("e", "layout engine: auto \u2192 native \u2192 triskel"),
-        ("f", "centre on the current block"),
-        ("Enter", "follow (stays in the graph if it lands here)"),
-        ("drag / click", "pan / put the cursor in a block"),
-        ("click minimap", "jump the view there (drag to scrub)"),
-    )),
+    (
+        "Navigate",
+        (
+            ("Enter", "follow the symbol under the cursor"),
+            ("Esc", "back (navigation history)"),
+            ("g", "goto address or symbol"),
+            ("Ctrl+N", "find symbol (fuzzy)"),
+            ('"', "strings browser"),
+            ("x", "cross-references to the symbol"),
+            ("L", "continuous listing at the cursor"),
+            ("Ctrl+O", "switch binary (projects)"),
+        ),
+    ),
+    (
+        "Views",
+        (
+            ("Tab / F5", "disassembly \u21c4 pseudocode"),
+            ("Space", "control-flow graph \u21c4 text"),
+            ("s", "split view: listing + pseudocode"),
+            ("Tab", "in split: switch the driving pane"),
+            ("\\", "hex view"),
+            ("B", "cycle the opcode-bytes column"),
+            ("Ctrl+B", "show/hide the names pane"),
+            ("Ctrl+T", "structs / types editor"),
+            ("Ctrl+F", "search the database: text or bytes"),
+            ("Ctrl+R", "refresh the current view in place"),
+            ("Ctrl+E", "export findings as markdown"),
+            ("Ctrl+P", "command palette"),
+        ),
+    ),
+    (
+        "Move",
+        (
+            ("j / k", "down / up"),
+            ("Ctrl+D / Ctrl+U", "half page down / up"),
+            ("PgDn / PgUp", "page down / up"),
+            ("Ctrl+Home / Ctrl+End", "top / bottom (G also)"),
+            ("Home / End", "start / end of line"),
+            ("Shift+Home", "start of the instruction / code"),
+            ("h / l", "column left / right"),
+            ("w / b", "word forward / back"),
+        ),
+    ),
+    (
+        "Edit",
+        (
+            ("n", "rename"),
+            ("y", "set type (prototype, local or global)"),
+            (";", "comment"),
+            ("c", "make code"),
+            ("p", "make function"),
+            ("d", "make data"),
+            ("a", "make string"),
+            ("u", "undefine"),
+            ("o / O", "literal format: hex/dec/bin/char/offset"),
+            ("Ctrl+S", "save the database"),
+        ),
+    ),
+    (
+        "Search",
+        (
+            ("/", "search forward (repeat to continue)"),
+            ("?", "search backward"),
+            ("N", "previous match"),
+            ("Ctrl+Y", "copy the current line"),
+            ("F1 / H", "this cheatsheet"),
+            ("q", "quit"),
+        ),
+    ),
+    (
+        "Graph (Space)",
+        (
+            ("j / k", "line up/down, crossing blocks"),
+            ("h / l", "column left / right"),
+            ("J / K", "follow an edge to a successor / predecessor"),
+            ("w / b", "next / previous block in layout order"),
+            ("0", "jump to the entry block"),
+            ("z", "zoom: full \u2192 compact \u2192 collapsed"),
+            ("m", "show/hide the minimap"),
+            ("e", "layout engine: auto \u2192 native \u2192 triskel"),
+            ("f", "centre on the current block"),
+            ("Enter", "follow (stays in the graph if it lands here)"),
+            ("drag / click", "pan / put the cursor in a block"),
+            ("click minimap", "jump the view there (drag to scrub)"),
+        ),
+    ),
 )
 
 
@@ -3764,19 +3953,24 @@ class QuitScreen(ModalScreen):
         self._labels = labels
 
     def compose(self) -> ComposeResult:
-        what = (f"{len(self._labels)} databases have unsaved changes"
-                if len(self._labels) > 1 else "unsaved changes")
+        what = (
+            f"{len(self._labels)} databases have unsaved changes"
+            if len(self._labels) > 1
+            else "unsaved changes"
+        )
         with Vertical(id="quit-box") as box:
             box.border_title = Text(f"\u26a0 {what}")
             body = Text()
             for label in self._labels:
                 body.append(f"  \u2022 {label}\n", _S_LABEL)
             body.append(
-                "\nFinal managed leases discard; shared/GUI sessions stay open.",
-                _S_DIM)
+                "\nFinal managed leases discard; shared/GUI sessions stay open.", _S_DIM
+            )
             yield Static(body, id="quit-list")
-            yield Static("s  save & quit      d  discard / leave & quit      Esc  cancel",
-                         id="quit-help")
+            yield Static(
+                "s  save & quit      d  discard / leave & quit      Esc  cancel",
+                id="quit-help",
+            )
 
     def action_save(self) -> None:
         self.dismiss("save")
@@ -3810,13 +4004,14 @@ class HelpScreen(ModalScreen):
             with VerticalScroll(id="help-body"):
                 with Horizontal(id="help-cols"):
                     for c in range(cols):
-                        chunk = _HELP[c * per:(c + 1) * per]
+                        chunk = _HELP[c * per : (c + 1) * per]
                         if not chunk:
                             continue
                         with Vertical(classes="help-col"):
                             for title, rows in chunk:
-                                card = Static(self._card(rows),
-                                              classes="help-card", markup=False)
+                                card = Static(
+                                    self._card(rows), classes="help-card", markup=False
+                                )
                                 card.border_title = title
                                 yield card
             yield Static("Esc · F1 · H to close", id="help-foot")
@@ -3843,7 +4038,7 @@ class HelpScreen(ModalScreen):
         n = len(ws)
         for cols in range(min(n, 4), 1, -1):
             per = -(-n // cols)
-            chunks = [ws[c * per:(c + 1) * per] for c in range(cols)]
+            chunks = [ws[c * per : (c + 1) * per] for c in range(cols)]
             total = sum(max(c) for c in chunks if c) + (cols - 1)
             if total <= avail:
                 return cols
@@ -3884,13 +4079,15 @@ class RegWriteScreen(OptionListNav, ModalScreen):
 
     def __init__(self, rows, idx: int) -> None:
         super().__init__()
-        self._rows = rows          # (name, value, last_write, next_write)
+        self._rows = rows  # (name, value, last_write, next_write)
         self._idx = idx
 
     def compose(self) -> ComposeResult:
         with Vertical(id="pal-box") as box:
             box.border_title = Text(f"registers at t={self._idx:,}")
-            box.border_subtitle = Text("Enter seeks to the write \u00b7 f seeks forward")
+            box.border_subtitle = Text(
+                "Enter seeks to the write \u00b7 f seeks forward"
+            )
             yield OptionList(id="pal-list")
 
     def on_mount(self) -> None:
@@ -3899,8 +4096,9 @@ class RegWriteScreen(OptionListNav, ModalScreen):
         for name, val, last, nxt in self._rows:
             label = Text()
             label.append(f" {name:>4} ", _S_MNEM)
-            label.append(f"{val:#018x}  " if val > 0xFFFFFFFF else f"{val:#010x}  ",
-                         _S_INSN)
+            label.append(
+                f"{val:#018x}  " if val > 0xFFFFFFFF else f"{val:#010x}  ", _S_INSN
+            )
             if last is None:
                 label.append("never written in this trace", _S_DIM)
             elif last == self._idx:
@@ -3992,14 +4190,15 @@ class TraceDock(Vertical):
                 continue
             hot = name in changed
             body.append(f" {name:>4} ", _S_MNEM if hot else _S_DIM)
-            body.append(f"{v:#018x}\n" if v > 0xFFFFFFFF else f"{v:#010x}\n",
-                        _S_DATA if hot else (_S_LABEL if name == pc else _S_INSN))
+            body.append(
+                f"{v:#018x}\n" if v > 0xFFFFFFFF else f"{v:#010x}\n",
+                _S_DATA if hot else (_S_LABEL if name == pc else _S_INSN),
+            )
         self.query_one("#trace-regs", Static).update(body)
         self._render_stack(t)
         tl = self.query_one(TraceTimeline)
         tl.idx = self.idx
         tl.refresh()
-
 
     STACK_WORDS = 8
 
@@ -4031,8 +4230,13 @@ class TraceDock(Vertical):
                 v = int.from_bytes(data, "little")
                 out.append(f"{v:0{width * 2}x}\n", _S_DATA if k == 0 else _S_INSN)
             elif any(known):
-                out.append("".join(f"{b:02x}" if known[i] else "??"
-                                   for i, b in enumerate(data)) + "\n", _S_INSN)
+                out.append(
+                    "".join(
+                        f"{b:02x}" if known[i] else "??" for i, b in enumerate(data)
+                    )
+                    + "\n",
+                    _S_INSN,
+                )
             else:
                 out.append("?" * (width * 2) + "\n", _S_SEP)
         self.query_one("#trace-stack", Static).update(out)
@@ -4100,18 +4304,27 @@ class LoadOptionsScreen(OptionListNav, ModalScreen):
 
     def compose(self) -> ComposeResult:
         from .formats import PROCESSORS
+
         self._all = list(PROCESSORS)
         with Vertical(id="pal-box") as box:
             box.border_title = Text("unrecognised file \u2014 how should IDA load it?")
-            yield Static(f" {os.path.basename(self._path)}  ({self._nbytes:,} bytes) "
-                         f"\u2014 no loader matched; without a processor IDA "
-                         f"assumes x86 at 0", id="load-note", markup=False)
+            yield Static(
+                f" {os.path.basename(self._path)}  ({self._nbytes:,} bytes) "
+                f"\u2014 no loader matched; without a processor IDA "
+                f"assumes x86 at 0",
+                id="load-note",
+                markup=False,
+            )
             yield Input(placeholder="filter processors\u2026", id="pal-input")
             yield OptionList(id="pal-list")
-            yield Input(placeholder="load address, e.g. 0x8000000 (blank = 0)",
-                        id="load-base")
-            yield Static(" Enter accept \u00b7 Tab base address \u00b7 "
-                         "Esc load as IDA would", id="load-help", markup=False)
+            yield Input(
+                placeholder="load address, e.g. 0x8000000 (blank = 0)", id="load-base"
+            )
+            yield Static(
+                " Enter accept \u00b7 Tab base address \u00b7 Esc load as IDA would",
+                id="load-help",
+                markup=False,
+            )
 
     def on_mount(self) -> None:
         self._apply("")
@@ -4146,8 +4359,11 @@ class LoadOptionsScreen(OptionListNav, ModalScreen):
 
     def _apply(self, query: str) -> None:
         q = query.lower()
-        rows = [(name, desc) for name, desc in self._all
-                if not q or q in name.lower() or q in desc.lower()]
+        rows = [
+            (name, desc)
+            for name, desc in self._all
+            if not q or q in name.lower() or q in desc.lower()
+        ]
         # An unlisted processor is still valid: IDA has 73 modules and this
         # offers 20, so a typed name that matches nothing is taken literally
         # rather than refused.
@@ -4166,7 +4382,8 @@ class LoadOptionsScreen(OptionListNav, ModalScreen):
         if rows:
             ol.highlighted = 0
         self.query_one("#pal-box").border_title = Text(
-            f"unrecognised file \u2014 processor? ({len(rows)})")
+            f"unrecognised file \u2014 processor? ({len(rows)})"
+        )
 
     def action_choose(self) -> None:
         ol = self.query_one(OptionList)
@@ -4181,14 +4398,16 @@ class LoadOptionsScreen(OptionListNav, ModalScreen):
                 base = int(raw, 0)
             except ValueError:
                 self.query_one("#load-help", Static).update(
-                    f" {raw!r} is not an address \u2014 try 0x8000000")
+                    f" {raw!r} is not an address \u2014 try 0x8000000"
+                )
                 self.query_one("#load-base", Input).focus()
                 return
             if base % 16:
                 # IDA's -b is in paragraphs, so an unaligned base can't be
                 # expressed and would quietly load somewhere else.
                 self.query_one("#load-help", Static).update(
-                    f" {base:#x} must be 16-byte aligned")
+                    f" {base:#x} must be 16-byte aligned"
+                )
                 self.query_one("#load-base", Input).focus()
                 return
         self.dismiss({"processor": self._results[i][0], "base": base})
@@ -4214,8 +4433,11 @@ class ProjectPalette(OptionListNav, ModalScreen):
     def compose(self) -> ComposeResult:
         with Vertical(id="pal-box") as box:
             box.border_title = Text("binaries")
-            yield Input(placeholder="filter binaries\u2026  \u2191\u2193 select \u00b7 "
-                                    "Enter switch \u00b7 Esc close", id="pal-input")
+            yield Input(
+                placeholder="filter binaries\u2026  \u2191\u2193 select \u00b7 "
+                "Enter switch \u00b7 Esc close",
+                id="pal-input",
+            )
             yield OptionList(id="pal-list")
 
     def on_mount(self) -> None:
@@ -4232,16 +4454,20 @@ class ProjectPalette(OptionListNav, ModalScreen):
 
     def _apply(self, query: str) -> None:
         q = query.lower()
-        rows = [e for e in self._entries
-                if not q or q in e["label"].lower() or q in e["source"].lower()]
+        rows = [
+            e
+            for e in self._entries
+            if not q or q in e["label"].lower() or q in e["source"].lower()
+        ]
         self._results = rows
         ol = self.query_one(OptionList)
         ol.clear_options()
         opts = []
         for e in rows:
             label = Text()
-            label.append("\u25b8 " if e["active"] else "  ",
-                         _S_MNEM if e["active"] else _S_DIM)
+            label.append(
+                "\u25b8 " if e["active"] else "  ", _S_MNEM if e["active"] else _S_DIM
+            )
             label.append(f"{e['label']:<22}", _S_LABEL)
             if e["resident"]:
                 mb = e.get("memory_mb") or 0
@@ -4261,7 +4487,8 @@ class ProjectPalette(OptionListNav, ModalScreen):
             active = next((i for i, e in enumerate(rows) if e["active"]), 0)
             ol.highlighted = active
         self.query_one("#pal-box").border_title = Text(
-            f"binaries: {len(rows)} of {len(self._entries)}")
+            f"binaries: {len(rows)} of {len(self._entries)}"
+        )
 
     def action_choose(self) -> None:
         i = self.query_one(OptionList).highlighted
@@ -4312,7 +4539,7 @@ _LOGO_PATH = os.path.join(_REPO_ROOT, "logo.ans")
 #: The same artwork as a real image, for terminals that can draw one. logo.ans
 #: is half-blocks (two pixels per cell); this is a transparent PNG at 768px.
 LOGO_PNG = os.path.join(_REPO_ROOT, "logo.png")
-_LOGO_BOX = (60, 33)     # the most room the splash will give the art
+_LOGO_BOX = (60, 33)  # the most room the splash will give the art
 #: Rows the loading box spends on everything that is not the artwork: border 2,
 #: padding 2, the art's margin 1, title 1, note 1 + margin 1, help 1 + margin 1.
 LOGO_CHROME_ROWS = 10
@@ -4342,8 +4569,13 @@ def logo_cells(max_rows: int | None = None) -> tuple[int, int]:
     if max_rows is None or max_rows >= _logo_cells[1]:
         return _logo_cells
     px = kittygfx.png_size(LOGO_PNG)
-    return (kittygfx.fit(px, _LOGO_BOX[0], max(max_rows, 1)) if px
-            else (_LOGO_BOX[0], max(max_rows, 1)))
+    return (
+        kittygfx.fit(px, _LOGO_BOX[0], max(max_rows, 1))
+        if px
+        else (_LOGO_BOX[0], max(max_rows, 1))
+    )
+
+
 _logo_cache: object = False  # False == not yet loaded (None == absent/unreadable)
 
 
@@ -4374,9 +4606,9 @@ class LoadingScreen(ModalScreen):
         super().__init__()
         self._title = title
         self._note = note
-        self._image = False       # drawing the real image, not the block art
-        self._cells: tuple[int, int] | None = None   # image size, in cells
-        self._last_place = 0.0    # throttles re-anchoring after a repaint
+        self._image = False  # drawing the real image, not the block art
+        self._cells: tuple[int, int] | None = None  # image size, in cells
+        self._last_place = 0.0  # throttles re-anchoring after a repaint
 
     def _room(self) -> int:
         """Rows left for artwork once the box's own furniture is paid for."""
@@ -4398,11 +4630,16 @@ class LoadingScreen(ModalScreen):
             room = self._room()
             cols, rows = logo_cells(room)
             self._cells = (cols, rows)
-            kittygfx.log(f"compose: supported={kittygfx.supported()} "
-                         f"app.size={self.app.size} room={room} "
-                         f"cells={cols}x{rows} natural={logo_cells()}")
-            if (kittygfx.supported() and self.app.size.width >= 64
-                    and room >= LOGO_MIN_ROWS):
+            kittygfx.log(
+                f"compose: supported={kittygfx.supported()} "
+                f"app.size={self.app.size} room={room} "
+                f"cells={cols}x{rows} natural={logo_cells()}"
+            )
+            if (
+                kittygfx.supported()
+                and self.app.size.width >= 64
+                and room >= LOGO_MIN_ROWS
+            ):
                 self._image = True
                 blank = Static("\n" * (rows - 1), id="loading-image")
                 blank.styles.height = rows
@@ -4419,8 +4656,10 @@ class LoadingScreen(ModalScreen):
                     yield Static(Align.center(logo), id="loading-logo")
             yield Static(f"\u23f3  loading  {self._title}", id="loading-title")
             yield Static(self._note, id="loading-note")
-            yield Static("first open of a big binary can take a while  \u00b7  "
-                         "Esc to hide", id="loading-help")
+            yield Static(
+                "first open of a big binary can take a while  \u00b7  Esc to hide",
+                id="loading-help",
+            )
 
     def update_note(self, text: str) -> None:
         try:
@@ -4466,7 +4705,7 @@ class LoadingScreen(ModalScreen):
         # image is scaled into exactly it, so a resize needs no relayout.
         cols, rows = self._cells or logo_cells()
         rows = min(rows, region.height)
-        col = region.x + max((region.width - cols) // 2, 0)   # centre it
+        col = region.x + max((region.width - cols) // 2, 0)  # centre it
         kittygfx.place(region.y, col, min(cols, region.width), rows)
 
     def on_mount(self) -> None:
@@ -4557,7 +4796,7 @@ class StructEditor(ModalScreen):
     def __init__(self, program: Program) -> None:
         super().__init__()
         self._program = program
-        self._all: list[Struct] = []      # every struct the database has
+        self._all: list[Struct] = []  # every struct the database has
         self._structs: list[Struct] = []  # the VISIBLE rows (== _all when unfiltered)
         self._filter = ""
         self._loaded: str | None = None  # name currently in the editor
@@ -4588,9 +4827,11 @@ class StructEditor(ModalScreen):
             with Horizontal(id="se-panes"):
                 with Vertical(id="se-left"):
                     yield Static("structs", id="se-title")
-                    yield Input(placeholder="fuzzy filter\u2026  \u2191\u2193 pick \u00b7 "
-                                            "Enter edit \u00b7 Esc clear",
-                                id="se-filter")
+                    yield Input(
+                        placeholder="fuzzy filter\u2026  \u2191\u2193 pick \u00b7 "
+                        "Enter edit \u00b7 Esc clear",
+                        id="se-filter",
+                    )
                     yield OptionList(id="se-list")
                 with Vertical(id="se-right"):
                     yield Static("C definition", id="se-hint")
@@ -4599,7 +4840,8 @@ class StructEditor(ModalScreen):
             yield Static(
                 "Enter edit · / filter · Ctrl+S save · Ctrl+Y copy · Ctrl+N new · "
                 "d/Del delete",
-                id="se-status")
+                id="se-status",
+            )
 
     def on_mount(self) -> None:
         self._refresh()
@@ -4657,7 +4899,7 @@ class StructEditor(ModalScreen):
         opts = []
         for s, pos in rows:
             kw = "union" if s.is_union else "struct"
-            name = s.name if len(s.name) <= width else s.name[:width - 1] + "\u2026"
+            name = s.name if len(s.name) <= width else s.name[: width - 1] + "\u2026"
             label = Text()
             nm = Text(f"{name:<{width}}", style=_S_LABEL)
             for p in pos:
@@ -4670,8 +4912,9 @@ class StructEditor(ModalScreen):
         if rows:
             idx = 0
             if select is not None:
-                idx = next((i for i, s in enumerate(self._structs)
-                            if s.name == select), 0)
+                idx = next(
+                    (i for i, s in enumerate(self._structs) if s.name == select), 0
+                )
             ol.highlighted = idx
         cap = "structs"
         if q:
@@ -4755,8 +4998,9 @@ class StructEditor(ModalScreen):
     def _move_highlight(self, delta: int) -> None:
         ol = self._list_from_filter()
         if ol is not None:
-            ol.highlighted = max(0, min((ol.highlighted or 0) + delta,
-                                        ol.option_count - 1))
+            ol.highlighted = max(
+                0, min((ol.highlighted or 0) + delta, ol.option_count - 1)
+            )
 
     def _page(self, direction: int) -> None:
         ol = self._list_from_filter()
@@ -4808,16 +5052,20 @@ class StructEditor(ModalScreen):
                 formatted = None
         self.app.call_from_thread(self._after_save, name, err, text, formatted)
 
-    def _after_save(self, name: str | None, err: str | None, text: str,
-                    formatted: str | None) -> None:
+    def _after_save(
+        self, name: str | None, err: str | None, text: str, formatted: str | None
+    ) -> None:
         if err:
             # IDA's parse error is usually empty/cryptic; name the likely cause.
             msg = err.strip()
             if not msg or "parse" in msg.lower() or "fail" in msg.lower():
                 bad = self._reserved_field(text)
-                msg = (f"'{bad}' is a reserved name in IDA's C parser — rename "
-                       f"that field to save" if bad else
-                       "IDA couldn't parse it (unknown type or reserved field name?)")
+                msg = (
+                    f"'{bad}' is a reserved name in IDA's C parser — rename "
+                    f"that field to save"
+                    if bad
+                    else "IDA couldn't parse it (unknown type or reserved field name?)"
+                )
             self._set_status(f"save failed — {msg}", error=True)
             return
         self._loaded = name
@@ -4858,7 +5106,8 @@ class StructEditor(ModalScreen):
         kind = "union" if s.is_union else "struct"
         self.app.push_screen(
             ConfirmScreen(f"Delete {kind} '{s.name}' ?"),
-            lambda ok, name=s.name: self._delete(name) if ok else None)
+            lambda ok, name=s.name: self._delete(name) if ok else None,
+        )
 
     @work(thread=True, exclusive=True, group="se-del")
     def _delete(self, name: str) -> None:
@@ -4899,8 +5148,9 @@ class StructEditor(ModalScreen):
         if self._filter_focused() or self._filter:
             self._clear_filter()
             return
-        self._confirm_discard(lambda: self.dismiss(None),
-                              "Discard unsaved changes and close?")
+        self._confirm_discard(
+            lambda: self.dismiss(None), "Discard unsaved changes and close?"
+        )
 
     def _set_status(self, text, error: bool = False) -> None:  # type: ignore[no-untyped-def]
         st = self.query_one("#se-status", Static)
@@ -4918,16 +5168,16 @@ class StructEditor(ModalScreen):
 IDATUI_THEME = Theme(
     name="idatui",
     dark=True,
-    background="#12161c",   # deep blue-black, softer than pure black
-    surface="#181d25",      # views
-    panel="#212832",        # dialogs, status bar, gutters
+    background="#12161c",  # deep blue-black, softer than pure black
+    surface="#181d25",  # views
+    panel="#212832",  # dialogs, status bar, gutters
     foreground="#d6d9de",
-    primary="#5aa0d6",      # focus / links: the one cool accent
+    primary="#5aa0d6",  # focus / links: the one cool accent
     secondary="#2f5d82",
-    accent="#d0a215",       # the same amber as a search match — one meaning
-    warning="#c9762f",      # burnt orange — distinct from accent, reads as care
-    error="#ff5f5f",        # already used for failure text
-    success="#6a9955",      # already used for comments
+    accent="#d0a215",  # the same amber as a search match — one meaning
+    warning="#c9762f",  # burnt orange — distinct from accent, reads as care
+    error="#ff5f5f",  # already used for failure text
+    success="#6a9955",  # already used for comments
 )
 
 
@@ -4942,73 +5192,146 @@ class IdaCommands(Provider):
         app = self.app
         va = app._palette_action  # dispatch to the focused code view
         return (
-            ("Goto address / symbol…", "jump to an address or name (g)",
-             app.action_goto),
+            (
+                "Goto address / symbol…",
+                "jump to an address or name (g)",
+                app.action_goto,
+            ),
             ("Find symbol…", "fuzzy function finder (Ctrl+N)", app.action_symbols),
-            ("Strings…", "browse every string in the binary (\")",
-             app.action_strings),
-            ("Switch binary…", "another binary in the project (Ctrl+O)",
-             app.action_switch_binary),
-            ("Search database…", "disassembly text or a byte pattern with "
-             "wildcards (Ctrl+F)", app.action_find),
-            ("Export findings…", "your comments, names and types as markdown "
-             "(Ctrl+E)", app.action_export),
-            ("Keyboard shortcuts", "the key cheatsheet (F1 or H)",
-             app.action_help),
-            ("Follow symbol under cursor", "jump to the referenced symbol (Enter)",
-             lambda: va("follow")),
-            ("Show xrefs to symbol", "cross-references to the cursor symbol (x)",
-             lambda: va("xrefs")),
+            ("Strings…", 'browse every string in the binary (")', app.action_strings),
+            (
+                "Switch binary…",
+                "another binary in the project (Ctrl+O)",
+                app.action_switch_binary,
+            ),
+            (
+                "Search database…",
+                "disassembly text or a byte pattern with wildcards (Ctrl+F)",
+                app.action_find,
+            ),
+            (
+                "Export findings…",
+                "your comments, names and types as markdown (Ctrl+E)",
+                app.action_export,
+            ),
+            ("Keyboard shortcuts", "the key cheatsheet (F1 or H)", app.action_help),
+            (
+                "Follow symbol under cursor",
+                "jump to the referenced symbol (Enter)",
+                lambda: va("follow"),
+            ),
+            (
+                "Show xrefs to symbol",
+                "cross-references to the cursor symbol (x)",
+                lambda: va("xrefs"),
+            ),
             ("Back", "navigation history (Esc)", app.action_back),
-            ("Toggle disassembly / pseudocode", "decompile / listing (F5, Tab)",
-             app.action_toggle_view),
-            ("Continuous listing here", "flat segment listing (L)",
-             app.action_continuous_here),
+            (
+                "Toggle disassembly / pseudocode",
+                "decompile / listing (F5, Tab)",
+                app.action_toggle_view,
+            ),
+            (
+                "Continuous listing here",
+                "flat segment listing (L)",
+                app.action_continuous_here,
+            ),
             ("Hex view", "raw bytes at the cursor (\\)", app.action_hex),
-            ("Split view (listing ⇄ pseudocode)",
-             "side-by-side synced views (s)", app.action_toggle_split),
-            ("Graph view (control flow)",
-             "the function's basic blocks as a graph (Space)",
-             app.action_toggle_graph),
-            ("Graph: cycle zoom",
-             "full → compact → collapsed (z, in the graph)",
-             lambda: va("zoom")),
-            ("Graph: toggle minimap",
-             "the overview box (m, in the graph)", lambda: va("minimap")),
-            ("Rename symbol…", "rename the symbol under the cursor (n)",
-             lambda: va("rename")),
-            ("Set type / prototype…", "retype the symbol under the cursor (y)",
-             lambda: va("retype")),
+            (
+                "Split view (listing ⇄ pseudocode)",
+                "side-by-side synced views (s)",
+                app.action_toggle_split,
+            ),
+            (
+                "Graph view (control flow)",
+                "the function's basic blocks as a graph (Space)",
+                app.action_toggle_graph,
+            ),
+            (
+                "Graph: cycle zoom",
+                "full → compact → collapsed (z, in the graph)",
+                lambda: va("zoom"),
+            ),
+            (
+                "Graph: toggle minimap",
+                "the overview box (m, in the graph)",
+                lambda: va("minimap"),
+            ),
+            (
+                "Rename symbol…",
+                "rename the symbol under the cursor (n)",
+                lambda: va("rename"),
+            ),
+            (
+                "Set type / prototype…",
+                "retype the symbol under the cursor (y)",
+                lambda: va("retype"),
+            ),
             ("Add comment…", "comment at the cursor (;)", lambda: va("comment")),
             ("Define code", "make code at the cursor (c)", lambda: va("define_code")),
-            ("Create function", "define a function at the cursor (p)",
-             lambda: va("define_func")),
-            ("Make data", "define a data item at the cursor (d)",
-             lambda: va("make_data")),
-            ("Make string", "define a string at the cursor (a)",
-             lambda: va("make_string")),
-            ("Undefine", "undefine the item at the cursor (u)",
-             lambda: va("undefine")),
-            ("Literal format: next", "cycle the literal under the cursor (o)",
-             lambda: va("op_format", "cycle")),
-            ("Literal format: previous", "the other way round (O)",
-             lambda: va("op_format", "back")),
-            *((f"Literal format: {label}", f"show the literal as {label} ({fmt})",
-               (lambda f=fmt: va("op_format", f)))
-              for fmt, label in (("hex", "hexadecimal"), ("dec", "decimal"),
-                                 ("oct", "octal"), ("bin", "binary"),
-                                 ("char", "a character"),
-                                 ("offset", "an offset (reference)"),
-                                 ("stack", "a stack variable"),
-                                 ("default", "IDA's own choice"))),
-            ("Toggle opcode bytes", "cycle the opcode-bytes column (B)",
-             lambda: va("toggle_opcodes")),
-            ("Structs / types editor", "view + edit local types (Ctrl+T)",
-             app.action_structs),
-            ("Filter functions…", "glob-filter the function list (/)",
-             app.action_filter),
-            ("Toggle names pane", "function-list sidebar (Ctrl+B)",
-             app.action_toggle_functions),
+            (
+                "Create function",
+                "define a function at the cursor (p)",
+                lambda: va("define_func"),
+            ),
+            (
+                "Make data",
+                "define a data item at the cursor (d)",
+                lambda: va("make_data"),
+            ),
+            (
+                "Make string",
+                "define a string at the cursor (a)",
+                lambda: va("make_string"),
+            ),
+            ("Undefine", "undefine the item at the cursor (u)", lambda: va("undefine")),
+            (
+                "Literal format: next",
+                "cycle the literal under the cursor (o)",
+                lambda: va("op_format", "cycle"),
+            ),
+            (
+                "Literal format: previous",
+                "the other way round (O)",
+                lambda: va("op_format", "back"),
+            ),
+            *(
+                (
+                    f"Literal format: {label}",
+                    f"show the literal as {label} ({fmt})",
+                    (lambda f=fmt: va("op_format", f)),
+                )
+                for fmt, label in (
+                    ("hex", "hexadecimal"),
+                    ("dec", "decimal"),
+                    ("oct", "octal"),
+                    ("bin", "binary"),
+                    ("char", "a character"),
+                    ("offset", "an offset (reference)"),
+                    ("stack", "a stack variable"),
+                    ("default", "IDA's own choice"),
+                )
+            ),
+            (
+                "Toggle opcode bytes",
+                "cycle the opcode-bytes column (B)",
+                lambda: va("toggle_opcodes"),
+            ),
+            (
+                "Structs / types editor",
+                "view + edit local types (Ctrl+T)",
+                app.action_structs,
+            ),
+            (
+                "Filter functions…",
+                "glob-filter the function list (/)",
+                app.action_filter,
+            ),
+            (
+                "Toggle names pane",
+                "function-list sidebar (Ctrl+B)",
+                app.action_toggle_functions,
+            ),
             ("Save database (.i64)", "persist changes (Ctrl+S)", app.action_save),
             ("Quit", "exit ida-tui (q)", app.action_quit),
         )
@@ -5211,45 +5534,52 @@ class IdaTui(App):
         Binding("escape", "back", "Back"),
     ]
 
-    def __init__(self, open_path: str | None = None, keepalive: bool = True,
-                 rpc_path: str | None = None, ttl: int = 1800,
-                 project=None, load_args: str = "", trace_path: str = "") -> None:
+    def __init__(
+        self,
+        open_path: str | None = None,
+        keepalive: bool = True,
+        rpc_path: str | None = None,
+        ttl: int = 1800,
+        project=None,
+        load_args: str = "",
+        trace_path: str = "",
+    ) -> None:
         super().__init__()
         # Project mode is additive: with no project this is the plain
         # single-binary app, unchanged.
         self._project = project
         self._pool = None
-        self._binary: str | None = None       # active project binary (label)
+        self._binary: str | None = None  # active project binary (label)
         self._states: dict[str, BinaryState] = {}
-        self._pending_restore = None          # entry to reopen after a switch
-        self._goto_after_switch = None        # cross-binary search hit to land on
-        self._hops: list[str] = []            # binaries a navigation crossed FROM
-        self._load_for_label = None           # project binary the dialog is for
-        self._no_functions = False            # analysis produced nothing at all
-        self._flash: str | None = None        # message a pending reload must keep
-        self._flash_until = 0.0               # ...until this monotonic time
-        self._pending_switch = None           # switch waiting on that answer
-        self._nav_seq = 0                     # bumped per navigation; drops stale ones
+        self._pending_restore = None  # entry to reopen after a switch
+        self._goto_after_switch = None  # cross-binary search hit to land on
+        self._hops: list[str] = []  # binaries a navigation crossed FROM
+        self._load_for_label = None  # project binary the dialog is for
+        self._no_functions = False  # analysis produced nothing at all
+        self._flash: str | None = None  # message a pending reload must keep
+        self._flash_until = 0.0  # ...until this monotonic time
+        self._pending_switch = None  # switch waiting on that answer
+        self._nav_seq = 0  # bumped per navigation; drops stale ones
         #: Literal positions for the decompilation being loaded (worker thread
         #: -> the view, handed over when the pseudocode is applied).
         self._pending_nums: dict = {}
         # None = teardown wasn't an explicit quit (crash/kill): save defensively.
         # False = the user chose discard, or we already saved on the way out.
         self._save_on_exit: bool | None = None
-        self._index = None                    # project-wide symbol/string index
+        self._index = None  # project-wide symbol/string index
         if project is not None:
             from .index import ProjectIndex
             from .pool import DatabasePool
+
             self._pool = DatabasePool(project, ttl=ttl)
-            self._index = ProjectIndex(
-                os.path.join(project.index_dir, "project.db"))
+            self._index = ProjectIndex(os.path.join(project.index_dir, "project.db"))
             self._binary = project.refs[0].label
             open_path = project.refs[0].staged
         self._open_path = open_path
         self._ttl = ttl
-        self._load_args = load_args or ""   # first-open options for a headerless blob
-        self._new_database = False           # Ctrl+L asks IDA Nexus for a fresh IDB
-        self._title = (os.path.basename(open_path) if open_path else "")
+        self._load_args = load_args or ""  # first-open options for a headerless blob
+        self._new_database = False  # Ctrl+L asks IDA Nexus for a fresh IDB
+        self._title = os.path.basename(open_path) if open_path else ""
         #: Where we are in the execution trace, and everything that moves us.
         #: Owns the trace state; the _trace/_t/_trail_* properties below
         #: forward to it.
@@ -5267,13 +5597,15 @@ class IdaTui(App):
         self._filter_term = ""
         self._pending_filter = ""
         self._filter_timer = None
-        self._sort_col = 0        # 0=addr, 1=name, 2=size
+        self._sort_col = 0  # 0=addr, 1=name, 2=size
         self._sort_reverse = False
         # ONE notion of "which pane you're in": _active, kept in step with focus
         # (on_descendant_focus does that while split). There used to be a second,
         # _pref, but it was only ever assigned "listing" — see _code_mode().
-        self._active = ViewMode.LISTING  # currently shown view (in split: the focused pane)
-        self._split = False       # side-by-side listing + pseudocode
+        self._active = (
+            ViewMode.LISTING
+        )  # currently shown view (in split: the focused pane)
+        self._split = False  # side-by-side listing + pseudocode
         self._graph_sticky = False  # stay in graph mode across navigations
         self._split_eamap: list[list[int]] = []  # split: decomp line -> instr EAs
         self._split_ea2line: dict[int, int] = {}  # split: instr EA -> decomp line
@@ -5289,8 +5621,9 @@ class IdaTui(App):
         self._search_ctx: tuple[object | None, int] = (None, 1)
         #: The one-line prompts above the footer. Each holds its own context
         #: for exactly as long as it is on screen; see idatui/prompt.py.
-        self.prompts = PromptBar(self, "search", "rename", "comment",
-                                 "retype", "makedata", "goto", "export")
+        self.prompts = PromptBar(
+            self, "search", "rename", "comment", "retype", "makedata", "goto", "export"
+        )
         #: Everything that writes to the database (idatui/edit_ctl.py).
         self.edits = EditController(self)
         #: What those writes were, so the findings export can say which
@@ -5401,8 +5734,10 @@ class IdaTui(App):
         if self._load_args:
             return False
         from .formats import needs_load_options
+
         if os.path.exists(self._open_path + ".i64") or os.path.exists(
-                os.path.splitext(self._open_path)[0] + ".i64"):
+            os.path.splitext(self._open_path)[0] + ".i64"
+        ):
             return False
         try:
             if registered_database(self._open_path):
@@ -5424,18 +5759,23 @@ class IdaTui(App):
         if not self._can_reload():
             if self.client is not None and self.client.backend == "gui":
                 self._status(
-                    "reload unavailable for a GUI-owned database — reopen it in IDA")
+                    "reload unavailable for a GUI-owned database — reopen it in IDA"
+                )
             else:
                 self._status("nothing to reload")
             return
         n = len(self._func_index) if self._func_index else 0
-        note = ("this image has no functions, so nothing is lost"
-                if n == 0 else
-                f"discards the database for this binary \u2014 {n} "
-                f"function{'s' if n != 1 else ''}, plus any names and comments "
-                f"you've added")
-        self.push_screen(ConfirmScreen("Reload with different options?", note),
-                         self._on_reload_confirmed)
+        note = (
+            "this image has no functions, so nothing is lost"
+            if n == 0
+            else f"discards the database for this binary \u2014 {n} "
+            f"function{'s' if n != 1 else ''}, plus any names and comments "
+            f"you've added"
+        )
+        self.push_screen(
+            ConfirmScreen("Reload with different options?", note),
+            self._on_reload_confirmed,
+        )
 
     def _on_reload_confirmed(self, yes) -> None:  # type: ignore[no-untyped-def]
         if not yes:
@@ -5501,7 +5841,8 @@ class IdaTui(App):
                 # binary as already described and never ask again.
                 self._project.set_load(label, processor="", base=0)
                 self._project._entries[self._project._refs.index(ref)].pop(
-                    "processor", None)
+                    "processor", None
+                )
                 self._project.save()
         self._load_args = ""
         if path:
@@ -5521,14 +5862,16 @@ class IdaTui(App):
         if ref is None or ref.load_args:
             return None
         if os.path.exists(ref.db) or os.path.exists(
-                os.path.splitext(ref.staged)[0] + ".i64"):
-            return None    # already analysed: the .i64 records how
+            os.path.splitext(ref.staged)[0] + ".i64"
+        ):
+            return None  # already analysed: the .i64 records how
         try:
             if registered_database(ref.staged, output_database=ref.db):
                 return None
         except Exception:
             pass
         from .formats import needs_load_options
+
         return ref if needs_load_options(ref.source) else None
 
     def _ask_load_options(self, path: str, label: str | None = None) -> None:
@@ -5541,6 +5884,7 @@ class IdaTui(App):
 
     def _on_load_options(self, choice) -> None:  # type: ignore[no-untyped-def]
         from .formats import load_args
+
         choice = choice or {}
         label, self._load_for_label = self._load_for_label, None
         proc, base = choice.get("processor", ""), int(choice.get("base", 0) or 0)
@@ -5573,6 +5917,7 @@ class IdaTui(App):
 
     def _start_rpc(self) -> None:
         from .rpc import RpcServer
+
         self._rpc = RpcServer(self, self._rpc_path)
 
         async def _serve() -> None:
@@ -5594,6 +5939,7 @@ class IdaTui(App):
         when the user has read it and moved on.
         """
         import time as _time
+
         if priority:
             self._flash = text
             self._flash_until = _time.monotonic() + 8.0
@@ -5611,7 +5957,11 @@ class IdaTui(App):
         # It stops being true the moment a function exists, though: latching it
         # meant the warning survived defining one with `p` and kept telling you
         # the load was wrong when it no longer was.
-        if self._no_functions and self._func_index is not None and len(self._func_index):
+        if (
+            self._no_functions
+            and self._func_index is not None
+            and len(self._func_index)
+        ):
             self._no_functions = False
         if self._no_functions:
             text += "   \u2014 no functions: wrong processor/base? Ctrl+L to reload"
@@ -5638,7 +5988,10 @@ class IdaTui(App):
                 subprocess.run(
                     ["tmux", "load-buffer", "-w", "-"],
                     input=text.encode("utf-8", "replace"),
-                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=2.0)
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=2.0,
+                )
             except Exception:  # noqa: BLE001
                 pass
         return len(text)
@@ -5662,8 +6015,7 @@ class IdaTui(App):
             except Exception:  # noqa: BLE001 -- app teardown can win this race
                 pass
 
-        self._idb_event_watch = watch(
-            changed, on_error=failed, debounce=0.2)
+        self._idb_event_watch = watch(changed, on_error=failed, debounce=0.2)
 
     def _stop_idb_event_watch(self) -> None:
         watcher, self._idb_event_watch = self._idb_event_watch, None
@@ -5699,8 +6051,12 @@ class IdaTui(App):
     ) -> None:
         """Invalidate once per external edit burst and reload the active surface."""
         program = self.program
-        if not events or client is not self.client or program is None \
-                or program.client is not client:
+        if (
+            not events
+            or client is not self.client
+            or program is None
+            or program.client is not client
+        ):
             return
         self._idb_refresh_seq += 1
         seq = self._idb_refresh_seq
@@ -5718,7 +6074,8 @@ class IdaTui(App):
         program.invalidate_external()
         self._status(
             f"{len(events)} external database "
-            f"change{'s' if len(events) != 1 else ''} — refreshing…")
+            f"change{'s' if len(events) != 1 else ''} — refreshing…"
+        )
         self._reindex_functions()
 
         if self.is_hex:
@@ -5751,15 +6108,35 @@ class IdaTui(App):
         fn = program.function_of(entry.ea)
         name = fn.name if fn is not None else program.region_label(entry.ea)
         self.app.call_from_thread(
-            self._apply_idb_listing, program, seq, entry, model,
-            cursor, top, anchor.cursor_x, name, fn is None)
+            self._apply_idb_listing,
+            program,
+            seq,
+            entry,
+            model,
+            cursor,
+            top,
+            anchor.cursor_x,
+            name,
+            fn is None,
+        )
 
     def _apply_idb_listing(
-        self, program: Program, seq: int, entry: NavEntry, model,
-        cursor: int, top: int, cursor_x: int, name: str, is_region: bool,
+        self,
+        program: Program,
+        seq: int,
+        entry: NavEntry,
+        model,
+        cursor: int,
+        top: int,
+        cursor_x: int,
+        name: str,
+        is_region: bool,
     ) -> None:
-        if program is not self.program or seq != self._idb_refresh_seq \
-                or entry is not self._cur:
+        if (
+            program is not self.program
+            or seq != self._idb_refresh_seq
+            or entry is not self._cur
+        ):
             return
         if model is None:
             self._status(f"{entry.ea:#x} is no longer in a loaded segment")
@@ -5771,8 +6148,12 @@ class IdaTui(App):
         if top >= 0:
             entry.scroll_y = top
         self.query_one(ListingView).load(
-            model, name, cursor=entry.cursor, cursor_x=entry.cursor_x,
-            scroll_y=top if top >= 0 else None)
+            model,
+            name,
+            cursor=entry.cursor,
+            cursor_x=entry.cursor_x,
+            scroll_y=top if top >= 0 else None,
+        )
         if self.is_listing:
             self._show_active()
 
@@ -5783,6 +6164,7 @@ class IdaTui(App):
         Everything unrelated to database connectivity crashes as usual.
         """
         from textual.worker import WorkerFailed
+
         orig = error.error if isinstance(error, WorkerFailed) else error
         if isinstance(orig, IDAConnectionError):
             self._on_connection_lost()
@@ -5794,7 +6176,8 @@ class IdaTui(App):
             return
         self._reconnecting = True
         self._conn_screen = LoadingScreen(
-            "the analysis server", note="connection lost \u2014 reconnecting\u2026")
+            "the analysis server", note="connection lost \u2014 reconnecting\u2026"
+        )
         self.push_screen(self._conn_screen)
         self._reconnect()
 
@@ -5817,20 +6200,27 @@ class IdaTui(App):
         # must not silently reopen it by spawning a headless worker.
         try:
             if self._open_path is None:
-                self.app.call_from_thread(self._reconnect_failed,
-                                          "no binary to reopen")
+                self.app.call_from_thread(self._reconnect_failed, "no binary to reopen")
                 return
             if self._project is not None and self._binary is not None:
                 ref = self._project.by_label(self._binary)
                 client = NexusClient(
-                    ref.staged, ttl=self._ttl, load_args=ref.load_args,
-                    output_database=ref.db, spawn=False)
+                    ref.staged,
+                    ttl=self._ttl,
+                    load_args=ref.load_args,
+                    output_database=ref.db,
+                    spawn=False,
+                )
             else:
                 client = NexusClient(
-                    self._open_path, ttl=self._ttl,
-                    load_args=self._load_args, spawn=False)
-            client.connect(progress=lambda m: self.app.call_from_thread(
-                self._conn_note, m))
+                    self._open_path,
+                    ttl=self._ttl,
+                    load_args=self._load_args,
+                    spawn=False,
+                )
+            client.connect(
+                progress=lambda m: self.app.call_from_thread(self._conn_note, m)
+            )
         except Exception as e:  # noqa: BLE001
             self.app.call_from_thread(self._reconnect_failed, str(e))
             return
@@ -5859,8 +6249,10 @@ class IdaTui(App):
 
     def _reconnect_failed(self, why: str) -> None:
         self._reconnecting = False
-        note = (f"database owner closed: {why} — reopen it in IDA, then "
-                "Esc and retry an action; or q to quit")
+        note = (
+            f"database owner closed: {why} — reopen it in IDA, then "
+            "Esc and retry an action; or q to quit"
+        )
         self._conn_note(note)
         self._status(note)
 
@@ -5892,15 +6284,17 @@ class IdaTui(App):
         self._start_idb_event_watch(client)
         self._new_database = False
         self.app.call_from_thread(
-            self._status, f"{module} [{client.backend}] — loading functions…")
+            self._status, f"{module} [{client.backend}] — loading functions…"
+        )
         self._load_functions()
 
     def _open_database_client(self):  # type: ignore[no-untyped-def]
         """Attach through IDA Nexus, reusing a GUI or managed idalib database."""
         if self._pool is not None:  # project mode: the pool owns the leases
             label = self._binary or self._project.refs[0].label
-            client = self._pool.get(label, progress=lambda m:
-                                    self.app.call_from_thread(self._status, m))
+            client = self._pool.get(
+                label, progress=lambda m: self.app.call_from_thread(self._status, m)
+            )
             self._binary = label
             self._pool.set_active(label)
             self._open_path = self._project.by_label(label).staged
@@ -5908,17 +6302,21 @@ class IdaTui(App):
             return client
         if not self._open_path:
             self.app.call_from_thread(
-                self._status, "IDA Nexus needs a database or executable path")
+                self._status, "IDA Nexus needs a database or executable path"
+            )
             self.app.call_from_thread(self._dismiss_loading)
             return None
         base = os.path.basename(self._open_path)
         self.app.call_from_thread(
-            self._status, f"discovering IDA Nexus database for {base}…")
-        client = NexusClient(self._open_path, ttl=self._ttl,
-                                load_args=self._load_args,
-                                new_database=self._new_database)
-        client.connect(progress=lambda m: self.app.call_from_thread(
-            self._status, m))
+            self._status, f"discovering IDA Nexus database for {base}…"
+        )
+        client = NexusClient(
+            self._open_path,
+            ttl=self._ttl,
+            load_args=self._load_args,
+            new_database=self._new_database,
+        )
+        client.connect(progress=lambda m: self.app.call_from_thread(self._status, m))
         return client
 
     @work(thread=True, exclusive=True, group="load-funcs")
@@ -5926,7 +6324,9 @@ class IdaTui(App):
         assert self.program is not None
         idx = self.program.functions()
         self._func_index = idx
-        self.app.call_from_thread(lambda: self.query_one("#func-table", DataTable).clear())
+        self.app.call_from_thread(
+            lambda: self.query_one("#func-table", DataTable).clear()
+        )
         last = 0
         while not idx.complete:
             idx.load_next_page()
@@ -5934,21 +6334,20 @@ class IdaTui(App):
             last = len(idx)
             if rows:
                 self.app.call_from_thread(self._append_rows, rows)
-                self.app.call_from_thread(
-                    self._status, f"{last} functions…"
-                )
+                self.app.call_from_thread(self._status, f"{last} functions…")
         # If a filter is active (typed during load), re-apply it over the full set.
         if self._filter_term:
             self.app.call_from_thread(self._apply_filter, self._filter_term)
         else:
             self.app.call_from_thread(
-                self._status, f"{len(idx)} functions   (Ctrl+N: find symbol)")
+                self._status, f"{len(idx)} functions   (Ctrl+N: find symbol)"
+            )
         # Land somewhere useful instead of an empty pane: main() if present,
         # otherwise pop the fuzzy symbol picker.
         self.app.call_from_thread(self._auto_land)
         self._index_binary()  # project mode: keep the cross-binary index fresh
         if self.trace_ctl.armed:
-            self._load_trace()   # needs the index above: rebasing reads it
+            self._load_trace()  # needs the index above: rebasing reads it
 
     @work(thread=True, exclusive=True, group="prewarm")
     def _prewarm_provider(self) -> None:
@@ -5969,6 +6368,7 @@ class IdaTui(App):
         if not imps:
             return
         from collections import Counter
+
         votes: Counter = Counter()
         for name in {i.name for i in imps}:
             for h in self._index.providers(name, exclude=self._binary):
@@ -5981,7 +6381,8 @@ class IdaTui(App):
         try:
             if self._pool.prewarm(cand):
                 self.app.call_from_thread(
-                    self._status, f"pre-warmed {cand} (provides {n} imports)")
+                    self._status, f"pre-warmed {cand} (provides {n} imports)"
+                )
         except Exception:  # noqa: BLE001 -- speculative work must never surface
             pass
 
@@ -5995,11 +6396,13 @@ class IdaTui(App):
         if ref is None or not self._index.is_stale(self._binary, ref.source):
             return
         from .index import KIND_EXPORT, KIND_FUNC, KIND_IMPORT, KIND_STRING
+
         idx = self._func_index
-        entries = [(KIND_FUNC, f.addr, f.name) for f in (idx.all_loaded() if idx else [])]
+        entries = [
+            (KIND_FUNC, f.addr, f.name) for f in (idx.all_loaded() if idx else [])
+        ]
         try:
-            entries += [(KIND_STRING, s.addr, s.text)
-                        for s in self.program.strings()]
+            entries += [(KIND_STRING, s.addr, s.text) for s in self.program.strings()]
         except Exception:  # noqa: BLE001 -- symbols alone are still worth indexing
             pass
         try:
@@ -6014,7 +6417,8 @@ class IdaTui(App):
             self.app.call_from_thread(self._status, f"indexing failed: {e}")
             return
         self.app.call_from_thread(
-            self._status, f"indexed {self._binary}: {n} symbols, strings + linkage")
+            self._status, f"indexed {self._binary}: {n} symbols, strings + linkage"
+        )
         self._prewarm_provider()
 
     # -- initial landing --------------------------------------------------- #
@@ -6057,8 +6461,9 @@ class IdaTui(App):
             first = self._func_index.get(0)
             if first is not None:
                 self._open_function(first.addr, first.name)
-                self._status(f"no entry function — opened {first.name}   "
-                             "(Ctrl+N: find symbol)")
+                self._status(
+                    f"no entry function — opened {first.name}   (Ctrl+N: find symbol)"
+                )
             else:
                 self.action_symbols()
         else:
@@ -6087,8 +6492,13 @@ class IdaTui(App):
         if start is None:
             self._status("no functions and no segments \u2014 nothing to show")
             return
-        self._open_at(start, self.program.section_of(start) or "image",
-                      cursor=0, push=True, is_region=True)
+        self._open_at(
+            start,
+            self.program.section_of(start) or "image",
+            cursor=0,
+            push=True,
+            is_region=True,
+        )
 
     def _can_reload(self) -> bool:
         """Whether IDA Nexus can replace this IDB with different options.
@@ -6145,7 +6555,9 @@ class IdaTui(App):
         ci = term.islower()
         is_glob = ("*" in term) or ("?" in term)
         needle = term.lower() if ci else term
-        pat = needle if (is_glob and ("*" in needle or "?" in needle)) else f"*{needle}*"
+        pat = (
+            needle if (is_glob and ("*" in needle or "?" in needle)) else f"*{needle}*"
+        )
         matched: list[tuple[Func, tuple[int, int] | None]] = []
         for f in funcs:
             if not term:
@@ -6230,9 +6642,10 @@ class IdaTui(App):
         if not funcs:
             self._status("functions still loading…")
             return
-        self.push_screen(SymbolPalette(funcs, index=self._index,
-                                       binary=self._binary),
-                         self._on_symbol_chosen)
+        self.push_screen(
+            SymbolPalette(funcs, index=self._index, binary=self._binary),
+            self._on_symbol_chosen,
+        )
 
     def _on_symbol_chosen(self, choice) -> None:  # type: ignore[no-untyped-def]
         if choice is None:
@@ -6267,11 +6680,15 @@ class IdaTui(App):
         active one and other still-resident binaries can be dirty.
         """
         if self._pool is None:
-            return [os.path.basename(self._open_path or "database")] if self._dirty else []
+            return (
+                [os.path.basename(self._open_path or "database")] if self._dirty else []
+            )
         out = [self._binary] if (self._dirty and self._binary) else []
-        out += [label for label, st in self._states.items()
-                if st.dirty and label != self._binary
-                and self._pool.is_resident(label)]
+        out += [
+            label
+            for label, st in self._states.items()
+            if st.dirty and label != self._binary and self._pool.is_resident(label)
+        ]
         return out
 
     async def action_quit(self) -> None:
@@ -6290,13 +6707,16 @@ class IdaTui(App):
             # GUI/shared sessions retain state and inherit finalization.
             dirty = self._dirty_labels()
             self._loading_screen = LoadingScreen(
-                "discarding", note="finalizing database leases…")
+                "discarding", note="finalizing database leases…"
+            )
             self.push_screen(self._loading_screen)
             self._discard_then_exit(dirty)
         elif choice == "save":
             # Save with the overlay up: writing a big .i64 takes seconds, and
             # doing it during teardown would look like a hang with no UI left.
-            self._loading_screen = LoadingScreen("saving", note="writing databases\u2026")
+            self._loading_screen = LoadingScreen(
+                "saving", note="writing databases\u2026"
+            )
             self.push_screen(self._loading_screen)
             self._save_then_exit()
         # None: cancel, stay put
@@ -6322,8 +6742,7 @@ class IdaTui(App):
     def _finish_discard(self, transferred: list[str]) -> None:
         if transferred and self._loading_screen is not None:
             labels = ", ".join(transferred)
-            self._loading_screen.update_note(
-                f"finalization transferred: {labels}")
+            self._loading_screen.update_note(f"finalization transferred: {labels}")
         self._finish_exit()
 
     @work(thread=True, exclusive=True, group="save-exit")
@@ -6358,8 +6777,7 @@ class IdaTui(App):
             return
         if self._prompt_active():
             return
-        self.push_screen(ProjectPalette(self._pool.status()),
-                         self._on_binary_chosen)
+        self.push_screen(ProjectPalette(self._pool.status()), self._on_binary_chosen)
 
     def _on_binary_chosen(self, label: str | None) -> None:
         if label and label != self._binary:
@@ -6377,10 +6795,16 @@ class IdaTui(App):
         # the pool hand us a lease (attaching + evicting as the budget dictates).
         if self._binary is not None:
             self._states[self._binary] = BinaryState(
-                label=self._binary, program=self.program,
-                func_index=self._func_index, nav=list(self._nav), cur=self._cur,
-                active=self._active, split=self._split,
-                filter_term=self._filter_term, dirty=self._dirty)
+                label=self._binary,
+                program=self.program,
+                func_index=self._func_index,
+                nav=list(self._nav),
+                cur=self._cur,
+                active=self._active,
+                split=self._split,
+                filter_term=self._filter_term,
+                dirty=self._dirty,
+            )
         self._loading_screen = LoadingScreen(label, note="switching\u2026")
         self.push_screen(self._loading_screen)
         self._do_switch(label)
@@ -6389,8 +6813,9 @@ class IdaTui(App):
     def _do_switch(self, label: str) -> None:
         assert self._pool is not None
         try:
-            client = self._pool.get(label, progress=lambda m:
-                                    self.app.call_from_thread(self._status, m))
+            client = self._pool.get(
+                label, progress=lambda m: self.app.call_from_thread(self._status, m)
+            )
         except Exception as e:  # noqa: BLE001
             self.app.call_from_thread(self._switch_failed, label, str(e))
             return
@@ -6398,11 +6823,13 @@ class IdaTui(App):
         # The Program (and its caches) only survive while that lease does; an
         # evicted binary reattaches. Either way the nav
         # history is just addresses, so it always survives.
-        reuse = (st is not None and st.program is not None
-                 and getattr(st.program, "client", None) is client)
+        reuse = (
+            st is not None
+            and st.program is not None
+            and getattr(st.program, "client", None) is client
+        )
         program = st.program if reuse else Program(client)
-        self.app.call_from_thread(self._after_switch, label, client, program,
-                                  st, reuse)
+        self.app.call_from_thread(self._after_switch, label, client, program, st, reuse)
 
     def _after_switch(self, label, client, program, st, reuse) -> None:  # type: ignore[no-untyped-def]
         self.client = client
@@ -6478,9 +6905,10 @@ class IdaTui(App):
             self._status("no strings found (needs the list_strings tool)")
             return
         self._status(f"strings: {len(items)}")
-        self.push_screen(StringsPalette(items, index=self._index,
-                                        binary=self._binary),
-                         self._on_string_chosen)
+        self.push_screen(
+            StringsPalette(items, index=self._index, binary=self._binary),
+            self._on_string_chosen,
+        )
 
     def action_find(self) -> None:
         """Ctrl+F: search the whole database — disassembly text, or bytes."""
@@ -6497,7 +6925,7 @@ class IdaTui(App):
             try:
                 seed = view.word_under_cursor() or ""
             except Exception:  # noqa: BLE001 -- a seed is a nicety, never a
-                seed = ""       # reason not to open the search
+                seed = ""  # reason not to open the search
         self.push_screen(SearchPalette(self.program, seed), self._on_hit_chosen)
 
     def _on_hit_chosen(self, hit) -> None:  # type: ignore[no-untyped-def]
@@ -6508,8 +6936,9 @@ class IdaTui(App):
         # there. The status names the exact address so it isn't lost.
         self._goto_ea(hit.head, push=True)
         if hit.addr != hit.head:
-            self._status(f"match at {hit.addr:#x} (inside {hit.head:#x})",
-                         priority=True)
+            self._status(
+                f"match at {hit.addr:#x} (inside {hit.head:#x})", priority=True
+            )
 
     def _on_string_chosen(self, choice) -> None:  # type: ignore[no-untyped-def]
         if choice is None:
@@ -6549,8 +6978,7 @@ class IdaTui(App):
             # active, but the listing must still round-trip through addresses:
             # row indices do not survive an external structure change.
             lst = self.query_one(ListingView)
-            listing_anchor = ViewAnchor(view=ViewMode.LISTING,
-                                        cursor_x=lst.cursor_x)
+            listing_anchor = ViewAnchor(view=ViewMode.LISTING, cursor_x=lst.cursor_x)
             model = lst.model
             if model is not None:
                 listing_anchor.ea = lst._cursor_ea()
@@ -6570,20 +6998,27 @@ class IdaTui(App):
                 cur.dec_scroll_x = round(dec.scroll_offset.x)
             dec.loading = True
 
-        want_ea = (self.query_one(GraphView)._cursor_ea()
-                   if self.is_graph else None)
+        want_ea = self.query_one(GraphView)._cursor_ea() if self.is_graph else None
         if self.is_graph:
             self._graph_sticky = True
             self._status(f"{cur.name} — refreshing graph…")
         else:
             self._status(f"{cur.name} — refreshing…")
-        self._refresh_view(cur, mode, split, listing_anchor,
-                           refresh_decomp, want_ea, self.program)
+        self._refresh_view(
+            cur, mode, split, listing_anchor, refresh_decomp, want_ea, self.program
+        )
 
     @work(thread=True, exclusive=True, group="refresh-view")
-    def _refresh_view(self, cur: NavEntry, mode: ViewMode, split: bool,
-                      anchor: ViewAnchor | None, refresh_decomp: bool,
-                      want_ea: int | None, program) -> None:  # type: ignore[no-untyped-def]
+    def _refresh_view(
+        self,
+        cur: NavEntry,
+        mode: ViewMode,
+        split: bool,
+        anchor: ViewAnchor | None,
+        refresh_decomp: bool,
+        want_ea: int | None,
+        program,
+    ) -> None:  # type: ignore[no-untyped-def]
         """Invalidate and rebuild without blocking Textual's event loop."""
         try:
             program.bump_items()
@@ -6600,22 +7035,40 @@ class IdaTui(App):
                     cursor, top = self._anchor_rows(anchor, model, target)
         except Exception as exc:  # noqa: BLE001 -- a refresh is recoverable
             diag.note("refresh_view", exc)
-            self.app.call_from_thread(
-                self._view_refresh_failed, cur, program, str(exc))
+            self.app.call_from_thread(self._view_refresh_failed, cur, program, str(exc))
             return
         self.app.call_from_thread(
-            self._apply_view_refresh, cur, mode, split, anchor,
-            refresh_decomp, want_ea, program, model, cursor, top)
+            self._apply_view_refresh,
+            cur,
+            mode,
+            split,
+            anchor,
+            refresh_decomp,
+            want_ea,
+            program,
+            model,
+            cursor,
+            top,
+        )
 
     def _view_refresh_failed(self, cur: NavEntry, program, error: str) -> None:  # type: ignore[no-untyped-def]
         if self.program is program and self._cur is cur:
             self.query_one(DecompView).loading = False
             self._status(f"refresh failed: {error}", priority=True)
 
-    def _apply_view_refresh(self, cur: NavEntry, mode: ViewMode, split: bool,
-                            anchor: ViewAnchor | None, refresh_decomp: bool,
-                            want_ea: int | None, program, model, cursor: int,
-                            top: int) -> None:  # type: ignore[no-untyped-def]
+    def _apply_view_refresh(
+        self,
+        cur: NavEntry,
+        mode: ViewMode,
+        split: bool,
+        anchor: ViewAnchor | None,
+        refresh_decomp: bool,
+        want_ea: int | None,
+        program,
+        model,
+        cursor: int,
+        top: int,
+    ) -> None:  # type: ignore[no-untyped-def]
         # A binary switch or navigation completed while the refresh was in
         # flight. Its newer view wins; never drag the user back.
         if self.program is not program or self._cur is not cur:
@@ -6632,9 +7085,13 @@ class IdaTui(App):
             cur.cursor = max(cursor, 0)
             cur.cursor_x = anchor.cursor_x
             cur.scroll_y = top
-            lst.load(model, cur.name, cursor=cur.cursor,
-                     cursor_x=cur.cursor_x,
-                     scroll_y=top if top >= 0 else None)
+            lst.load(
+                model,
+                cur.name,
+                cursor=cur.cursor,
+                cursor_x=cur.cursor_x,
+                scroll_y=top if top >= 0 else None,
+            )
         if refresh_decomp:
             self.query_one(DecompView).loaded_ea = None
         self._show_active()
@@ -6659,8 +7116,11 @@ class IdaTui(App):
         if self._split:
             # In split mode Tab/F5 just moves focus between the two panes.
             self._active = ViewMode.DECOMP if self.is_listing else ViewMode.LISTING
-            (self.query_one(DecompView) if self.is_decomp
-             else self.query_one(ListingView)).focus()
+            (
+                self.query_one(DecompView)
+                if self.is_decomp
+                else self.query_one(ListingView)
+            ).focus()
             self._sync_split(self._active)  # re-link from the new driver
             self._status_for_cur("split")
             return
@@ -6752,7 +7212,8 @@ class IdaTui(App):
         if fn is None:
             self.app.call_from_thread(
                 self._decomp_from_listing_failed,
-                "F5 — cursor is not inside a defined function ('p' to make one)")
+                "F5 — cursor is not inside a defined function ('p' to make one)",
+            )
             return
         dec_idx = self._decomp_line_for(fn.addr, ea)
         self.app.call_from_thread(self._enter_decomp, fn.addr, fn.name, dec_idx)
@@ -6774,8 +7235,9 @@ class IdaTui(App):
             ret.cursor_x = lst.cursor_x
             ret.scroll_y = round(lst.scroll_offset.y)
         self._decomp_return = ret
-        entry = NavEntry(ea=fn_addr, name=fn_name, is_region=False,
-                         dec_cursor=max(dec_idx, 0))
+        entry = NavEntry(
+            ea=fn_addr, name=fn_name, is_region=False, dec_cursor=max(dec_idx, 0)
+        )
         self._cur = entry
         self._active = ViewMode.DECOMP
         self._show_active()
@@ -6788,8 +7250,10 @@ class IdaTui(App):
             self._status("open a function first")
             return
         if not self._split and self.size.width < _SPLIT_MIN_WIDTH:
-            self._status(f"terminal too narrow for split — need ≈{_SPLIT_MIN_WIDTH} "
-                         f"cols (have {self.size.width})")
+            self._status(
+                f"terminal too narrow for split — need ≈{_SPLIT_MIN_WIDTH} "
+                f"cols (have {self.size.width})"
+            )
             return
         self._split = not self._split
         if self._active not in ("listing", "decomp"):
@@ -6819,8 +7283,11 @@ class IdaTui(App):
         self._graph_sticky = True
         gv = self.query_one(GraphView)
         ea = self._graph_target_ea()
-        if gv.loaded_ea is not None and gv.fc is not None \
-                and gv.fc.func_ea == self._cur.ea:
+        if (
+            gv.loaded_ea is not None
+            and gv.fc is not None
+            and gv.fc.func_ea == self._cur.ea
+        ):
             self._active = ViewMode.GRAPH
             self._split = False
             self._show_active()
@@ -6857,8 +7324,13 @@ class IdaTui(App):
             err = f"{type(e).__name__}: {e}"
         self.app.call_from_thread(self._apply_graph, func_ea, want_ea, fc, err)
 
-    def _apply_graph(self, func_ea: int, want_ea: int | None, fc,  # type: ignore[no-untyped-def]
-                     err: str) -> None:
+    def _apply_graph(
+        self,
+        func_ea: int,
+        want_ea: int | None,
+        fc,  # type: ignore[no-untyped-def]
+        err: str,
+    ) -> None:
         if self._cur is None or self._cur.ea != func_ea:
             return  # a newer navigation won
         if not self._graph_sticky and not self.is_graph:
@@ -6867,13 +7339,17 @@ class IdaTui(App):
             # here drags them back into a graph they already dismissed.
             return
         if fc is None:
-            self._status(err or "no control-flow graph for this function "
-                                "(is it a thunk or an import?)")
+            self._status(
+                err
+                or "no control-flow graph for this function "
+                "(is it a thunk or an import?)"
+            )
             return
         if len(fc.blocks) > self.GRAPH_MAX_BLOCKS:
             self._status(
                 f"{fc.name}: {len(fc.blocks)} blocks — too many to graph "
-                f"(limit {self.GRAPH_MAX_BLOCKS}); staying in the listing")
+                f"(limit {self.GRAPH_MAX_BLOCKS}); staying in the listing"
+            )
             return
         gv = self.query_one(GraphView)
         gv.set_graph(fc, want_ea)
@@ -6887,12 +7363,15 @@ class IdaTui(App):
         if gv.lay is None or gv.fc is None:
             return
         s = gv.lay.stats
-        loops = f", {s['back']} loop{'s' if s['back'] != 1 else ''}" if s["back"] else ""
+        loops = (
+            f", {s['back']} loop{'s' if s['back'] != 1 else ''}" if s["back"] else ""
+        )
         eng = "" if s.get("engine") == "native" else f", {s.get('engine')}"
         self._status(
             f"{gv.fc.name}  @ {gv.fc.func_ea:#x}   [graph: {s['blocks']} blocks, "
             f"{s['edges']} edges{loops}{eng}]  "
-            f"z=zoom({gv.ZOOMS[gv._zoom]}) m=map J/K=edge space=text")
+            f"z=zoom({gv.ZOOMS[gv._zoom]}) m=map J/K=edge space=text"
+        )
 
     def on_graph_view_cursor_moved(self, msg: "GraphView.CursorMoved") -> None:
         gv = self.query_one(GraphView)
@@ -6918,7 +7397,7 @@ class IdaTui(App):
             lst.load(lm, name, cursor=idx, scroll_y=max(idx - _JUMP_CONTEXT, 0))
         self._show_active()  # split branch shows both + loads the decomp
         self._sync_split(self._active)  # crude link now
-        self._load_split_map(ea)         # region map (async) if decomp is loaded
+        self._load_split_map(ea)  # region map (async) if decomp is loaded
 
     def action_hex(self) -> None:
         """Backslash: show the raw bytes of the loaded image, synced to the code
@@ -6981,8 +7460,9 @@ class IdaTui(App):
         try:
             self.journal.load(self.program)
             self.journal.flush(self.program)
-            out, f = findings.export(self.program, self._open_path or "", path,
-                                     journal=self.journal)
+            out, f = findings.export(
+                self.program, self._open_path or "", path, journal=self.journal
+            )
         except Exception as e:  # noqa: BLE001 -- a bad path is a message, not a crash
             self.call_from_thread(self._status, f"export failed: {e}", True)
             return
@@ -6990,12 +7470,17 @@ class IdaTui(App):
         self.call_from_thread(
             self._status,
             f"exported {len(f.comments)} comments, {n_named} names, "
-            f"{len(f.types)} types → {out}", True)
+            f"{len(f.types)} types → {out}",
+            True,
+        )
 
     def action_goto(self) -> None:
         inp = self.query_one("#goto", Input)
-        inp.placeholder = ("hex goto: 0xADDR or name — Enter" if self.is_hex
-                           else "goto: name or 0xADDR — Enter")
+        inp.placeholder = (
+            "hex goto: 0xADDR or name — Enter"
+            if self.is_hex
+            else "goto: name or 0xADDR — Enter"
+        )
         inp.can_focus = True
         inp.display = True
         inp.value = ""
@@ -7026,7 +7511,7 @@ class IdaTui(App):
             # Local history is spent, but we got here from another binary.
             label = self._hops.pop()
             self._status(f"\u25c2 back to {label}\u2026")
-            self._switch_binary(label)   # _states restores its nav and position
+            self._switch_binary(label)  # _states restores its nav and position
         elif self.query_one("#left", FunctionsPanel).display:
             table.focus()
         else:
@@ -7069,11 +7554,11 @@ class IdaTui(App):
                 # 'code' xref, and land on a call/jump's real target instead.
                 self._follow_disasm(ea, word, view._next_ea())
         elif isinstance(view, DecompView) and view._texts:
-            self._follow_decomp(view._texts[view.cursor], word,
-                                view._line_ea(view.cursor))
+            self._follow_decomp(
+                view._texts[view.cursor], word, view._line_ea(view.cursor)
+            )
 
-    def _graph_local_target(self, view: "GraphView", ea: int,
-                            word: str) -> int | None:
+    def _graph_local_target(self, view: "GraphView", ea: int, word: str) -> int | None:
         """If the cursor's instruction branches somewhere inside this same
         graph, return that address."""
         if view.fc is None or self.program is None:
@@ -7152,14 +7637,16 @@ class IdaTui(App):
         return not all(c in "0123456789abcdefABCDEF" for c in word)
 
     @work(thread=True, group="nav")
-    def _follow_disasm(self, ea: int, word: str | None,
-                       next_ea: int | None = None) -> None:
+    def _follow_disasm(
+        self, ea: int, word: str | None, next_ea: int | None = None
+    ) -> None:
         assert self.program is not None
         # Prefer the symbol under the cursor (handles multiple refs on a line).
         if self._looks_like_symbol(word):
             try:
-                self._do_navigate(self.program.resolve(word), push=True,
-                                  focus_name=word)
+                self._do_navigate(
+                    self.program.resolve(word), push=True, focus_name=word
+                )
                 return
             except Exception:  # noqa: BLE001 -- not a resolvable name; fall back
                 pass
@@ -7218,13 +7705,15 @@ class IdaTui(App):
             return False
         label, addr = found
         self.app.call_from_thread(
-            self._status, f"{name} \u2192 {label}  (import resolved)")
+            self._status, f"{name} \u2192 {label}  (import resolved)"
+        )
         self.app.call_from_thread(self._switch_then_goto, label, addr)
         return True
 
     @work(thread=True, group="nav")
-    def _follow_decomp(self, line: str, word: str | None,
-                       line_ea: int | None = None) -> None:
+    def _follow_decomp(
+        self, line: str, word: str | None, line_ea: int | None = None
+    ) -> None:
         if self._cur is None:
             return
         dec = self.program.decompile(self._cur.ea)
@@ -7267,8 +7756,13 @@ class IdaTui(App):
         return None
 
     @work(thread=True, group="xrefs")
-    def _xrefs_disasm(self, ea: int, word: str | None,
-                      here_ea: int | None = None, here_end: int | None = None) -> None:
+    def _xrefs_disasm(
+        self,
+        ea: int,
+        word: str | None,
+        here_ea: int | None = None,
+        here_end: int | None = None,
+    ) -> None:
         assert self.program is not None
         subj: int | None = None
         if self._looks_like_symbol(word):
@@ -7285,8 +7779,13 @@ class IdaTui(App):
         self._xrefs_present(subj, word, here_ea, here_end)
 
     @work(thread=True, group="xrefs")
-    def _xrefs_decomp(self, line: str, word: str | None,
-                      here_ea: int | None = None, here_end: int | None = None) -> None:
+    def _xrefs_decomp(
+        self,
+        line: str,
+        word: str | None,
+        here_ea: int | None = None,
+        here_end: int | None = None,
+    ) -> None:
         subj: int | None = None
         if self._cur is not None and word:
             dec = self.program.decompile(self._cur.ea)
@@ -7317,9 +7816,13 @@ class IdaTui(App):
                 span = i
         return span if span is not None else 0
 
-    def _xrefs_present(self, subj: int, subj_name: str | None = None,
-                       here_ea: int | None = None,
-                       here_end: int | None = None) -> None:  # worker
+    def _xrefs_present(
+        self,
+        subj: int,
+        subj_name: str | None = None,
+        here_ea: int | None = None,
+        here_end: int | None = None,
+    ) -> None:  # worker
         assert self.program is not None
         try:
             return self._xrefs_present_inner(subj, subj_name, here_ea, here_end)
@@ -7380,22 +7883,30 @@ class IdaTui(App):
         if not name:
             return []
         from .domain import link_name
+
         name = link_name(name)
         try:
             _, exports = self.program.linkage()
         except Exception:  # noqa: BLE001
             return []
         if not any(e.name == name for e in exports):
-            return []          # we don't export it; nobody imports it FROM US
+            return []  # we don't export it; nobody imports it FROM US
         try:
             hits = self._index.importers(name, exclude=self._binary)
         except Exception:  # noqa: BLE001
             return []
-        return [(h.binary, h.addr, f"{h.addr:08X}  import  [{h.binary}] {name}")
-                for h in hits]
+        return [
+            (h.binary, h.addr, f"{h.addr:08X}  import  [{h.binary}] {name}")
+            for h in hits
+        ]
 
-    def _present_xrefs(self, label: str, items: list[tuple[object, str]],
-                       focus_name: str | None = None, preselect: int = 0) -> None:
+    def _present_xrefs(
+        self,
+        label: str,
+        items: list[tuple[object, str]],
+        focus_name: str | None = None,
+        preselect: int = 0,
+    ) -> None:
         if not self._xref_active:
             return  # cancelled (Esc) while we were still gathering
         self._xref_active = False
@@ -7410,14 +7921,18 @@ class IdaTui(App):
     def _on_xref_chosen(self, addr) -> None:  # type: ignore[no-untyped-def]
         if addr is None:
             return
-        if isinstance(addr, tuple):   # a caller in another project binary
+        if isinstance(addr, tuple):  # a caller in another project binary
             binary, ea = addr
-            self._switch_then_goto(binary, ea)   # records a hop, so Esc returns
+            self._switch_then_goto(binary, ea)  # records a hop, so Esc returns
             return
         # If xrefs was invoked from the decompiler, land the jump back in the
         # decompiler (when the target is decompilable) rather than the listing.
-        self._goto_ea(addr, push=True, focus_name=self._xref_focus_name,
-                      prefer_decomp=(self.is_decomp))
+        self._goto_ea(
+            addr,
+            push=True,
+            focus_name=self._xref_focus_name,
+            prefer_decomp=(self.is_decomp),
+        )
 
     # -- database edits ---------------------------------------------------- #
     # The bodies live in EditController (idatui/edit_ctl.py). What stays here is
@@ -7466,18 +7981,21 @@ class IdaTui(App):
         self.edits.do_retype(kind, subject, word, new)
 
     @work(thread=True, exclusive=True, group="makedata")
-    def _do_make_data(self, ea: int, type_decl: str,
-                      anchor: ViewAnchor | None = None) -> None:
+    def _do_make_data(
+        self, ea: int, type_decl: str, anchor: ViewAnchor | None = None
+    ) -> None:
         self.edits.do_make_data(ea, type_decl, anchor)
 
     @work(thread=True, exclusive=True, group="opformat")
-    def _do_op_format(self, mode: str, where: str, ea: int, col: int,
-                      line: int = -1) -> None:
+    def _do_op_format(
+        self, mode: str, where: str, ea: int, col: int, line: int = -1
+    ) -> None:
         self.edits.do_op_format(mode, where, ea, col, line)
 
     @work(thread=True, exclusive=True, group="edititem")
-    def _do_edit_item(self, kind: str, ea: int,
-                      anchor: ViewAnchor | None = None) -> None:
+    def _do_edit_item(
+        self, kind: str, ea: int, anchor: ViewAnchor | None = None
+    ) -> None:
         self.edits.do_edit_item(kind, ea, anchor)
 
     def _reload_active_code(self) -> None:
@@ -7574,13 +8092,13 @@ class IdaTui(App):
             return
         if len(idx):
             self._no_functions = False
-        self._apply_filter(self._filter_term)   # repopulate the names pane
+        self._apply_filter(self._filter_term)  # repopulate the names pane
 
     @work(thread=True, exclusive=True, group="save")
     def _save(self) -> None:
         assert self.program is not None
         try:
-            self.journal.flush(self.program)   # ride along into the .i64
+            self.journal.flush(self.program)  # ride along into the .i64
             self.program.client.save_database()
         except Exception as e:  # noqa: BLE001
             self.app.call_from_thread(self._status, f"save failed: {e}")
@@ -7596,12 +8114,22 @@ class IdaTui(App):
 
     # -- navigation to an arbitrary address ------------------------------- #
     @work(thread=True, group="nav")
-    def _goto_ea(self, ea: int, push: bool = True,
-                 focus_name: str | None = None, prefer_decomp: bool = False) -> None:
+    def _goto_ea(
+        self,
+        ea: int,
+        push: bool = True,
+        focus_name: str | None = None,
+        prefer_decomp: bool = False,
+    ) -> None:
         self._do_navigate(ea, push, focus_name, prefer_decomp)
 
-    def _do_navigate(self, ea: int, push: bool, focus_name: str | None = None,
-                     prefer_decomp: bool = False) -> None:  # worker context
+    def _do_navigate(
+        self,
+        ea: int,
+        push: bool,
+        focus_name: str | None = None,
+        prefer_decomp: bool = False,
+    ) -> None:  # worker context
         assert self.program is not None
         # Which navigation this is. Decompiling below can take a while, and if
         # you press Esc (or jump again) in the meantime this result is stale —
@@ -7623,11 +8151,12 @@ class IdaTui(App):
                     # anchor on the address but snap to the nearest line that
                     # actually holds the referenced symbol (the marker line and
                     # the symbol's line can differ), landing on the token.
-                    dec_idx, col = self._decomp_locate(fn.addr, ea,
-                                                       focus_name or fn.name)
+                    dec_idx, col = self._decomp_locate(
+                        fn.addr, ea, focus_name or fn.name
+                    )
                 self.app.call_from_thread(
-                    self._open_decomp_entry, fn.addr, fn.name, dec_idx, col,
-                    push, seq)
+                    self._open_decomp_entry, fn.addr, fn.name, dec_idx, col, push, seq
+                )
                 return
         # Otherwise: everything opens the one continuous listing at ``ea``. A
         # function name is used for the status label; a region gets a segment
@@ -7636,12 +8165,18 @@ class IdaTui(App):
         idx = max(lm.ensure_ea(ea), 0) if lm is not None else 0
         name = fn.name if fn is not None else self.program.region_label(ea)
         self.app.call_from_thread(
-            self._open_at_if_current, seq, ea, name, idx, push, fn is None,
-            focus_name)
+            self._open_at_if_current, seq, ea, name, idx, push, fn is None, focus_name
+        )
 
-    def _open_decomp_entry(self, fn_addr: int, fn_name: str, dec_idx: int,
-                           dec_cursor_x: int, push: bool,
-                           seq: int | None = None) -> None:
+    def _open_decomp_entry(
+        self,
+        fn_addr: int,
+        fn_name: str,
+        dec_idx: int,
+        dec_cursor_x: int,
+        push: bool,
+        seq: int | None = None,
+    ) -> None:
         """Open ``fn_addr`` in the decompiler as a real navigation (nav history
         aware), landing on pseudocode line ``dec_idx`` column ``dec_cursor_x``.
 
@@ -7663,12 +8198,17 @@ class IdaTui(App):
                 src.dec_cursor_x = dv.cursor_x
                 src.dec_scroll_y = round(dv.scroll_offset.y)
                 if not self._nav or self._nav[-1] is not src:
-                    self._push_nav(src)   # never stack a second copy of a spot
+                    self._push_nav(src)  # never stack a second copy of a spot
             else:
                 self._save_current_pos()
         self._decomp_return = None  # a real navigation abandons the F5 return
-        entry = NavEntry(ea=fn_addr, name=fn_name, view="decomp",
-                         dec_cursor=dec_idx, dec_cursor_x=dec_cursor_x)
+        entry = NavEntry(
+            ea=fn_addr,
+            name=fn_name,
+            view="decomp",
+            dec_cursor=dec_idx,
+            dec_cursor_x=dec_cursor_x,
+        )
         if push:
             self._push_nav(entry)
         self._open_entry(entry, push=False)
@@ -7689,8 +8229,9 @@ class IdaTui(App):
         m = re.search(rf"\b{re.escape(name)}\b", clean)
         return m.start() if m else 0
 
-    def _decomp_locate(self, fn_addr: int, ea: int,
-                       token: str | None) -> tuple[int, int]:
+    def _decomp_locate(
+        self, fn_addr: int, ea: int, token: str | None
+    ) -> tuple[int, int]:
         """Best (line, column) for address ``ea`` in ``fn_addr``'s pseudocode.
 
         Anchors on the /*0xEA*/ marker line for ``ea``, but Hex-Rays can attribute
@@ -7748,8 +8289,9 @@ class IdaTui(App):
         move, so it has no business being a step in the history."""
         if a.ea != b.ea or a.view != b.view:
             return False
-        return (a.dec_cursor == b.dec_cursor if a.view == "decomp"
-                else a.cursor == b.cursor)
+        return (
+            a.dec_cursor == b.dec_cursor if a.view == "decomp" else a.cursor == b.cursor
+        )
 
     def _push_nav(self, entry: NavEntry) -> None:
         """Append to the nav stack unless that would duplicate where we already are.
@@ -7810,9 +8352,16 @@ class IdaTui(App):
             cur = row_of(fallback_ea)
         return (cur, row_of(a.top_ea))
 
-    def _open_at_if_current(self, seq: int, ea: int, name: str, cursor: int,
-                            push: bool, is_region: bool,
-                            focus_name: str | None) -> None:
+    def _open_at_if_current(
+        self,
+        seq: int,
+        ea: int,
+        name: str,
+        cursor: int,
+        push: bool,
+        is_region: bool,
+        focus_name: str | None,
+    ) -> None:
         """Apply a navigation result only if it's still the one being awaited.
 
         The decompiler path has had this since 756589a; the listing path hadn't,
@@ -7822,10 +8371,18 @@ class IdaTui(App):
             return
         self._open_at(ea, name, cursor, push, -1, 0, is_region, focus_name)
 
-    def _open_at(self, ea: int, name: str, cursor: int, push: bool,
-                 dec_cursor: int = -1, dec_cursor_x: int = 0,
-                 is_region: bool = False, focus_name: str | None = None,
-                 scroll_y: int = -1) -> None:
+    def _open_at(
+        self,
+        ea: int,
+        name: str,
+        cursor: int,
+        push: bool,
+        dec_cursor: int = -1,
+        dec_cursor_x: int = 0,
+        is_region: bool = False,
+        focus_name: str | None = None,
+        scroll_y: int = -1,
+    ) -> None:
         if push:
             self._save_current_pos()
         self._decomp_return = None  # a real navigation abandons the F5 return
@@ -7882,8 +8439,11 @@ class IdaTui(App):
                 self._end_search(cancel=True)
             elif prompt.id in ("goto", "export"):
                 self._end_goto() if prompt.id == "goto" else self._end_export()
-                (self.query_one(HexView) if self.is_hex
-                 else (self._code_view() or self.query_one(ListingView))).focus()
+                (
+                    self.query_one(HexView)
+                    if self.is_hex
+                    else (self._code_view() or self.query_one(ListingView))
+                ).focus()
             else:
                 prompt.close()
             return
@@ -7913,10 +8473,12 @@ class IdaTui(App):
         # The edit prompts all submit the same way: take the context the prompt
         # was holding (close() hands it over, so it can't be read twice or go
         # stale) and let the controller decide what to do with it.
-        submit = {"rename": self.edits.submit_rename,
-                  "comment": self.edits.submit_comment,
-                  "retype": self.edits.submit_retype,
-                  "makedata": self.edits.submit_make_data}.get(inp.id or "")
+        submit = {
+            "rename": self.edits.submit_rename,
+            "comment": self.edits.submit_comment,
+            "retype": self.edits.submit_retype,
+            "makedata": self.edits.submit_make_data,
+        }.get(inp.id or "")
         if submit is not None:
             ctx = self.prompts[inp.id].close()
             if ctx is not None:
@@ -7924,15 +8486,21 @@ class IdaTui(App):
             return
         if inp.id == "goto":
             self._end_goto()
-            (self.query_one(HexView) if self.is_hex
-             else (self._code_view() or self.query_one(ListingView))).focus()
+            (
+                self.query_one(HexView)
+                if self.is_hex
+                else (self._code_view() or self.query_one(ListingView))
+            ).focus()
             if value:
                 self._goto(value)
             return
         if inp.id == "export":
             self._end_export()
-            (self.query_one(HexView) if self.is_hex
-             else (self._code_view() or self.query_one(ListingView))).focus()
+            (
+                self.query_one(HexView)
+                if self.is_hex
+                else (self._code_view() or self.query_one(ListingView))
+            ).focus()
             if value:
                 self.export_findings(value)
             return
@@ -8097,12 +8665,12 @@ class IdaTui(App):
             e.scroll_y = round(lst.scroll_offset.y)
 
     @work(thread=True, group="nav")
-    def _open_function(self, ea: int, name: str | None = None,
-                       push: bool = True) -> None:
+    def _open_function(
+        self, ea: int, name: str | None = None, push: bool = True
+    ) -> None:
         # Unified: opening a function is just navigating the one linear listing
         # to its entry address.
         self._do_navigate(ea, push)
-
 
     def _code_mode(self) -> ViewMode:
         """The code view to return to from hex — always the unified listing."""
@@ -8121,9 +8689,12 @@ class IdaTui(App):
             dec = self.query_one(DecompView)
             if dec.loaded_ea == entry.ea:
                 # already decompiled: reposition without a recompile
-                dec.goto(entry.dec_cursor, entry.dec_cursor_x,
-                         entry.dec_scroll_y if entry.dec_scroll_y >= 0 else -1,
-                         entry.dec_scroll_x)
+                dec.goto(
+                    entry.dec_cursor,
+                    entry.dec_cursor_x,
+                    entry.dec_scroll_y if entry.dec_scroll_y >= 0 else -1,
+                    entry.dec_scroll_x,
+                )
             self._show_active()  # loads the pseudocode if loaded_ea != entry.ea
             return
         # Unified model: the code view is always the continuous listing,
@@ -8139,13 +8710,21 @@ class IdaTui(App):
                 # leave the viewport alone and just move the cursor; otherwise
                 # scroll so the target sits a few lines below the top for context.
                 top = round(lst.scroll_offset.y)
-                if lst.model is lm and top <= entry.cursor < top + lst._visible_height():
+                if (
+                    lst.model is lm
+                    and top <= entry.cursor < top + lst._visible_height()
+                ):
                     sy = top
                 else:
                     sy = max(entry.cursor - _JUMP_CONTEXT, 0)
             lst.load(
-                lm, entry.name, cursor=entry.cursor,
-                cursor_x=entry.cursor_x, scroll_y=sy, focus=focus)
+                lm,
+                entry.name,
+                cursor=entry.cursor,
+                cursor_x=entry.cursor_x,
+                scroll_y=sy,
+                focus=focus,
+            )
         self._active = ViewMode.LISTING
         self._show_active()
         # Graph mode is sticky: following a call from the graph should land in
@@ -8157,8 +8736,15 @@ class IdaTui(App):
     # Prompt overlays that own the keyboard while visible; a background
     # navigation must not yank focus out from under them (else typed keys leak
     # into a code view as destructive verbs — e.g. 'u' = undefine).
-    _PROMPT_IDS = ("search", "rename", "comment", "retype", "goto", "export",
-                   "func-filter")
+    _PROMPT_IDS = (
+        "search",
+        "rename",
+        "comment",
+        "retype",
+        "goto",
+        "export",
+        "func-filter",
+    )
 
     def _prompt_active(self) -> bool:
         for iid in self._PROMPT_IDS:
@@ -8265,8 +8851,10 @@ class IdaTui(App):
         sec = self.program.section_of(va) if self.program else None
         fo = self.program.file_offset(va) if self.program else None
         foff = f"file+{fo:#x}" if fo is not None else "file:--"
-        self._status(f"hex  va={va:#x}  {foff}  [{sec or '?'}]   "
-                     "(g goto · Enter→code · Tab/Esc/\\→back)")
+        self._status(
+            f"hex  va={va:#x}  {foff}  [{sec or '?'}]   "
+            "(g goto · Enter→code · Tab/Esc/\\→back)"
+        )
 
     def on_hex_view_moved(self, msg: HexView.Moved) -> None:
         self._hex_status(msg.va)
@@ -8303,8 +8891,13 @@ class IdaTui(App):
             why = self.program.decomp_error(ea)
         self.app.call_from_thread(self._apply_decomp, ea, name, dec, why)
 
-    def _apply_decomp(self, ea: int, name: str, dec,  # type: ignore[no-untyped-def]
-                      why: str = "") -> None:
+    def _apply_decomp(
+        self,
+        ea: int,
+        name: str,
+        dec,  # type: ignore[no-untyped-def]
+        why: str = "",
+    ) -> None:
         view = self.query_one(DecompView)
         view.loading = False
         if dec.failed:
@@ -8348,11 +8941,12 @@ class IdaTui(App):
         view.set_nums(self._pending_nums)
         if self._split:
             self._sync_split(self._active)  # crude link now
-            self._load_split_map(ea)        # then upgrade to the region map
+            self._load_split_map(ea)  # then upgrade to the region map
             self._split_status()
         else:
             self._status(
-                f"{name}  @ {ea:#x}   [pseudocode {len(dec.code or '')} chars]{note}")
+                f"{name}  @ {ea:#x}   [pseudocode {len(dec.code or '')} chars]{note}"
+            )
 
     def _sync_split(self, source: str, resync: bool = True) -> None:
         """Split view: highlight (+ scroll into view) the companion pane's
@@ -8377,8 +8971,7 @@ class IdaTui(App):
         if source == "decomp":
             dec.set_link(None)  # the driver shows its own cursor, no band
             line, screen = self._split_anchor(dec)
-            eas = (self._split_eamap[line]
-                   if 0 <= line < len(self._split_eamap) else [])
+            eas = self._split_eamap[line] if 0 <= line < len(self._split_eamap) else []
             if not eas:  # fallback: the single /*ea*/ marker for the line
                 one = dec._line_ea(line)
                 eas = [one] if one is not None else []
@@ -8467,18 +9060,25 @@ class IdaTui(App):
         if self.is_decomp:
             dec = self.query_one(DecompView)
             ea = dec._line_ea(dec.cursor)
-            n = (len(self._split_eamap[dec.cursor])
-                 if 0 <= dec.cursor < len(self._split_eamap) else 0)
+            n = (
+                len(self._split_eamap[dec.cursor])
+                if 0 <= dec.cursor < len(self._split_eamap)
+                else 0
+            )
             at = f" @ {ea:#x}" if ea is not None else ""
             rel = f" \u2194 {n} insn" if n else ""
-            self._status(f"{self._cur.name}{at}   "
-                         f"[split \u00b7 pseudocode line {dec.cursor + 1}{rel}]"
-                         f"   (Tab/click: drive listing)")
+            self._status(
+                f"{self._cur.name}{at}   "
+                f"[split \u00b7 pseudocode line {dec.cursor + 1}{rel}]"
+                f"   (Tab/click: drive listing)"
+            )
         else:
             ea = self.query_one(ListingView)._cursor_ea()
             at = f" @ {ea:#x}" if ea is not None else ""
-            self._status(f"{self._cur.name}{at}   [split \u00b7 listing]"
-                         f"   (Tab/click: drive pseudocode)")
+            self._status(
+                f"{self._cur.name}{at}   [split \u00b7 listing]"
+                f"   (Tab/click: drive pseudocode)"
+            )
 
     def on_descendant_focus(self, event) -> None:  # type: ignore[no-untyped-def]
         """In split, focusing a pane (Tab or a mouse click) makes it the leading/
@@ -8486,8 +9086,13 @@ class IdaTui(App):
         if not self._split:
             return
         w = event.control
-        new = ("decomp" if isinstance(w, DecompView)
-               else "listing" if isinstance(w, ListingView) else None)
+        new = (
+            "decomp"
+            if isinstance(w, DecompView)
+            else "listing"
+            if isinstance(w, ListingView)
+            else None
+        )
         if new is not None and new != self._active:
             self._active = new
             self._sync_split(new)
@@ -8570,8 +9175,10 @@ class IdaTui(App):
         ea = msg.ea
         if ea is not None:
             sec = self.program.section_of(ea) if self.program else None
-            self._status(f"{sec or '?'}  @ {ea:#x}   [listing]   "
-                         "(c code · p func · u undefine · Enter follow)")
+            self._status(
+                f"{sec or '?'}  @ {ea:#x}   [listing]   "
+                "(c code · p func · u undefine · Enter follow)"
+            )
 
     # -- teardown ---------------------------------------------------------- #
     async def on_unmount(self) -> None:

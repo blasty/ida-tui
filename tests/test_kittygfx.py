@@ -55,8 +55,11 @@ class Tty:
 
     def cmds(self, action):
         """Every graphics command with the given ``a=`` action."""
-        return [c for c in re.findall(r"\x1b_G([^;\x1b]*)", self.blob)
-                if f"a={action}" in c.split(",")]
+        return [
+            c
+            for c in re.findall(r"\x1b_G([^;\x1b]*)", self.blob)
+            if f"a={action}" in c.split(",")
+        ]
 
 
 def keys(cmd):
@@ -76,8 +79,7 @@ def t_no_termios_falls_back():
     try:
         check("missing termios disables graphics", kittygfx._query_tty(0) is False)
     except Exception as exc:  # the original Windows startup crash
-        check("missing termios does not escape", False,
-              f"{type(exc).__name__}: {exc}")
+        check("missing termios does not escape", False, f"{type(exc).__name__}: {exc}")
     finally:
         builtins.__import__ = original_import
 
@@ -103,8 +105,7 @@ def t_probe_failure_is_never_fatal():
         check("probe exception disables graphics", kittygfx.supported() is False)
         check("failed result is cached", kittygfx.supported() is False)
     except Exception as exc:
-        check("probe exception does not escape", False,
-              f"{type(exc).__name__}: {exc}")
+        check("probe exception does not escape", False, f"{type(exc).__name__}: {exc}")
     finally:
         kittygfx._query_tty = original_query
         kittygfx._supported = original_supported
@@ -118,7 +119,7 @@ def main() -> int:
     t_no_termios_falls_back()
     t_probe_failure_is_never_fatal()
 
-    kittygfx._uploaded[kittygfx.LOGO_ID] = (768, 801)   # pretend it's uploaded
+    kittygfx._uploaded[kittygfx.LOGO_ID] = (768, 801)  # pretend it's uploaded
 
     # -- the bug: anonymous placements STACK ------------------------------- #
     # A placement is identified by (image id, placement id). With no p key
@@ -128,80 +129,126 @@ def main() -> int:
         for _ in range(50):
             kittygfx.place(4, 10, 60, 26)
         placements = tty.cmds("p")
-        check("place() emits one command per call", len(placements) == 50,
-              f"{len(placements)}")
-        check("every placement carries a placement id (replaces, not stacks)",
-              all("p" in keys(c) for c in placements),
-              f"{placements[0] if placements else '(none)'}")
-        check("the placement id is the same every time (one image on screen)",
-              len({keys(c)["p"] for c in placements}) == 1,
-              f"{sorted({keys(c).get('p') for c in placements})}")
-        check("...and it is non-zero (p=0 means anonymous)",
-              keys(placements[0])["p"] not in ("0", ""), f"{placements[0]}")
+        check(
+            "place() emits one command per call",
+            len(placements) == 50,
+            f"{len(placements)}",
+        )
+        check(
+            "every placement carries a placement id (replaces, not stacks)",
+            all("p" in keys(c) for c in placements),
+            f"{placements[0] if placements else '(none)'}",
+        )
+        check(
+            "the placement id is the same every time (one image on screen)",
+            len({keys(c)["p"] for c in placements}) == 1,
+            f"{sorted({keys(c).get('p') for c in placements})}",
+        )
+        check(
+            "...and it is non-zero (p=0 means anonymous)",
+            keys(placements[0])["p"] not in ("0", ""),
+            f"{placements[0]}",
+        )
 
     # -- the rest of the escape still says what it used to ------------------ #
     with Tty() as tty:
         ok = kittygfx.place(4, 10, 60, 26)
         k = keys(tty.cmds("p")[0])
         check("place() reports success", ok)
-        check("image id, source pixels and cell box are unchanged",
-              (k["i"], k["s"], k["v"], k["c"], k["r"])
-              == (str(kittygfx.LOGO_ID), "768", "801", "60", "26"), f"{k}")
-        check("the terminal is told not to move the cursor (C=1)",
-              k.get("C") == "1", f"{k}")
-        check("the cursor is saved and restored around the placement",
-              tty.blob.startswith("\x1b[s") and tty.blob.endswith("\x1b[u"),
-              repr(tty.blob[:8] + "..." + tty.blob[-8:]))
-        check("the placement is positioned 1-based (row 4 -> line 5)",
-              "\x1b[5;11H" in tty.blob, repr(tty.blob[:24]))
+        check(
+            "image id, source pixels and cell box are unchanged",
+            (k["i"], k["s"], k["v"], k["c"], k["r"])
+            == (str(kittygfx.LOGO_ID), "768", "801", "60", "26"),
+            f"{k}",
+        )
+        check(
+            "the terminal is told not to move the cursor (C=1)",
+            k.get("C") == "1",
+            f"{k}",
+        )
+        check(
+            "the cursor is saved and restored around the placement",
+            tty.blob.startswith("\x1b[s") and tty.blob.endswith("\x1b[u"),
+            repr(tty.blob[:8] + "..." + tty.blob[-8:]),
+        )
+        check(
+            "the placement is positioned 1-based (row 4 -> line 5)",
+            "\x1b[5;11H" in tty.blob,
+            repr(tty.blob[:24]),
+        )
 
     # -- deleting still removes EVERY placement of the image ---------------- #
     # d=i is by image id, so it takes the placement with us regardless of p.
     with Tty() as tty:
         kittygfx.clear()
         k = keys(tty.cmds("d")[0])
-        check("clear() deletes by image id (d=i), keeping the upload",
-              k.get("d") == "i" and k.get("i") == str(kittygfx.LOGO_ID), f"{k}")
-        check("clear() does not free the image data (lowercase d)",
-              kittygfx.is_uploaded(), "upload was dropped")
+        check(
+            "clear() deletes by image id (d=i), keeping the upload",
+            k.get("d") == "i" and k.get("i") == str(kittygfx.LOGO_ID),
+            f"{k}",
+        )
+        check(
+            "clear() does not free the image data (lowercase d)",
+            kittygfx.is_uploaded(),
+            "upload was dropped",
+        )
 
     with Tty() as tty:
         kittygfx.delete()
         k = keys(tty.cmds("d")[0])
         check("delete() frees the image data too (d=I)", k.get("d") == "I", f"{k}")
-        check("...and forgets the upload, so the next place() refuses",
-              not kittygfx.is_uploaded() and kittygfx.place(0, 0, 10, 10) is False)
+        check(
+            "...and forgets the upload, so the next place() refuses",
+            not kittygfx.is_uploaded() and kittygfx.place(0, 0, 10, 10) is False,
+        )
 
     # -- refusals ----------------------------------------------------------- #
     kittygfx._uploaded[kittygfx.LOGO_ID] = (768, 801)
     with Tty() as tty:
-        check("a zero-sized box is refused, not sent",
-              kittygfx.place(0, 0, 0, 10) is False
-              and kittygfx.place(0, 0, 10, 0) is False and not tty.sent,
-              f"{tty.sent}")
+        check(
+            "a zero-sized box is refused, not sent",
+            kittygfx.place(0, 0, 0, 10) is False
+            and kittygfx.place(0, 0, 10, 0) is False
+            and not tty.sent,
+            f"{tty.sent}",
+        )
     kittygfx._uploaded.pop(kittygfx.LOGO_ID, None)
 
     # -- fit(): aspect ratio against non-square cells ----------------------- #
-    check("fit() keeps the aspect ratio for 9x22 cells",
-          kittygfx.fit((768, 801), 60, 99, cell=(9, 22)) == (60, 26),
-          f"{kittygfx.fit((768, 801), 60, 99, cell=(9, 22))}")
-    check("fit() shrinks to the row budget instead of overflowing",
-          kittygfx.fit((768, 801), 60, 10, cell=(9, 22))[1] == 10,
-          f"{kittygfx.fit((768, 801), 60, 10, cell=(9, 22))}")
-    check("fit() never returns a zero dimension",
-          all(v >= 1 for v in kittygfx.fit((768, 801), 1, 1, cell=(9, 22))))
-    check("fit() survives a degenerate image size",
-          kittygfx.fit((0, 0), 60, 26) == (60, 26))
+    check(
+        "fit() keeps the aspect ratio for 9x22 cells",
+        kittygfx.fit((768, 801), 60, 99, cell=(9, 22)) == (60, 26),
+        f"{kittygfx.fit((768, 801), 60, 99, cell=(9, 22))}",
+    )
+    check(
+        "fit() shrinks to the row budget instead of overflowing",
+        kittygfx.fit((768, 801), 60, 10, cell=(9, 22))[1] == 10,
+        f"{kittygfx.fit((768, 801), 60, 10, cell=(9, 22))}",
+    )
+    check(
+        "fit() never returns a zero dimension",
+        all(v >= 1 for v in kittygfx.fit((768, 801), 1, 1, cell=(9, 22))),
+    )
+    check(
+        "fit() survives a degenerate image size",
+        kittygfx.fit((0, 0), 60, 26) == (60, 26),
+    )
 
     # -- png_size() reads the header, not the pixels ------------------------ #
-    logo = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                        "logo.png")
+    logo = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "logo.png"
+    )
     if os.path.exists(logo):
-        check("png_size() reads logo.png's IHDR",
-              kittygfx.png_size(logo) == (768, 801), f"{kittygfx.png_size(logo)}")
+        check(
+            "png_size() reads logo.png's IHDR",
+            kittygfx.png_size(logo) == (768, 801),
+            f"{kittygfx.png_size(logo)}",
+        )
     check("png_size() returns None for a non-PNG", kittygfx.png_size(__file__) is None)
-    check("png_size() returns None for a missing file",
-          kittygfx.png_size("/nonexistent/nope.png") is None)
+    check(
+        "png_size() returns None for a missing file",
+        kittygfx.png_size("/nonexistent/nope.png") is None,
+    )
 
     print(f"\n{PASS} passed, {FAIL} failed")
     return 1 if FAIL else 0

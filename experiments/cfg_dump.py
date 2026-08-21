@@ -15,6 +15,7 @@ taken branch) or "switch" (n-way). That is exactly the input a graph view needs;
 everything after this point (layering, ordering, routing, rendering) is pure
 python and needs no IDA at all.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -34,12 +35,12 @@ def dump(path: str, want: list[str], max_blocks: int) -> list[dict]:
     if idapro.open_database(local, run_auto_analysis=True) != 0:
         raise SystemExit(f"failed to open {local}")
 
+    import ida_bytes
     import ida_funcs
     import ida_gdl
     import ida_lines
-    import ida_bytes
-    import idautils
     import idaapi
+    import idautils
 
     out = []
     try:
@@ -60,7 +61,8 @@ def dump(path: str, want: list[str], max_blocks: int) -> list[dict]:
                 ea = bb.start_ea
                 while ea < bb.end_ea and ea != idaapi.BADADDR:
                     txt = ida_lines.tag_remove(
-                        ida_lines.generate_disasm_line(ea, 0) or "")
+                        ida_lines.generate_disasm_line(ea, 0) or ""
+                    )
                     lines.append(txt.rstrip())
                     nxt = ida_bytes.next_head(ea, bb.end_ea)
                     if nxt <= ea:
@@ -78,13 +80,15 @@ def dump(path: str, want: list[str], max_blocks: int) -> list[dict]:
                     else:
                         kind = "jump"
                     succs.append([index[s.start_ea], kind])
-                blocks.append({
-                    "id": index[bb.start_ea],
-                    "start": bb.start_ea,
-                    "end": bb.end_ea,
-                    "lines": lines,
-                    "succs": succs,
-                })
+                blocks.append(
+                    {
+                        "id": index[bb.start_ea],
+                        "start": bb.start_ea,
+                        "end": bb.end_ea,
+                        "lines": lines,
+                        "succs": succs,
+                    }
+                )
             if max_blocks and len(blocks) > max_blocks:
                 continue
             out.append({"name": name, "ea": fea, "blocks": blocks})
@@ -98,10 +102,19 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("binary")
     ap.add_argument("-o", "--out", default="/tmp/cfg.json")
-    ap.add_argument("-f", "--func", action="append", default=[],
-                    help="only functions whose name contains this (repeatable)")
-    ap.add_argument("--max-blocks", type=int, default=0,
-                    help="skip functions with more blocks than this")
+    ap.add_argument(
+        "-f",
+        "--func",
+        action="append",
+        default=[],
+        help="only functions whose name contains this (repeatable)",
+    )
+    ap.add_argument(
+        "--max-blocks",
+        type=int,
+        default=0,
+        help="skip functions with more blocks than this",
+    )
     args = ap.parse_args()
 
     recs = dump(os.path.abspath(args.binary), args.func, args.max_blocks)

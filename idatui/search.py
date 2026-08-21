@@ -69,7 +69,7 @@ def classify(query: str, forced: str | None = None) -> tuple[str, str]:
     low = q.lower()
     for prefix, mode in (("hex:", BYTES), ("bytes:", BYTES), ("text:", TEXT)):
         if low.startswith(prefix):
-            return (mode, q[len(prefix):].strip())
+            return (mode, q[len(prefix) :].strip())
     if forced in (TEXT, BYTES):
         return (forced, q)
     if looks_like_bytes(q) or probably_meant_bytes(q):
@@ -89,7 +89,7 @@ def normalise_pattern(pattern: str) -> str:
     q = q.replace(",", " ")
     # "488B??C3" -- a bare hex run with no separators at all.
     if " " not in q and len(q) > 2 and len(q) % 2 == 0:
-        q = " ".join(q[i:i + 2] for i in range(0, len(q), 2))
+        q = " ".join(q[i : i + 2] for i in range(0, len(q), 2))
     return " ".join(q.split())
 
 
@@ -107,6 +107,7 @@ def pattern_problem(pattern: str) -> str | None:
     tokens = [t for t in q.split() if t]
     bad = [t for t in tokens if not _TOKEN.match(t)]
     if bad:
-        return (f"{bad[0]!r} is not a byte: use hex pairs, ? wildcards "
-                'or a "quoted string"')
+        return (
+            f'{bad[0]!r} is not a byte: use hex pairs, ? wildcards or a "quoted string"'
+        )
     return None

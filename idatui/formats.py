@@ -60,7 +60,7 @@ def sniff(path: str) -> str | None:
     if not head:
         return None
     for magic, off, name in _MAGIC:
-        if head[off:off + len(magic)] == magic:
+        if head[off : off + len(magic)] == magic:
             return name
     # Only treat a text prefix as a format if the whole head is printable —
     # a raw blob starting with 0x3a (':') is far more likely than Intel HEX.

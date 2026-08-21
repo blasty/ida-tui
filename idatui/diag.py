@@ -26,6 +26,7 @@ screen is normal and happens constantly; wrapping that would bury the real
 entries in noise. The test for whether it belongs here is "would I want to see
 this after the fact?".
 """
+
 from __future__ import annotations
 
 import contextlib
@@ -60,7 +61,7 @@ def log(msg: str) -> None:
         with open(path, "a", encoding="utf-8") as fh:
             fh.write(f"{time.strftime('%H:%M:%S')} {msg}\n")
     except OSError:
-        pass          # a broken log path must never break the app
+        pass  # a broken log path must never break the app
 
 
 def note(what: str, exc: BaseException) -> None:
@@ -76,8 +77,11 @@ def note(what: str, exc: BaseException) -> None:
         _ring.append(entry)
     log(f"[swallowed] {what}: {entry['error']}  ({entry['where']})")
     if _logfile():
-        log("".join(traceback.format_exception(
-            type(exc), exc, exc.__traceback__)).rstrip())
+        log(
+            "".join(
+                traceback.format_exception(type(exc), exc, exc.__traceback__)
+            ).rstrip()
+        )
 
 
 def _origin(exc: BaseException) -> str:

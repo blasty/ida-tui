@@ -30,6 +30,7 @@ from idatui.formats import PROCESSORS  # noqa: E402
 
 def main() -> int:
     import idapro
+
     idapro.enable_console_messages(False)
     import ida_auto
     import ida_ida
@@ -55,9 +56,12 @@ def main() -> int:
         bits = ""
         if rc == 0:
             import ida_ida
+
             bits = f" bitness={ida_ida.inf_get_app_bitness()}"
         ok = rc == 0 and got.lower() == base.lower()
-        print(f"  {'ok  ' if ok else 'BAD '} {name:<14} rc={rc} -> {got!r}{bits}   {desc}")
+        print(
+            f"  {'ok  ' if ok else 'BAD '} {name:<14} rc={rc} -> {got!r}{bits}   {desc}"
+        )
         if rc == 0:
             idapro.close_database(save=False)
         if not ok:

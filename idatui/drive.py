@@ -17,6 +17,7 @@ Socket: --sock, else IDATUI_RPC_SOCK, else the one live pane (from `pane list`).
 '.' or omitted as a target means the current function. `raw <method> k=v` is a
 passthrough to rpcclient (pretty JSON).
 """
+
 from __future__ import annotations
 
 import json
@@ -33,16 +34,24 @@ def _resolve_sock(explicit: str | None) -> str:
     env = os.environ.get("IDATUI_RPC_SOCK")
     if env:
         return env
-    live = [r for r in _load_registry()
-            if _pane_alive(r.get("pane", "")) and r.get("sock")
-            and os.path.exists(r["sock"])]
+    live = [
+        r
+        for r in _load_registry()
+        if _pane_alive(r.get("pane", ""))
+        and r.get("sock")
+        and os.path.exists(r["sock"])
+    ]
     if len(live) == 1:
         return live[0]["sock"]
     if not live:
-        raise SystemExit("no live idatui pane — pass --sock, set IDATUI_RPC_SOCK, "
-                         "or `python -m idatui.pane spawn ...`")
-    raise SystemExit("multiple live panes — pass --sock <one of>:\n"
-                     + "\n".join("  " + r["sock"] for r in live))
+        raise SystemExit(
+            "no live idatui pane — pass --sock, set IDATUI_RPC_SOCK, "
+            "or `python -m idatui.pane spawn ...`"
+        )
+    raise SystemExit(
+        "multiple live panes — pass --sock <one of>:\n"
+        + "\n".join("  " + r["sock"] for r in live)
+    )
 
 
 def _tgt(a: str | None) -> str | None:
@@ -121,8 +130,9 @@ def cmd_pc(c, args):
     lines = d["code"].splitlines()
     if needle:
         nlow = needle.lower()
-        lines = [f"{i:4} {line}" for i, line in enumerate(lines)
-                 if nlow in line.lower()]
+        lines = [
+            f"{i:4} {line}" for i, line in enumerate(lines) if nlow in line.lower()
+        ]
         return "\n".join(lines) or f"(no line matches {needle!r})"
     return d["code"]
 
@@ -153,8 +163,10 @@ def cmd_callers(c, args):
     if not args:
         raise SystemExit("usage: callers <fn>")
     xs = c.call("xrefs_to", target=args[0])
-    return "\n".join(f"  {x['frm']:#x}  in {x.get('fn_name')}" for x in xs) \
+    return (
+        "\n".join(f"  {x['frm']:#x}  in {x.get('fn_name')}" for x in xs)
         or "(no callers)"
+    )
 
 
 def cmd_names(c, args):
@@ -162,8 +174,10 @@ def cmd_names(c, args):
         raise SystemExit("usage: names <substr> [limit]")
     lim = int(args[1]) if len(args) > 1 else 40
     fs = c.call("functions", filter=args[0], limit=lim)
-    return "\n".join(f"  {f['ea']:#x}  {f['name']}  ({f['size']})" for f in fs) \
+    return (
+        "\n".join(f"  {f['ea']:#x}  {f['name']}  ({f['size']})" for f in fs)
         or "(no match)"
+    )
 
 
 def cmd_binaries(c, args):
@@ -246,8 +260,9 @@ def cmd_define(c, args):
     a symbol file), so take them all and report per-target.
     """
     if not args:
-        raise SystemExit("usage: define <code|func|undef|thumb|thumbscan|data|"
-                         "string> [target ...]")
+        raise SystemExit(
+            "usage: define <code|func|undef|thumb|thumbscan|data|string> [target ...]"
+        )
     kind, targets = args[0], (args[1:] or [None])
     out = []
     for t in targets:
@@ -284,8 +299,10 @@ def cmd_syms(c, args):
         raise SystemExit("usage: syms <symbols.json>")
     r = c.call("rename_many", file=os.path.abspath(os.path.expanduser(args[0])))
     m = r.get("rename_many", {})
-    out = [f"  {m.get('ok', 0)}/{m.get('requested', 0)} renamed"
-           f" (skipped {m.get('skipped', 0)}, failed {m.get('failed', 0)})"]
+    out = [
+        f"  {m.get('ok', 0)}/{m.get('requested', 0)} renamed"
+        f" (skipped {m.get('skipped', 0)}, failed {m.get('failed', 0)})"
+    ]
     for e in m.get("errors", []):
         out.append(f"    {e.get('addr')}: {e.get('error')}")
     return "\n".join(out)
@@ -304,8 +321,10 @@ def cmd_find(c, args):
     hits = r.get("hits", [])
     out = [f"  [{r.get('mode')}] {len(hits)}{'+' if r.get('truncated') else ''} hits"]
     for h in hits[:40]:
-        out.append(f"    {h['addr']}  {(h.get('func') or h.get('seg') or ''):<20.20} "
-                   f"{h.get('line', '')}")
+        out.append(
+            f"    {h['addr']}  {(h.get('func') or h.get('seg') or ''):<20.20} "
+            f"{h.get('line', '')}"
+        )
     if len(hits) > 40:
         out.append(f"    … {len(hits) - 40} more")
     return "\n".join(out)
@@ -314,9 +333,11 @@ def cmd_find(c, args):
 def cmd_export(c, args):
     """export [path] -- write the session's findings as markdown."""
     r = c.call("export", **({"path": args[0]} if args else {}))
-    return (f"  {r.get('path')}  ({r.get('bytes', 0)} bytes: "
-            f"{r.get('comments', 0)} comments, {r.get('names', 0)} names, "
-            f"{r.get('types', 0)} types)")
+    return (
+        f"  {r.get('path')}  ({r.get('bytes', 0)} bytes: "
+        f"{r.get('comments', 0)} comments, {r.get('names', 0)} names, "
+        f"{r.get('types', 0)} types)"
+    )
 
 
 def cmd_screen(c, args):
@@ -334,13 +355,27 @@ def cmd_raw(c, args):
 
 
 COMMANDS = {
-    "where": cmd_where, "go": cmd_go, "pc": cmd_pc, "dis": cmd_dis,
-    "callees": cmd_callees, "callers": cmd_callers, "names": cmd_names,
-    "rename": cmd_rename, "mv": cmd_mv, "note": cmd_note, "retype": cmd_retype,
-    "save": cmd_save, "screen": cmd_screen, "raw": cmd_raw, "define": cmd_define,
-    "syms": cmd_syms, "fmt": cmd_fmt, "export": cmd_export,
+    "where": cmd_where,
+    "go": cmd_go,
+    "pc": cmd_pc,
+    "dis": cmd_dis,
+    "callees": cmd_callees,
+    "callers": cmd_callers,
+    "names": cmd_names,
+    "rename": cmd_rename,
+    "mv": cmd_mv,
+    "note": cmd_note,
+    "retype": cmd_retype,
+    "save": cmd_save,
+    "screen": cmd_screen,
+    "raw": cmd_raw,
+    "define": cmd_define,
+    "syms": cmd_syms,
+    "fmt": cmd_fmt,
+    "export": cmd_export,
     "find": cmd_find,
-    "binaries": cmd_binaries, "switch": cmd_switch,
+    "binaries": cmd_binaries,
+    "switch": cmd_switch,
 }
 
 

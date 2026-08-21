@@ -24,6 +24,7 @@ Edits (rename/comment) are reverted at the end, so the tour is repeatable and
 a scratch database is not left renamed. --spawn works on a COPY of the target
 so the tracked .i64 is never touched at all.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -223,8 +224,10 @@ class Demo:
         """Undo the demo's edits so the take is repeatable."""
         for kind, args in reversed(self.undo):
             if kind == "rename" and args.get("addr") is not None:
-                self.do("rename_many",
-                        items=[{"addr": hex(args["addr"]), "name": args["name"]}])
+                self.do(
+                    "rename_many",
+                    items=[{"addr": hex(args["addr"]), "name": args["name"]}],
+                )
             elif kind == "comment":
                 self.do("comment", text="")
         # Re-navigate so the view shows the reverted name: the nav entry caches
@@ -252,15 +255,20 @@ SCENES = [
 def spawn_pane(target: str) -> tuple[str, str, str]:
     """Spawn a TUI pane on a COPY of ``target``. Returns (sock, pane, tmpdir)."""
     import json
+
     tmp = tempfile.mkdtemp(prefix="idatui-demo-")
     copy = os.path.join(tmp, os.path.basename(target))
     shutil.copy2(target, copy)
-    for suffix in (".i64",):                       # reuse the analysis if present
+    for suffix in (".i64",):  # reuse the analysis if present
         if os.path.exists(target + suffix):
             shutil.copy2(target + suffix, copy + suffix)
     out = subprocess.run(
         [sys.executable, "-m", "idatui.pane", "spawn", "--open", copy],
-        cwd=REPO, capture_output=True, text=True, check=True).stdout
+        cwd=REPO,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
     row = json.loads(out)
     return row["sock"], row.get("pane", ""), tmp
 
@@ -280,8 +288,9 @@ def run_here(target: str) -> tuple[subprocess.Popen, str, str]:
         shutil.copy2(target + ".i64", copy + ".i64")
     sockdir = os.environ.get("XDG_RUNTIME_DIR") or "/tmp"
     sock = os.path.join(sockdir, f"idatui-demo-{os.getpid()}.sock")
-    proc = subprocess.Popen([os.path.join(REPO, "ida-tui"), copy, "--rpc", sock],
-                            cwd=REPO)          # stdio inherited on purpose
+    proc = subprocess.Popen(
+        [os.path.join(REPO, "ida-tui"), copy, "--rpc", sock], cwd=REPO
+    )  # stdio inherited on purpose
     return proc, sock, tmp
 
 
@@ -291,28 +300,43 @@ def wait_for_socket(proc: subprocess.Popen, sock: str, timeout: float = 600.0) -
     while time.time() < deadline:
         if os.path.exists(sock):
             return True
-        if proc.poll() is not None:            # died before it ever listened
+        if proc.poll() is not None:  # died before it ever listened
             return False
         time.sleep(0.1)
     return False
 
 
 def main(argv=None) -> int:
-    ap = argparse.ArgumentParser(description=__doc__,
-                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     ap.add_argument("--sock", help="RPC socket of a running TUI (see --rpc)")
-    ap.add_argument("--spawn", action="store_true",
-                    help="spawn a pane on a scratch copy, then tear it down")
-    ap.add_argument("--here", "--inline", dest="here", action="store_true",
-                    help="run the TUI in THIS terminal (single-pane recording)")
-    ap.add_argument("--target", default=DEFAULT_TARGET,
-                    help="binary for --here/--spawn")
-    ap.add_argument("--speed", type=float, default=1.0,
-                    help="pause multiplier: <1 snappier, >1 slower (default 1.0)")
+    ap.add_argument(
+        "--spawn",
+        action="store_true",
+        help="spawn a pane on a scratch copy, then tear it down",
+    )
+    ap.add_argument(
+        "--here",
+        "--inline",
+        dest="here",
+        action="store_true",
+        help="run the TUI in THIS terminal (single-pane recording)",
+    )
+    ap.add_argument(
+        "--target", default=DEFAULT_TARGET, help="binary for --here/--spawn"
+    )
+    ap.add_argument(
+        "--speed",
+        type=float,
+        default=1.0,
+        help="pause multiplier: <1 snappier, >1 slower (default 1.0)",
+    )
     ap.add_argument("--only", help="comma-separated scene names")
     ap.add_argument("--list", action="store_true", help="list scenes and exit")
-    ap.add_argument("--no-revert", action="store_true",
-                    help="keep the demo's rename/comment")
+    ap.add_argument(
+        "--no-revert", action="store_true", help="keep the demo's rename/comment"
+    )
     ap.add_argument("--quiet", action="store_true", help="no operator narration")
     args = ap.parse_args(argv)
 
@@ -384,8 +408,11 @@ def main(argv=None) -> int:
         rc = 1
     finally:
         if args.spawn and sock:
-            subprocess.run([sys.executable, "-m", "idatui.pane", "stop",
-                            "--sock", sock], cwd=REPO, capture_output=True)
+            subprocess.run(
+                [sys.executable, "-m", "idatui.pane", "stop", "--sock", sock],
+                cwd=REPO,
+                capture_output=True,
+            )
         if proc is not None:
             try:
                 proc.wait(timeout=30)
@@ -397,10 +424,12 @@ def main(argv=None) -> int:
                     proc.kill()
         if tmp:
             shutil.rmtree(tmp, ignore_errors=True)
-        if args.here and transcript:      # the alt screen is gone: safe to print
+        if args.here and transcript:  # the alt screen is gone: safe to print
             print("\n\033[1m-- ida-tui demo --\033[0m")
             for line in transcript:
-                print(f"  {line}" if not line.startswith("[") else f"\033[1m{line}\033[0m")
+                print(
+                    f"  {line}" if not line.startswith("[") else f"\033[1m{line}\033[0m"
+                )
             print("done.")
     return rc
 

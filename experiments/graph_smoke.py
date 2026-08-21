@@ -5,6 +5,7 @@ idatui.graph layout, through a real idalib worker.
 
 Wants: VERDICT: OK
 """
+
 import os
 import shutil
 import sys
@@ -22,16 +23,17 @@ for e in ".i64 .id0 .id1 .id2 .nam .til".split():
     except OSError:
         pass
 
-from idatui.worker_client import WorkerClient   # noqa: E402
-from idatui.domain import Program               # noqa: E402
-from idatui import graph as G                   # noqa: E402
+from idatui.worker_client import WorkerClient  # noqa: E402
+
+from idatui import graph as G  # noqa: E402
+from idatui.domain import Program  # noqa: E402
 
 want = sys.argv[1] if len(sys.argv) > 1 else "main"
 print("spawning worker + opening echo\u2026", flush=True)
 t = time.time()
 cl = WorkerClient(tmp)
 cl.connect(progress=lambda m: None)
-print(f"  worker ready in {time.time()-t:.2f}s", flush=True)
+print(f"  worker ready in {time.time() - t:.2f}s", flush=True)
 prog = Program(cl)
 
 ok = True
@@ -40,7 +42,7 @@ print(f"resolve({want!r}) = {ea:#x}", flush=True)
 
 t = time.time()
 fc = prog.flowchart(ea)
-print(f"flowchart() -> {time.time()-t:.2f}s", flush=True)
+print(f"flowchart() -> {time.time() - t:.2f}s", flush=True)
 if fc is None:
     print("VERDICT: FAIL (no flowchart)")
     raise SystemExit(1)
@@ -55,8 +57,10 @@ if not nrows:
 empty = [b for b in fc.blocks if not b.rows]
 if empty:
     ok = False
-    print(f"  !! {len(empty)} blocks have NO rows, e.g. "
-          f"{[hex(b.start) for b in empty[:4]]}")
+    print(
+        f"  !! {len(empty)} blocks have NO rows, e.g. "
+        f"{[hex(b.start) for b in empty[:4]]}"
+    )
 
 b0 = fc.blocks[fc.entry]
 print(f"  entry block {b0.start:#x}-{b0.end:#x}:")
@@ -74,20 +78,20 @@ for b in fc.blocks:
         ok = False
         print(f"  !! block {b.start:#x} has rows outside its range")
 
-blocks = [G.Block(id=b.id, start=b.start, end=b.end, succs=list(b.succs))
-          for b in fc.blocks]
+blocks = [
+    G.Block(id=b.id, start=b.start, end=b.end, succs=list(b.succs)) for b in fc.blocks
+]
 
 
 def sizer(b):
     src_b = fc.blocks[b.id]
-    w = max([len(f"loc_{b.start:X}")]
-            + [len(h.text) + 12 for h in src_b.rows]) + 4
+    w = max([len(f"loc_{b.start:X}")] + [len(h.text) + 12 for h in src_b.rows]) + 4
     return (w, len(src_b.rows) + 3)
 
 
 t = time.time()
 lay = G.layout(blocks, sizer, entry=fc.entry)
-print(f"layout() -> {(time.time()-t)*1000:.0f} ms  {lay.stats}", flush=True)
+print(f"layout() -> {(time.time() - t) * 1000:.0f} ms  {lay.stats}", flush=True)
 print(f"  canvas {lay.width}x{lay.height}")
 ok &= len(lay.nodes) == len(blocks)
 
@@ -97,9 +101,10 @@ ok &= covered == {b.id for b in blocks}
 if covered != {b.id for b in blocks}:
     print(f"  !! row index misses {sorted({b.id for b in blocks} - covered)[:5]}")
 
-hits = sum(1 for r in range(min(lay.height, 400))
-           if lay.painting.cells_at_row(r, 0, lay.width))
-print(f"  {hits} of the first {min(lay.height,400)} rows carry edge cells")
+hits = sum(
+    1 for r in range(min(lay.height, 400)) if lay.painting.cells_at_row(r, 0, lay.width)
+)
+print(f"  {hits} of the first {min(lay.height, 400)} rows carry edge cells")
 ok &= hits > 0
 
 cl.close()

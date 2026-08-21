@@ -32,6 +32,7 @@ screen cannot be placed from the alternate one -- placement reports no error, it
 simply draws nothing. That combination is why the splash calls ``supported()``
 from the launcher and ``upload()`` from its own ``on_mount``.
 """
+
 from __future__ import annotations
 
 import base64
@@ -55,7 +56,7 @@ LOGO_ID = 0x1DA7
 LOGO_PLACEMENT = 1
 
 _supported: bool | None = None
-_uploaded: dict[int, tuple[int, int]] = {}   # image id -> (pixel w, pixel h)
+_uploaded: dict[int, tuple[int, int]] = {}  # image id -> (pixel w, pixel h)
 #: Terminal cell size in pixels, asked for in the same round trip as the
 #: graphics query. Cells are nothing like a fixed 1:2 -- this box reports 9x22,
 #: i.e. 1:2.44 -- and getting it wrong stretches the image.
@@ -114,10 +115,10 @@ def _query_tty(timeout: float = 2.0) -> bool:
             if not chunk:
                 break
             buf += chunk
-            if re.search(rb"\033\[\?[0-9;]*c", buf):    # DA1: the answers are in
+            if re.search(rb"\033\[\?[0-9;]*c", buf):  # DA1: the answers are in
                 break
         global _cell
-        m = re.search(rb"\033\[6;(\d+);(\d+)t", buf)    # CSI 6 ; height ; width t
+        m = re.search(rb"\033\[6;(\d+);(\d+)t", buf)  # CSI 6 ; height ; width t
         if m:
             ch, cw = int(m.group(1)), int(m.group(2))
             if 0 < cw < 100 and 0 < ch < 200:
@@ -149,7 +150,7 @@ def supported() -> bool:
     elif env in ("0", "no", "false", "off"):
         _supported = False
     elif not (sys.__stdout__ and sys.__stdout__.isatty()):
-        _supported = False        # pilot tests, pipes, redirected output
+        _supported = False  # pilot tests, pipes, redirected output
         log("supported: stdout is not a tty")
     else:
         try:
@@ -208,14 +209,13 @@ def upload(path: str, image_id: int = LOGO_ID) -> bool:
             payload = base64.standard_b64encode(f.read())
     except OSError:
         return False
-    parts = [payload[i:i + 4096] for i in range(0, len(payload), 4096)]
+    parts = [payload[i : i + 4096] for i in range(0, len(payload), 4096)]
     if not parts:
         return False
     buf = []
     for i, part in enumerate(parts):
         more = 1 if i < len(parts) - 1 else 0
-        ctrl = (f"a=t,f=100,t=d,i={image_id},q=2,m={more}" if i == 0
-                else f"m={more}")
+        ctrl = f"a=t,f=100,t=d,i={image_id},q=2,m={more}" if i == 0 else f"m={more}"
         buf.append("\033_G" + ctrl + ";" + part.decode("ascii") + "\033\\")
     if not _write("".join(buf)):
         log("upload: write failed")
@@ -229,8 +229,14 @@ def is_uploaded(image_id: int = LOGO_ID) -> bool:
     return image_id in _uploaded
 
 
-def place(row: int, col: int, cols: int, rows: int,
-          image_id: int = LOGO_ID, placement_id: int = LOGO_PLACEMENT) -> bool:
+def place(
+    row: int,
+    col: int,
+    cols: int,
+    rows: int,
+    image_id: int = LOGO_ID,
+    placement_id: int = LOGO_PLACEMENT,
+) -> bool:
     """Draw the uploaded image at (``row``, ``col``), 0-based, sized in cells.
 
     Saves and restores the cursor, and asks the terminal not to move it
@@ -250,7 +256,8 @@ def place(row: int, col: int, cols: int, rows: int,
         f"\033[s\033[{row + 1};{col + 1}H"
         f"\033_Ga=p,i={image_id},p={placement_id},"
         f"s={w},v={h},c={cols},r={rows},C=1,q=2\033\\"
-        f"\033[u")
+        f"\033[u"
+    )
 
 
 def clear(image_id: int = LOGO_ID) -> None:
@@ -274,8 +281,12 @@ def cell_size() -> tuple[int, int]:
     return _cell or (10, 20)
 
 
-def fit(px: tuple[int, int], max_cols: int, max_rows: int,
-        cell: tuple[int, int] | None = None) -> tuple[int, int]:
+def fit(
+    px: tuple[int, int],
+    max_cols: int,
+    max_rows: int,
+    cell: tuple[int, int] | None = None,
+) -> tuple[int, int]:
     """Cell size that fits ``max_cols`` x ``max_rows`` keeping the aspect ratio.
 
     Cells are far from square -- this box reports 9x22 px -- so a naive

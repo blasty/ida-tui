@@ -1,28 +1,28 @@
 """idatui — a keyboard-first TUI using shared IDA Nexus databases."""
 
+from .domain import (
+    DISASM_BLOCK,
+    LIST_PAGE,
+    Decompilation,
+    DisasmModel,
+    Func,
+    FunctionIndex,
+    Line,
+    Program,
+    Ref,
+    Struct,
+)
 from .errors import (
-    IDAError,
     IDAConnectionError,
-    IDATimeoutError,
+    IDAError,
     IDAProtocolError,
     IDARPCError,
-    IDAToolError,
     IDASessionError,
+    IDATimeoutError,
+    IDAToolError,
     Session,
 )
 from .nexus_client import NexusClient
-from .domain import (
-    Program,
-    FunctionIndex,
-    DisasmModel,
-    Func,
-    Line,
-    Ref,
-    Struct,
-    Decompilation,
-    LIST_PAGE,
-    DISASM_BLOCK,
-)
 
 __all__ = [
     "NexusClient",

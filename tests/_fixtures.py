@@ -20,6 +20,7 @@ writes back to -- turns that into a file copy.
 The cache is rebuilt whenever it is older than the binary, so editing a target
 doesn't silently test the previous one. `.pristine.i64` is gitignored.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -64,10 +65,12 @@ def fast_keys() -> None:
     if not hasattr(textual.app, "wait_for_idle"):  # pragma: no cover
         raise RuntimeError(
             "textual.app.wait_for_idle is gone -- tests/_fixtures.fast_keys "
-            "needs updating for this Textual version")
+            "needs updating for this Textual version"
+        )
 
-    async def _yield_instead_of_sleeping(min_sleep: float = 0.0,
-                                         max_sleep: float = 1.0) -> None:
+    async def _yield_instead_of_sleeping(
+        min_sleep: float = 0.0, max_sleep: float = 1.0
+    ) -> None:
         await asyncio.sleep(0)
 
     async def _press(self, *keys: str) -> None:
@@ -110,7 +113,7 @@ def synthetic(name: str, build) -> str:
     path = os.path.join(SYNTHETIC_DIR, name)
     data = build()
     if not os.path.exists(path) or open(path, "rb").read() != data:
-        with open(path, "wb") as fh:          # content changed -> cache is stale
+        with open(path, "wb") as fh:  # content changed -> cache is stale
             fh.write(data)
         for stale in (cache_path(path), path + ".i64"):
             if os.path.exists(stale):

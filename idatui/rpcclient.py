@@ -15,6 +15,7 @@ Also usable as a library:
 
 No auth: whoever can r/w the socket drives the app.
 """
+
 from __future__ import annotations
 
 import json
@@ -114,8 +115,10 @@ def main(argv: list[str]) -> int:
         sock = args[1]
         args = args[2:]
     if not sock:
-        print("error: no socket (pass --sock PATH or set IDATUI_RPC_SOCK)",
-              file=sys.stderr)
+        print(
+            "error: no socket (pass --sock PATH or set IDATUI_RPC_SOCK)",
+            file=sys.stderr,
+        )
         return 2
     if not args:
         print("error: no method given", file=sys.stderr)
@@ -124,7 +127,7 @@ def main(argv: list[str]) -> int:
     method, rest = args[0], args[1:]
     params: dict[str, Any] = {}
     if method == "keys":
-        params["keys"] = rest                     # every positional is a key name
+        params["keys"] = rest  # every positional is a key name
     elif method == "text" and rest and "=" not in rest[0]:
         # first positional is the literal text; the rest may be key=value
         params["text"] = rest[0]

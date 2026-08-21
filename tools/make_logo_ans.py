@@ -16,6 +16,7 @@ Needs Pillow, so run it with a python that has it (NOT ~/ida-venv):
 
     /usr/bin/python3 tools/make_logo_ans.py [--cols 60] [-o logo.ans]
 """
+
 from __future__ import annotations
 
 import argparse
@@ -25,9 +26,9 @@ import sys
 from PIL import Image
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-ALPHA_ON = 128          # at/above this a pixel counts as present
+ALPHA_ON = 128  # at/above this a pixel counts as present
 
-UPPER, LOWER = "\u2580", "\u2584"       # upper half block, lower half block
+UPPER, LOWER = "\u2580", "\u2584"  # upper half block, lower half block
 
 
 def main() -> int:
@@ -35,8 +36,11 @@ def main() -> int:
     ap.add_argument("--png", default=os.path.join(REPO, "logo.png"))
     ap.add_argument("-o", "--out", default=os.path.join(REPO, "logo.ans"))
     ap.add_argument("--cols", type=int, default=60)
-    ap.add_argument("--cell", default="9x22",
-                    help="terminal cell size WxH in px, for the aspect ratio")
+    ap.add_argument(
+        "--cell",
+        default="9x22",
+        help="terminal cell size WxH in px, for the aspect ratio",
+    )
     args = ap.parse_args()
 
     cw, ch = (int(v) for v in args.cell.lower().split("x"))
@@ -62,13 +66,15 @@ def main() -> int:
             if not t_on and not b_on:
                 sgr, ch_ = "\033[0m", " "
             elif t_on and b_on:
-                sgr = (f"\033[38;2;{bot[0]};{bot[1]};{bot[2]}m"
-                       f"\033[48;2;{top[0]};{top[1]};{top[2]}m")
+                sgr = (
+                    f"\033[38;2;{bot[0]};{bot[1]};{bot[2]}m"
+                    f"\033[48;2;{top[0]};{top[1]};{top[2]}m"
+                )
                 ch_ = LOWER
-            elif b_on:                      # only the lower pixel is present
+            elif b_on:  # only the lower pixel is present
                 sgr = f"\033[0m\033[38;2;{bot[0]};{bot[1]};{bot[2]}m"
                 ch_ = LOWER
-            else:                           # only the upper pixel is present
+            else:  # only the upper pixel is present
                 sgr = f"\033[0m\033[38;2;{top[0]};{top[1]};{top[2]}m"
                 ch_ = UPPER
             if sgr != prev:
@@ -81,8 +87,10 @@ def main() -> int:
     text = "\n".join(out) + "\n"
     with open(args.out, "w", encoding="utf-8") as f:
         f.write(text)
-    print(f"{args.png} {w}x{h} -> {args.out}  {cols}x{rows} cells "
-          f"({len(text):,} bytes, cell {cw}x{ch})")
+    print(
+        f"{args.png} {w}x{h} -> {args.out}  {cols}x{rows} cells "
+        f"({len(text):,} bytes, cell {cw}x{ch})"
+    )
     return 0
 
 

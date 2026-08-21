@@ -4,6 +4,7 @@ The IDA Nexus adapter normalizes ``ida_nexus`` transport and execution
 errors into these types so the domain and Textual layers do not depend on HTTP or
 registry implementation details.
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass

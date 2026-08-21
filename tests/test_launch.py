@@ -10,6 +10,7 @@ is the cheapest guard against someone reintroducing the "helpful" cleanup.
 
 Pure: no IDA, no IDA Nexus library, no Textual.
 """
+
 from __future__ import annotations
 
 import os
@@ -53,9 +54,11 @@ def t_no_lock_sweeping():
     check("_sweep_locks is gone", not hasattr(launch, "_sweep_locks"))
     check("the scratch-suffix list is gone", not hasattr(launch, "_LOCK_SUFFIXES"))
     src = open(launch.__file__, encoding="utf-8").read()
-    check("the launcher does not remove files at all",
-          "os.remove" not in src and "shutil.rmtree" not in src,
-          "launch.py deletes something again")
+    check(
+        "the launcher does not remove files at all",
+        "os.remove" not in src and "shutil.rmtree" not in src,
+        "launch.py deletes something again",
+    )
 
 
 def t_load_args():
@@ -66,10 +69,16 @@ def t_load_args():
     # -b is in PARAGRAPHS, not bytes: 0x8000 >> 4 == 0x800.
     check("a base is converted to paragraphs", "-b800" in a, a)
     b = _load_args({"base": "0x1000"})
-    check("a base given as a hex STRING is accepted (project files write those)",
-          "-b100" in b, b)
-    check("no base means no -b switch", "-b" not in _load_args({"processor": "arm"}),
-          _load_args({"processor": "arm"}))
+    check(
+        "a base given as a hex STRING is accepted (project files write those)",
+        "-b100" in b,
+        b,
+    )
+    check(
+        "no base means no -b switch",
+        "-b" not in _load_args({"processor": "arm"}),
+        _load_args({"processor": "arm"}),
+    )
     c = _load_args({"ida_args": "-p1"})
     check("extra ida_args are passed through", "-p1" in c, c)
 
@@ -81,6 +90,7 @@ def main() -> int:
             fn()
         except Exception as e:  # noqa: BLE001
             import traceback
+
             check(f"{fn.__name__} did not crash", False, f"{type(e).__name__}: {e}")
             traceback.print_exc()
     print(f"\n{PASS} passed, {FAIL} failed")

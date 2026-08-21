@@ -22,17 +22,20 @@ import tempfile
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+from _fixtures import fast_keys  # noqa: E402
 from textual.widgets import Static  # noqa: E402
 
-from _fixtures import fast_keys  # noqa: E402
 from idatui._sync import settle  # noqa: E402
 
-fast_keys()   # ~85ms -> ~2ms per keypress; see _fixtures.fast_keys
+fast_keys()  # ~85ms -> ~2ms per keypress; see _fixtures.fast_keys
 from idatui.app import DecompView, IdaTui, ListingView  # noqa: E402
 
 PASS = FAIL = 0
-BIN = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                   "experiments", "fibonacci.bin")
+BIN = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    "experiments",
+    "fibonacci.bin",
+)
 
 
 def check(name, ok, detail=""):
@@ -43,7 +46,6 @@ def check(name, ok, detail=""):
     else:
         FAIL += 1
         print(f"  FAIL {name}   {detail}")
-
 
 
 #: Every phase gets its OWN copy of the fixture.
@@ -89,19 +91,22 @@ async def wait(pred, pilot, t=240.0):
 async def run() -> int:
     # A fresh database every time: the T flag and the segment's addressing mode
     # are SAVED in the .i64, so a previous run would answer the question for us.
-    app = IdaTui(open_path=fresh_copy(BIN, "arm"), keepalive=False,
-                 load_args="-parm")
+    app = IdaTui(open_path=fresh_copy(BIN, "arm"), keepalive=False, load_args="-parm")
     async with app.run_test(size=(140, 44)) as pilot:
-        await wait(lambda: app._func_index is not None
-                   and app._func_index.complete, pilot)
+        await wait(
+            lambda: app._func_index is not None and app._func_index.complete, pilot
+        )
         await wait(lambda: app._cur is not None, pilot, 60)
         lst = app.query_one(ListingView)
         lst.focus()
         lst.cursor = lst.model.index_of_ea(0)
         lst._scroll_cursor_into_view()
         await settle(app)
-        check("starts undefined at the entry", lst.model.get(lst.cursor).kind == "unknown",
-              f"{lst.model.get(lst.cursor).text!r}")
+        check(
+            "starts undefined at the entry",
+            lst.model.get(lst.cursor).kind == "unknown",
+            f"{lst.model.get(lst.cursor).text!r}",
+        )
 
         # `c` in the wrong mode: this is the failure being fixed. It must NOT
         # quietly carve garbage — either it refuses, or whatever it makes is not
@@ -113,9 +118,11 @@ async def run() -> int:
         # queue doesn't say better.
         await settle(app)
         h = lst.model.get(lst.model.index_of_ea(0))
-        check("`c` alone does not produce the Thumb prologue",
-              h is None or h.kind != "code" or "PUSH" not in h.text.upper(),
-              f"{h.text if h else None!r}")
+        check(
+            "`c` alone does not produce the Thumb prologue",
+            h is None or h.kind != "code" or "PUSH" not in h.text.upper(),
+            f"{h.text if h else None!r}",
+        )
 
         m1 = lst.model
         await pilot.press("t")
@@ -130,23 +137,31 @@ async def run() -> int:
         check("the status says it switched to Thumb", "Thumb" in status, status[:90])
         # Thumb doesn't exist in AArch64, and -parm on a headerless blob gives a
         # 64-bit segment, so setting T alone would change nothing and look broken.
-        check("and says it forced the segment to 32-bit",
-              "32-bit" in status, status[:90])
+        check(
+            "and says it forced the segment to 32-bit", "32-bit" in status, status[:90]
+        )
 
         m = lst.model
         rows = [m.get(m.index_of_ea(ea)) for ea in (0x0, 0x2, 0x4)]
-        check("the entry decodes as Thumb",
-              rows[0] is not None and rows[0].kind == "code"
-              and "PUSH" in rows[0].text.upper(),
-              f"{rows[0].text if rows[0] else None!r}")
+        check(
+            "the entry decodes as Thumb",
+            rows[0] is not None
+            and rows[0].kind == "code"
+            and "PUSH" in rows[0].text.upper(),
+            f"{rows[0].text if rows[0] else None!r}",
+        )
         # 16-bit instructions: the addresses are 2 apart, which is the whole
         # point — in ARM mode these would be one 4-byte instruction.
-        check("instructions are 16-bit wide",
-              all(r is not None and r.kind == "code" and r.size == 2 for r in rows),
-              f"{[(hex(r.ea), r.size, r.text) for r in rows if r]}")
-        check("and it kept disassembling past the first one",
-              sum(1 for i in range(20) if (m.get(i) or h).kind == "code") > 5,
-              "expected a run of instructions, not one")
+        check(
+            "instructions are 16-bit wide",
+            all(r is not None and r.kind == "code" and r.size == 2 for r in rows),
+            f"{[(hex(r.ea), r.size, r.text) for r in rows if r]}",
+        )
+        check(
+            "and it kept disassembling past the first one",
+            sum(1 for i in range(20) if (m.get(i) or h).kind == "code") > 5,
+            "expected a run of instructions, not one",
+        )
 
         # Toggling back must be possible — the mode is a guess and guesses get
         # revised.
@@ -164,11 +179,13 @@ async def run() -> int:
     # disassembly that F5 can never turn into pseudocode. The database's bitness
     # is fixed at load and cannot be corrected afterwards, so the only honest
     # thing is to say so.
-    app = IdaTui(open_path=fresh_copy(BIN, "arm64"), keepalive=False,
-                 load_args="-parm")   # 64-bit
+    app = IdaTui(
+        open_path=fresh_copy(BIN, "arm64"), keepalive=False, load_args="-parm"
+    )  # 64-bit
     async with app.run_test(size=(140, 44)) as pilot:
-        await wait(lambda: app._func_index is not None
-                   and app._func_index.complete, pilot)
+        await wait(
+            lambda: app._func_index is not None and app._func_index.complete, pilot
+        )
         await wait(lambda: app._cur is not None, pilot, 60)
         lst = app.query_one(ListingView)
         lst.focus()
@@ -179,8 +196,11 @@ async def run() -> int:
         await pilot.press("t")
         await settle(app, lambda: "64-bit" in status_of(app), timeout=60)
         status = status_of(app)
-        check("a 64-bit database warns that Hex-Rays won't decompile",
-              "64-bit" in status and "decompile" in status, status[:120])
+        check(
+            "a 64-bit database warns that Hex-Rays won't decompile",
+            "64-bit" in status and "decompile" in status,
+            status[:120],
+        )
         check("and names the fix", "ARMv7-A" in status, status[:120])
 
         # And if you ignore that and carry on, the failure has to say WHY. The
@@ -193,66 +213,108 @@ async def run() -> int:
         await pilot.press("p")
         # The function appearing in the index IS the signal; the model identity
         # never was one.
-        await settle(app, lambda: app._func_index is not None
-                     and len(app._func_index) > 0, timeout=60)
+        await settle(
+            app,
+            lambda: app._func_index is not None and len(app._func_index) > 0,
+            timeout=60,
+        )
         await pilot.press("tab")
-        await wait(lambda: "cannot decompile" in
-                   str(app.query_one("#status", Static).render()), pilot, 90)
+        await wait(
+            lambda: (
+                "cannot decompile" in str(app.query_one("#status", Static).render())
+            ),
+            pilot,
+            90,
+        )
         status = str(app.query_one("#status", Static).render())
         # The message must say what to DO. Hex-Rays' own sentence ("only 64-bit
         # functions can be decompiled in the current database") describes the
         # database, not the fix, and is long enough that a status bar cuts off
         # the end — which is where an appended hint would have lived.
-        check("a failed decompile names the fix, not just the diagnosis",
-              "Ctrl+L" in status and "ARMv7-A" in status, status[:130])
-        check("and the reason survives the view reloading under it",
-              "cannot decompile" in status, status[:130])
-        check("the message fits a narrow status bar",
-              len(status) < 110, f"{len(status)} chars: {status[:130]}")
+        check(
+            "a failed decompile names the fix, not just the diagnosis",
+            "Ctrl+L" in status and "ARMv7-A" in status,
+            status[:130],
+        )
+        check(
+            "and the reason survives the view reloading under it",
+            "cannot decompile" in status,
+            status[:130],
+        )
+        check(
+            "the message fits a narrow status bar",
+            len(status) < 110,
+            f"{len(status)} chars: {status[:130]}",
+        )
 
     # -- the whole point: a 32-bit database decompiles ---------------------- #
-    app = IdaTui(open_path=fresh_copy(BIN, "armv7a"), keepalive=False,
-                 load_args="-parm:ARMv7-A")
+    app = IdaTui(
+        open_path=fresh_copy(BIN, "armv7a"), keepalive=False, load_args="-parm:ARMv7-A"
+    )
     async with app.run_test(size=(140, 44)) as pilot:
-        await wait(lambda: app._func_index is not None
-                   and app._func_index.complete, pilot)
+        await wait(
+            lambda: app._func_index is not None and app._func_index.complete, pilot
+        )
         # A 32-bit ARM database also lets auto-analysis do its job on Thumb code,
         # which is why this one lands in the symbol picker rather than nowhere.
-        check("a 32-bit ARM database finds functions by itself",
-              len(app._func_index) > 5, f"n={len(app._func_index)}")
+        check(
+            "a 32-bit ARM database finds functions by itself",
+            len(app._func_index) > 5,
+            f"n={len(app._func_index)}",
+        )
         await pilot.press("escape")
         await settle(app, lambda: type(app.screen).__name__ == "Screen")
         f = app._func_index.all_loaded()[0]
         app._goto_ea(f.addr, push=True)
-        await wait(lambda: app._cur is not None
-                   and app.query_one(ListingView).model is not None, pilot, 60)
+        await wait(
+            lambda: (
+                app._cur is not None and app.query_one(ListingView).model is not None
+            ),
+            pilot,
+            60,
+        )
         app.query_one(ListingView).focus()
         await pilot.press("tab")
         dec = app.query_one(DecompView)
         got = await wait(lambda: dec.display and dec._texts, pilot, 90)
-        check("Tab decompiles a Thumb function", got and len(dec._texts) > 3,
-              f"lines={len(dec._texts or [])}")
-        check("and it reads like C",
-              any("(" in t and ")" in t for t in (dec._texts or [])[:3]),
-              f"{(dec._texts or [])[:3]}")
+        check(
+            "Tab decompiles a Thumb function",
+            got and len(dec._texts) > 3,
+            f"lines={len(dec._texts or [])}",
+        )
+        check(
+            "and it reads like C",
+            any("(" in t and ")" in t for t in (dec._texts or [])[:3]),
+            f"{(dec._texts or [])[:3]}",
+        )
 
     # -- Thumb entry points from a vector table ----------------------------- #
     # An ARM function pointer carries the mode in bit 0: odd means Thumb. A
     # Cortex-M vector table is therefore a list of Thumb entry points, and IDA
     # won't follow them on a headerless image because nothing says those words
     # are pointers at all.
-    vec = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                       "experiments", "cortexm.bin")
+    vec = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        "experiments",
+        "cortexm.bin",
+    )
     if not os.path.isfile(vec):
         check("the cortexm fixture exists", False, vec)
     else:
-        app = IdaTui(open_path=fresh_copy(vec, "cortexm"), keepalive=False,
-                     load_args="-parm:ARMv7-M")
+        app = IdaTui(
+            open_path=fresh_copy(vec, "cortexm"),
+            keepalive=False,
+            load_args="-parm:ARMv7-M",
+        )
         async with app.run_test(size=(140, 44)) as pilot:
-            await wait(lambda: app._func_index is not None
-                       and app._func_index.complete, pilot)
-            check("a bare vector table gives IDA nothing to go on",
-                  len(app._func_index) == 0, f"n={len(app._func_index)}")
+            await wait(
+                lambda: app._func_index is not None and app._func_index.complete, pilot
+            )
+            check(
+                "a bare vector table gives IDA nothing to go on",
+                len(app._func_index) == 0,
+                f"n={len(app._func_index)}",
+            )
             if type(app.screen).__name__ != "Screen":
                 await pilot.press("escape")
                 await settle(app, lambda: type(app.screen).__name__ == "Screen")
@@ -264,20 +326,32 @@ async def run() -> int:
             lst._scroll_cursor_into_view()
             await settle(app)
             await pilot.press("T")
-            await wait(lambda: app._func_index is not None
-                       and len(app._func_index) >= 3, pilot, 90)
+            await wait(
+                lambda: app._func_index is not None and len(app._func_index) >= 3,
+                pilot,
+                90,
+            )
             names = sorted(f.name for f in app._func_index.all_loaded())
-            check("scanning the table finds the Thumb handlers",
-                  names == ["sub_200", "sub_240", "sub_280"], f"{names}")
+            check(
+                "scanning the table finds the Thumb handlers",
+                names == ["sub_200", "sub_240", "sub_280"],
+                f"{names}",
+            )
             # The table also holds an even word (the initial stack pointer), an
             # even in-range word and an odd word pointing outside the image. All
             # three must be ignored — marking a data word as code corrupts the
             # listing, so the cost of a false positive is high.
-            check("and ignores the words that aren't Thumb pointers",
-                  len(app._func_index) == 3, f"n={len(app._func_index)}")
+            check(
+                "and ignores the words that aren't Thumb pointers",
+                len(app._func_index) == 3,
+                f"n={len(app._func_index)}",
+            )
             status = str(app.query_one("#status", Static).render())
-            check("the result survives the reload AND the reindex",
-                  "3 Thumb entries" in status, status[:90])
+            check(
+                "the result survives the reload AND the reindex",
+                "3 Thumb entries" in status,
+                status[:90],
+            )
 
     drop_scratch()
 

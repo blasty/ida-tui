@@ -26,6 +26,7 @@ now-stale database is dropped (the DB describes the old bytes).
 The model has no IDA imports. Staging consults ida_nexus's registry before
 replacing files so it never mutates a database owned by a GUI/shared worker.
 """
+
 from __future__ import annotations
 
 import json
@@ -50,14 +51,14 @@ class ProjectError(Exception):
 class BinaryRef:
     """One binary in a project: where it came from, and where IDA works on it."""
 
-    label: str    # unique within the project; names the staged file
-    source: str   # absolute path to the original binary
-    staged: str   # absolute path IDA actually opens (inside the sidecar)
+    label: str  # unique within the project; names the staged file
+    source: str  # absolute path to the original binary
+    staged: str  # absolute path IDA actually opens (inside the sidecar)
     #: How to LOAD it. Only meaningful for a headerless blob: an ELF/PE says what
     #: it is, a raw firmware image doesn't, and IDA defaults to metapc at 0.
-    processor: str = ""   # IDA processor name: arm, armb, mipsb, metapc, …
-    base: int = 0         # load address (natural, e.g. 0x8000000)
-    ida_args: str = ""    # legacy -p/-b/-T switches accepted by IDA Nexus adapter
+    processor: str = ""  # IDA processor name: arm, armb, mipsb, metapc, …
+    base: int = 0  # load address (natural, e.g. 0x8000000)
+    ida_args: str = ""  # legacy -p/-b/-T switches accepted by IDA Nexus adapter
 
     @property
     def db(self) -> str:
@@ -73,6 +74,7 @@ class BinaryRef:
         conversion lives in ``formats.load_args``.
         """
         from .formats import load_args
+
         return load_args(self.processor, self.base, self.ida_args)
 
 
@@ -112,12 +114,17 @@ def _unlink(path: str) -> bool:
 class Project:
     """A set of binaries analysed together, with all IDA artifacts corralled."""
 
-    def __init__(self, path: str, name: str, entries: list[dict],
-                 memory_pct: int = DEFAULT_MEMORY_PCT) -> None:
+    def __init__(
+        self,
+        path: str,
+        name: str,
+        entries: list[dict],
+        memory_pct: int = DEFAULT_MEMORY_PCT,
+    ) -> None:
         self.path = os.path.abspath(os.path.expanduser(path))
         self.name = name
         self.memory_pct = memory_pct
-        self._entries = entries          # raw, as written to the file
+        self._entries = entries  # raw, as written to the file
         self._refs = self._build_refs()
 
     # -- construction ------------------------------------------------------ #
@@ -145,9 +152,13 @@ class Project:
             # Keep every recognised key: a whitelist of path/label silently
             # dropped the load options on the first save, so a blob's processor
             # and base vanished the moment the project was reopened.
-            norm.append({k: e[k] for k in
-                         ("path", "label", "processor", "base", "ida_args")
-                         if e.get(k) not in (None, "")})
+            norm.append(
+                {
+                    k: e[k]
+                    for k in ("path", "label", "processor", "base", "ida_args")
+                    if e.get(k) not in (None, "")
+                }
+            )
         name = raw.get("name") or os.path.splitext(os.path.basename(path))[0]
         try:
             pct = int(raw.get("memory_pct", DEFAULT_MEMORY_PCT))
@@ -156,8 +167,14 @@ class Project:
         return cls(path, str(name), norm, max(1, min(pct, 90)))
 
     @classmethod
-    def create(cls, path: str, binaries: list[str], name: str | None = None,
-               memory_pct: int = DEFAULT_MEMORY_PCT, load: dict | None = None) -> "Project":
+    def create(
+        cls,
+        path: str,
+        binaries: list[str],
+        name: str | None = None,
+        memory_pct: int = DEFAULT_MEMORY_PCT,
+        load: dict | None = None,
+    ) -> "Project":
         """Write a new project file listing ``binaries`` (an ad-hoc project).
 
         ``load`` carries per-binary load options (processor/base/ida_args) that
@@ -177,14 +194,21 @@ class Project:
             e.update({k: v for k, v in (load or {}).items() if v})
             entries.append(e)
         path = os.path.abspath(os.path.expanduser(path))
-        proj = cls(path, name or os.path.splitext(os.path.basename(path))[0],
-                   entries, memory_pct)
+        proj = cls(
+            path,
+            name or os.path.splitext(os.path.basename(path))[0],
+            entries,
+            memory_pct,
+        )
         proj.save()
         return proj
 
     def save(self) -> None:
-        data = {"name": self.name, "memory_pct": self.memory_pct,
-                "binaries": self._entries}
+        data = {
+            "name": self.name,
+            "memory_pct": self.memory_pct,
+            "binaries": self._entries,
+        }
         tmp = self.path + ".tmp"
         os.makedirs(os.path.dirname(self.path) or ".", exist_ok=True)
         with open(tmp, "w") as f:
@@ -228,20 +252,25 @@ class Project:
                     n += 1
                 label = f"{label}_{n}"
             used.add(label)
-            refs.append(BinaryRef(
-                label=label, source=src,
-                staged=os.path.join(self.bin_dir, label),
-                processor=str(e.get("processor") or ""),
-                base=_as_addr(e.get("base")),
-                ida_args=str(e.get("ida_args") or "")))
+            refs.append(
+                BinaryRef(
+                    label=label,
+                    source=src,
+                    staged=os.path.join(self.bin_dir, label),
+                    processor=str(e.get("processor") or ""),
+                    base=_as_addr(e.get("base")),
+                    ida_args=str(e.get("ida_args") or ""),
+                )
+            )
         return tuple(refs)
 
     @property
     def refs(self) -> tuple[BinaryRef, ...]:
         return self._refs
 
-    def set_load(self, label: str, processor: str = "", base: int = 0,
-                 ida_args: str = "") -> BinaryRef | None:
+    def set_load(
+        self, label: str, processor: str = "", base: int = 0, ida_args: str = ""
+    ) -> BinaryRef | None:
         """Record how ``label`` should be loaded, and persist it.
 
         Answered once: the dialog that asks writes the answer here, so reopening
@@ -275,11 +304,11 @@ class Project:
         ``./a.elf``, ``/abs/a.elf`` and a symlink to it are all the same file.
         """
         key = os.path.realpath(os.path.abspath(os.path.expanduser(binary)))
-        return next((r for r in self._refs
-                     if os.path.realpath(r.source) == key), None)
+        return next((r for r in self._refs if os.path.realpath(r.source) == key), None)
 
-    def add(self, binary: str, label: str | None = None,
-            load: dict | None = None) -> BinaryRef:
+    def add(
+        self, binary: str, label: str | None = None, load: dict | None = None
+    ) -> BinaryRef:
         """Add a binary, or return the existing entry if it's already here."""
         existing = self.by_source(binary)
         if existing is not None:
@@ -320,6 +349,7 @@ class Project:
             return ref.staged
         try:
             from .nexus_client import database_owner
+
             owner = database_owner(ref.db, ref.staged)
         except Exception as exc:
             raise ProjectError(
@@ -337,7 +367,7 @@ class Project:
         # leaving the staged bytes immune to an in-place rewrite of the source.
         shutil.copy2(ref.source, tmp)
         os.replace(tmp, ref.staged)
-        for suf in DB_SUFFIXES:            # the old DB describes the old bytes
+        for suf in DB_SUFFIXES:  # the old DB describes the old bytes
             _unlink(ref.staged + suf)
         return ref.staged
 

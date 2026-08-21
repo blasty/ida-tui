@@ -9,6 +9,7 @@ The historical memory budget remains useful for managed idalib instances, while
 GUI process memory is only advisory. The active and pinned databases are never
 released to satisfy it.
 """
+
 from __future__ import annotations
 
 from .project import BinaryRef, Project
@@ -47,8 +48,11 @@ def _pss_mb(pid: int | None) -> int:
     return 0
 
 
-def _default_spawn(ref: BinaryRef, ttl: int, *, new_database: bool = False):  # pragma: no cover - needs IDA
+def _default_spawn(
+    ref: BinaryRef, ttl: int, *, new_database: bool = False
+):  # pragma: no cover - needs IDA
     from .nexus_client import NexusClient
+
     return NexusClient(
         ref.staged,
         ttl=ttl,
@@ -61,22 +65,31 @@ def _default_spawn(ref: BinaryRef, ttl: int, *, new_database: bool = False):  # 
 class DatabasePool:
     """Live IDA Nexus database leases, keyed by project label."""
 
-    def __init__(self, project: Project, *, budget_mb: int | None = None,
-                 ttl: int = 1800, spawn=None, mem_fn=None) -> None:
+    def __init__(
+        self,
+        project: Project,
+        *,
+        budget_mb: int | None = None,
+        ttl: int = 1800,
+        spawn=None,
+        mem_fn=None,
+    ) -> None:
         self.project = project
         self._ttl = ttl
         self._spawn = spawn or _default_spawn
         self._mem = mem_fn or (lambda c: _pss_mb(getattr(c, "pid", None)))
         self._clients: dict[str, object] = {}
-        self._lru: list[str] = []       # least-recently-used first
+        self._lru: list[str] = []  # least-recently-used first
         self._pinned: set[str] = set()
         self._recreate: set[str] = set()  # Ctrl+L: next attachment creates a fresh IDB
         self.active: str | None = None  # never evicted
         if budget_mb is None:
             ram = _total_ram_mb()
-            budget_mb = (ram * project.memory_pct // 100) if ram else _FALLBACK_BUDGET_MB
+            budget_mb = (
+                (ram * project.memory_pct // 100) if ram else _FALLBACK_BUDGET_MB
+            )
         self.budget_mb = max(budget_mb, 256)
-        self.evicted: list[str] = []    # labels evicted, most recent last
+        self.evicted: list[str] = []  # labels evicted, most recent last
 
     # -- residency --------------------------------------------------------- #
     def resident(self) -> list[str]:
@@ -120,8 +133,11 @@ class DatabasePool:
         self.project.stage(ref)
         note(f"opening {ref.label}\u2026")
         fresh = label in self._recreate
-        client = (_default_spawn(ref, self._ttl, new_database=fresh)
-                  if self._spawn is _default_spawn else self._spawn(ref, self._ttl))
+        client = (
+            _default_spawn(ref, self._ttl, new_database=fresh)
+            if self._spawn is _default_spawn
+            else self._spawn(ref, self._ttl)
+        )
         connect = getattr(client, "connect", None)
         if connect is not None:
             connect(progress=progress) if progress is not None else connect()
@@ -178,8 +194,7 @@ class DatabasePool:
             self._touch(label)
 
     # -- release ----------------------------------------------------------- #
-    def evict(self, label: str, save: bool = True,
-              save_gui: bool = False) -> bool:
+    def evict(self, label: str, save: bool = True, save_gui: bool = False) -> bool:
         """Release a resident lease, persisting a managed database first.
 
         A budget-driven eviction must not save somebody's GUI implicitly. GUI
@@ -253,19 +268,21 @@ class DatabasePool:
         out = []
         for ref in self.project.refs:
             client = self._clients.get(ref.label)
-            out.append({
-                "label": ref.label,
-                "source": ref.source,
-                "resident": client is not None,
-                "pinned": ref.label in self._pinned,
-                "active": ref.label == self.active,
-                "analysed": self.project.has_db(ref),
-                "memory_mb": self._mem(client) if client is not None else 0,
-            })
+            out.append(
+                {
+                    "label": ref.label,
+                    "source": ref.source,
+                    "resident": client is not None,
+                    "pinned": ref.label in self._pinned,
+                    "active": ref.label == self.active,
+                    "analysed": self.project.has_db(ref),
+                    "memory_mb": self._mem(client) if client is not None else 0,
+                }
+            )
         return out
 
     def __repr__(self) -> str:  # pragma: no cover - debug aid
-        return (f"<DatabasePool {len(self._clients)}/{len(self.project.refs)} resident "
-                f"{self.memory_mb()}/{self.budget_mb}MB active={self.active}>")
-
-
+        return (
+            f"<DatabasePool {len(self._clients)}/{len(self.project.refs)} resident "
+            f"{self.memory_mb()}/{self.budget_mb}MB active={self.active}>"
+        )

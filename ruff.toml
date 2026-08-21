@@ -20,6 +20,13 @@ required-version = "==0.16.3"
 target-version = "py311"
 line-length = 88
 
+[format]
+# 0.16 formats Python fenced blocks inside markdown by default. The snippets
+# in docs/ are deliberately terse repro recipes (a `try: x` one-liner reads as
+# one step); a formatter blowing them up to three lines makes them worse, and
+# nothing executes them. Real code lives in .py files, which are formatted.
+exclude = ["*.md"]
+
 [lint]
 # Import sorting, and nothing else. `ruff check` can enforce a great deal more
 # and one day it might, but this hook's job is formatting: one that also

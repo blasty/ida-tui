@@ -38,6 +38,7 @@ Usage::
 
 Exit code is 0 only if every file selected ran and passed.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -80,14 +81,17 @@ def needs_ida(path: str) -> bool:
             if isinstance(target, ast.Name) and target.id == "NEEDS_IDA":
                 value = ast.literal_eval(node.value)
                 if not isinstance(value, bool):
-                    raise Marker(f"{os.path.basename(path)}: "
-                                 f"NEEDS_IDA must be a bool, got {value!r}")
+                    raise Marker(
+                        f"{os.path.basename(path)}: "
+                        f"NEEDS_IDA must be a bool, got {value!r}"
+                    )
                 return value
     raise Marker(
         f"{os.path.basename(path)}: no NEEDS_IDA marker.\n"
         f"  Add `NEEDS_IDA = True` (spawns a worker / drives the pilot) or\n"
         f"  `NEEDS_IDA = False` (pure: stdlib, no IDA, runs anywhere) at module\n"
-        f"  scope, so tests/run.py --fast knows whether it can run you.")
+        f"  scope, so tests/run.py --fast knows whether it can run you."
+    )
 
 
 def discover() -> list[tuple[str, bool]]:
@@ -124,41 +128,70 @@ def tally(output: str) -> tuple[int, int] | None:
 
 def run_one(path: str, python: str, extra: list[str], echo: bool) -> dict:
     """Run one test file as a subprocess and summarise it."""
-    name = os.path.basename(path)[len("test_"):-len(".py")]
+    name = os.path.basename(path)[len("test_") : -len(".py")]
     started = time.time()
-    proc = subprocess.run([python, path, *extra], cwd=ROOT,
-                          capture_output=not echo, text=True)
+    proc = subprocess.run(
+        [python, path, *extra], cwd=ROOT, capture_output=not echo, text=True
+    )
     took = time.time() - started
     out = "" if echo else (proc.stdout or "") + (proc.stderr or "")
     counts = tally(out)
     skipped = bool(_SKIP.search(out)) and (counts is None or counts == (0, 0))
     return {
-        "name": name, "path": path, "code": proc.returncode, "took": took,
+        "name": name,
+        "path": path,
+        "code": proc.returncode,
+        "took": took,
         "passed": counts[0] if counts else 0,
         "failed": counts[1] if counts else 0,
         "counted": counts is not None,
-        "skipped": skipped, "output": out,
+        "skipped": skipped,
+        "output": out,
     }
 
 
 def main(argv: list[str]) -> int:
     ap = argparse.ArgumentParser(
-        prog="tests/run.py", description=__doc__,
-        formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("only", nargs="*", metavar="SUBSTR",
-                    help="only run test files whose name contains one of these")
-    ap.add_argument("--fast", action="store_true",
-                    help="skip every file that needs IDA (seconds, runs anywhere)")
-    ap.add_argument("--ida-only", action="store_true",
-                    help="only the files that need IDA")
-    ap.add_argument("--list", action="store_true",
-                    help="show what would run, and whether it needs IDA")
-    ap.add_argument("-x", "--exitfirst", action="store_true",
-                    help="stop after the first failing file")
-    ap.add_argument("-v", "--verbose", action="store_true",
-                    help="stream each suite's output instead of capturing it")
-    ap.add_argument("--python", default=os.environ.get("IDATUI_PYTHON", DEFAULT_PY),
-                    help=f"interpreter for the IDA suites (default {DEFAULT_PY})")
+        prog="tests/run.py",
+        description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    ap.add_argument(
+        "only",
+        nargs="*",
+        metavar="SUBSTR",
+        help="only run test files whose name contains one of these",
+    )
+    ap.add_argument(
+        "--fast",
+        action="store_true",
+        help="skip every file that needs IDA (seconds, runs anywhere)",
+    )
+    ap.add_argument(
+        "--ida-only", action="store_true", help="only the files that need IDA"
+    )
+    ap.add_argument(
+        "--list",
+        action="store_true",
+        help="show what would run, and whether it needs IDA",
+    )
+    ap.add_argument(
+        "-x",
+        "--exitfirst",
+        action="store_true",
+        help="stop after the first failing file",
+    )
+    ap.add_argument(
+        "-v",
+        "--verbose",
+        action="store_true",
+        help="stream each suite's output instead of capturing it",
+    )
+    ap.add_argument(
+        "--python",
+        default=os.environ.get("IDATUI_PYTHON", DEFAULT_PY),
+        help=f"interpreter for the IDA suites (default {DEFAULT_PY})",
+    )
     args, extra = ap.parse_known_args(argv)
 
     try:
@@ -190,10 +223,12 @@ def main(argv: list[str]) -> int:
     # an IDA file needs the interpreter that has textual + idapro.
     pure_py = sys.executable
     if any(ida for _, ida in selected) and not os.path.exists(args.python):
-        print(f"error: {args.python} not found — the IDA suites need an "
-              f"interpreter with textual + idapro.\n"
-              f"       Pass --python, set $IDATUI_PYTHON, or use --fast.",
-              file=sys.stderr)
+        print(
+            f"error: {args.python} not found — the IDA suites need an "
+            f"interpreter with textual + idapro.\n"
+            f"       Pass --python, set $IDATUI_PYTHON, or use --fast.",
+            file=sys.stderr,
+        )
         return 2
 
     results = []
@@ -226,7 +261,7 @@ def main(argv: list[str]) -> int:
         elif r["code"] != 0 or r["failed"]:
             state = "\033[31mFAIL\033[0m"
         elif not r["counted"]:
-            state = "\033[33m ?  \033[0m"   # exit 0 but printed no tally
+            state = "\033[33m ?  \033[0m"  # exit 0 but printed no tally
         else:
             state = "\033[32m ok \033[0m"
         detail = f"{r['passed']:4d} passed"

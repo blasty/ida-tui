@@ -25,6 +25,7 @@ What it does NOT do is trust the library with degenerate input. Self-loops and
 disconnected graphs make it throw, an empty graph used to segfault, and a
 segfault takes the TUI down with it. Both are handled here, before the call.
 """
+
 from __future__ import annotations
 
 import os
@@ -56,10 +57,11 @@ def module():
     path = os.environ.get("IDATUI_TRISKEL_PATH")
     if path:
         import sys
+
         if path not in sys.path:
             sys.path.insert(0, path)
     try:
-        import pytriskel                                    # noqa: PLC0415
+        import pytriskel  # noqa: PLC0415
     except ImportError:
         return None
     # Upstream ships wheels whose get_waypoints() always throws (a missing
@@ -119,8 +121,9 @@ def _phantom_edges(g: G._Graph, root: int) -> list[tuple[int, int]]:
     while len(reach) < len(g.nodes):
         rest = [i for i in g.nodes if i not in reach]
         rest_set = set(rest)
-        head = next((i for i in rest
-                     if not any(p in rest_set for p in preds[i])), rest[0])
+        head = next(
+            (i for i in rest if not any(p in rest_set for p in preds[i])), rest[0]
+        )
         phantom.append((root, head))
         reach |= _reachable(succ, head)
     return phantom
@@ -168,8 +171,7 @@ def run(g: G._Graph, root: int) -> tuple[list[G.Route], int]:
     pt = module()
     if pt is None:
         raise RuntimeError("pytriskel is not available")
-    pt.set_spacing(x_gutter=float(HGAP), y_gutter=float(VGAP),
-                   edge_height=float(LANE))
+    pt.set_spacing(x_gutter=float(HGAP), y_gutter=float(VGAP), edge_height=float(LANE))
 
     routes: list[G.Route] = []
     if g.nodes:
@@ -203,9 +205,14 @@ def run(g: G._Graph, root: int) -> tuple[list[G.Route], int]:
     return routes, len(bands)
 
 
-def _layout_graph(pt, g: G._Graph, root: int, edges: list[G.Edge],
-                  phantom: list[tuple[int, int]],
-                  routes: list[G.Route]) -> None:
+def _layout_graph(
+    pt,
+    g: G._Graph,
+    root: int,
+    edges: list[G.Edge],
+    phantom: list[tuple[int, int]],
+    routes: list[G.Route],
+) -> None:
     """Lay the whole graph out and append its routes."""
     order = [root] + [i for i in g.nodes if i != root]
     succ: dict[int, list[int]] = {i: [] for i in g.nodes}
@@ -220,8 +227,10 @@ def _layout_graph(pt, g: G._Graph, root: int, edges: list[G.Edge],
         # than an exception, so check before crossing into C++ rather than
         # after. RuntimeError here means a fallback to native; a segfault means
         # the user loses the session.
-        raise RuntimeError(f"{len(unreachable)} blocks unreachable from the "
-                           f"layout root {root}: {sorted(unreachable)[:8]}")
+        raise RuntimeError(
+            f"{len(unreachable)} blocks unreachable from the "
+            f"layout root {root}: {sorted(unreachable)[:8]}"
+        )
 
     builder = pt.make_layout_builder()
     tid = {}
@@ -234,8 +243,10 @@ def _layout_graph(pt, g: G._Graph, root: int, edges: list[G.Edge],
         # docstring says "width and height", which is the other way round; our
         # fork makes them keyword arguments so it cannot be got wrong silently.
         tid[nid] = builder.make_node(height=float(n.h), width=float(n.w))
-    teid = [(builder.make_edge(tid[e.src], tid[e.dst], _edge_type(pt, e.kind)), e)
-            for e in edges]
+    teid = [
+        (builder.make_edge(tid[e.src], tid[e.dst], _edge_type(pt, e.kind)), e)
+        for e in edges
+    ]
     for a, b in phantom:
         builder.make_edge(tid[a], tid[b], _edge_type(pt, G.E_UNCOND))
     lay = builder.build()
@@ -266,8 +277,9 @@ def _layout_graph(pt, g: G._Graph, root: int, edges: list[G.Edge],
         if len(pts) < 2:
             continue
         _snap_ports(g, e, pts)
-        routes.append(G.Route(edge=e, pts=_clean(pts), head=True, tail=True,
-                              flipped=False))
+        routes.append(
+            G.Route(edge=e, pts=_clean(pts), head=True, tail=True, flipped=False)
+        )
 
 
 def _box_index(g: G._Graph) -> tuple[dict[int, list[G.Node]], dict[int, list[G.Node]]]:
@@ -293,15 +305,14 @@ def _hits(by_col, by_row, p: tuple[int, int], q: tuple[int, int]) -> list[G.Node
     (r0, c0), (r1, c1) = p, q
     if c0 == c1:
         lo, hi = (r0, r1) if r0 <= r1 else (r1, r0)
-        return [n for n in by_col.get(c0, ())
-                if n.y < hi and lo < n.bottom]
+        return [n for n in by_col.get(c0, ()) if n.y < hi and lo < n.bottom]
     lo, hi = (c0, c1) if c0 <= c1 else (c1, c0)
-    return [n for n in by_row.get(r0, ())
-            if n.x < hi and lo < n.right]
+    return [n for n in by_row.get(r0, ()) if n.x < hi and lo < n.right]
 
 
-def _free_line(blocked: list[tuple[int, int]], want: int,
-               allow: tuple[int, int] | None = None) -> int | None:
+def _free_line(
+    blocked: list[tuple[int, int]], want: int, allow: tuple[int, int] | None = None
+) -> int | None:
     """The coordinate nearest ``want`` that is in none of ``blocked``.
 
     ``blocked`` is a list of inclusive intervals. Jumping to the near side of
@@ -316,7 +327,7 @@ def _free_line(blocked: list[tuple[int, int]], want: int,
         lo, hi = allow
         if lo > hi:
             return None
-        blocked = list(blocked) + [(hi + 1, hi + 1 + 10 ** 6)]
+        blocked = list(blocked) + [(hi + 1, hi + 1 + 10**6)]
         if lo > 0:
             blocked.append((0, lo - 1))
     if not blocked:
@@ -381,10 +392,13 @@ def _repair_boxes(g: G._Graph, routes: list[G.Route]) -> int:
                 p, q = rt.pts[i], rt.pts[i + 1]
                 if not _hits(by_col, by_row, p, q):
                     continue
-                if p[1] == q[1]:                       # vertical: shift column
+                if p[1] == q[1]:  # vertical: shift column
                     lo, hi = sorted((p[0], q[0]))
-                    blocked = [(n.x + 1, n.right - 1) for n in real
-                               if n.y < hi and lo < n.bottom]
+                    blocked = [
+                        (n.x + 1, n.right - 1)
+                        for n in real
+                        if n.y < hi and lo < n.bottom
+                    ]
                     # The first and last segments carry the port and the
                     # arrowhead, so they may only move ALONG their own box's
                     # border -- but move they must: triskel is happy to park a
@@ -398,16 +412,21 @@ def _repair_boxes(g: G._Graph, routes: list[G.Route]) -> int:
                             ends.append(g.nodes[rt.edge.src])
                         if i == last:
                             ends.append(g.nodes[rt.edge.dst])
-                        allow = (max(n.x + 1 for n in ends),
-                                 min(n.right - 1 for n in ends))
+                        allow = (
+                            max(n.x + 1 for n in ends),
+                            min(n.right - 1 for n in ends),
+                        )
                     col = _free_line(blocked, p[1], allow)
                     if col is None:
                         continue
                     rt.pts[i], rt.pts[i + 1] = (p[0], col), (q[0], col)
-                elif i not in (0, last):               # horizontal: shift row
+                elif i not in (0, last):  # horizontal: shift row
                     lo, hi = sorted((p[1], q[1]))
-                    blocked = [(n.y + 1, n.bottom - 1) for n in real
-                               if n.x < hi and lo < n.right]
+                    blocked = [
+                        (n.y + 1, n.bottom - 1)
+                        for n in real
+                        if n.x < hi and lo < n.right
+                    ]
                     row = _free_line(blocked, p[0])
                     if row is None:
                         continue
@@ -445,7 +464,8 @@ def _verify(g: G._Graph, routes: list[G.Route]) -> None:
             if b.x <= a.right:
                 raise RuntimeError(
                     f"blocks {a.id} and {b.id} overlap on row {r} "
-                    f"(x[{a.x},{a.right}] vs x[{b.x},{b.right}])")
+                    f"(x[{a.x},{a.right}] vs x[{b.x},{b.right}])"
+                )
 
     by_col, by_row = _box_index(g)
     for rt in routes:
@@ -454,7 +474,8 @@ def _verify(g: G._Graph, routes: list[G.Route]) -> None:
             if hit:
                 raise RuntimeError(
                     f"edge {rt.edge.src}->{rt.edge.dst} crosses block "
-                    f"{hit[0].id} at {p}-{q} and could not be detoured")
+                    f"{hit[0].id} at {p}-{q} and could not be detoured"
+                )
 
 
 def _snap_ports(g: G._Graph, e: G.Edge, pts: list[tuple[int, int]]) -> None:
@@ -484,7 +505,7 @@ def _snap_ports(g: G._Graph, e: G.Edge, pts: list[tuple[int, int]]) -> None:
     old_r, old_c = pts[0]
     col = clamp(src, old_c)
     pts[0] = (src.bottom if pts[1][0] >= old_r else src.y, col)
-    if pts[1][1] == old_c:            # the first segment was vertical: keep it
+    if pts[1][1] == old_c:  # the first segment was vertical: keep it
         pts[1] = (pts[1][0], col)
 
     # head: dst's top border if the edge arrives downward, its bottom if not

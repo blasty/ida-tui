@@ -25,6 +25,7 @@ Key facts this spike encodes (all verified):
     another process, so the TUI's event loop never blocks. In-process, a slow
     call (decompile ~150ms, analysis seconds) blocks the UI for its duration.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -60,13 +61,21 @@ class DirectBackend:
 
     def __init__(self, path: str) -> None:
         import idapro
+
         idapro.enable_console_messages(False)
         t = time.time()
         rc = idapro.open_database(path, run_auto_analysis=True)
         self.open_secs = time.time() - t
         if rc:
             raise RuntimeError(f"open_database({path!r}) failed rc={rc}")
-        import ida_bytes, ida_funcs, ida_hexrays, ida_name, idaapi, idautils, idc
+        import ida_bytes
+        import ida_funcs
+        import ida_hexrays
+        import ida_name
+        import idaapi
+        import idautils
+        import idc
+
         self._idapro = idapro
         self.idaapi, self.idautils, self.idc = idaapi, idautils, idc
         self.ida_bytes, self.ida_hexrays = ida_bytes, ida_hexrays
@@ -108,6 +117,7 @@ class McpBackend:
         if REPO not in sys.path:  # idalib's init can reset sys.path out from under us
             sys.path.insert(0, REPO)
         from idatui.client import IDAClient
+
         self.IDAClient = IDAClient
         self.c = IDAClient(url, db=db)
         self.c.connect()
@@ -150,8 +160,12 @@ class McpBackend:
         return r.get("code", "") if isinstance(r, dict) else str(r)
 
     def xrefs_to(self, ea):
-        r = self.c.call("xref_query", queries=[{"addr": hex(ea), "direction": "to",
-                                                "include_fn": True, "count": 2000}])
+        r = self.c.call(
+            "xref_query",
+            queries=[
+                {"addr": hex(ea), "direction": "to", "include_fn": True, "count": 2000}
+            ],
+        )
         res = r.get("result", []) if isinstance(r, dict) else []
         refs = res[0].get("refs", []) if res and isinstance(res[0], dict) else []
         return [int(x["frm"], 16) for x in refs if x.get("frm")]
@@ -200,14 +214,21 @@ def _recv(sock):
     return _unpack(_recvn(sock, n))
 
 
-_WORKER_OPS = ("functions", "resolve", "read_bytes", "disasm_line",
-               "decompile", "xrefs_to")
+_WORKER_OPS = (
+    "functions",
+    "resolve",
+    "read_bytes",
+    "disasm_line",
+    "decompile",
+    "xrefs_to",
+)
 
 
 def _worker_main(sockpath: str, dbpath: str) -> None:
     """Runs in a child process. Opens idalib on ITS main thread (constraint
     satisfied), then serves one client serially over a unix socket."""
     import socket as sk
+
     direct = DirectBackend(dbpath)
     ops = {name: getattr(direct, name) for name in _WORKER_OPS}
     try:
@@ -237,10 +258,17 @@ class UnixWorkerBackend:
 
     def __init__(self, dbpath: str) -> None:
         import socket as sk
+
         self.sockpath = f"/tmp/inproc_spike_{os.getpid()}.sock"
         self.proc = __import__("subprocess").Popen(
-            [sys.executable, os.path.abspath(__file__),
-             "--worker", self.sockpath, dbpath])
+            [
+                sys.executable,
+                os.path.abspath(__file__),
+                "--worker",
+                self.sockpath,
+                dbpath,
+            ]
+        )
         deadline = time.time() + 120
         self.sock = None
         while time.time() < deadline:
@@ -263,12 +291,23 @@ class UnixWorkerBackend:
             raise RuntimeError(val)
         return val
 
-    def functions(self):       return self._call("functions")
-    def resolve(self, name):   return self._call("resolve", name)
-    def read_bytes(self, ea, n): return self._call("read_bytes", ea, n)
-    def disasm_line(self, ea): return self._call("disasm_line", ea)
-    def decompile(self, ea):   return self._call("decompile", ea)
-    def xrefs_to(self, ea):    return self._call("xrefs_to", ea)
+    def functions(self):
+        return self._call("functions")
+
+    def resolve(self, name):
+        return self._call("resolve", name)
+
+    def read_bytes(self, ea, n):
+        return self._call("read_bytes", ea, n)
+
+    def disasm_line(self, ea):
+        return self._call("disasm_line", ea)
+
+    def decompile(self, ea):
+        return self._call("decompile", ea)
+
+    def xrefs_to(self, ea):
+        return self._call("xrefs_to", ea)
 
     def close(self):
         try:
@@ -321,6 +360,7 @@ def bench(target: str, n: int) -> None:
 
     try:
         import socket
+
         socket.create_connection(("127.0.0.1", 8745), 0.3).close()
         backends["mcp"] = McpBackend()
         print("benching the running mcp server on :8745 too", flush=True)
@@ -338,15 +378,15 @@ def bench(target: str, n: int) -> None:
         return sample[_nx[0]]
 
     ops = {
-        "resolve(main)":        (lambda b: b.resolve("main"), n),
-        "read_bytes(16)":       (lambda b: b.read_bytes(main, 16), n),
-        "read_bytes(4096)":     (lambda b: b.read_bytes(main, 4096), n),
-        "disasm_line":          (lambda b: b.disasm_line(main), n),
-        "xrefs_to":             (lambda b: b.xrefs_to(_next_sample()), min(n, 200)),
-        "decompile(cached)":    (lambda b: b.decompile(main), min(n, 40)),
+        "resolve(main)": (lambda b: b.resolve("main"), n),
+        "read_bytes(16)": (lambda b: b.read_bytes(main, 16), n),
+        "read_bytes(4096)": (lambda b: b.read_bytes(main, 4096), n),
+        "disasm_line": (lambda b: b.disasm_line(main), n),
+        "xrefs_to": (lambda b: b.xrefs_to(_next_sample()), min(n, 200)),
+        "decompile(cached)": (lambda b: b.decompile(main), min(n, 40)),
     }
     names = list(backends)
-    hdr = f"{'op':20}" + "".join(f"{nm+' us':>14}" for nm in names)
+    hdr = f"{'op':20}" + "".join(f"{nm + ' us':>14}" for nm in names)
     print(hdr)
     print("-" * len(hdr))
     results: dict[str, dict[str, float]] = {nm: {} for nm in names}
@@ -371,7 +411,7 @@ def bench(target: str, n: int) -> None:
                 if nm == "mcp":
                     continue
                 v = results[nm].get(label, float("nan"))
-                parts.append(f"{nm} {m/v:.0f}x" if v == v and v else f"{nm} -")
+                parts.append(f"{nm} {m / v:.0f}x" if v == v and v else f"{nm} -")
             print(f"  {label:20} {'   '.join(parts)}")
 
     for b in backends.values():
@@ -408,10 +448,12 @@ def _build_spike_app(backend: "DirectBackend"):
                 for ea, nm in backend.functions():
                     ol.add_option(Option(f"{ea:08x}  {nm}", id=str(ea)))
                 yield ol
-                yield Static("select a function, press F5 to decompile inline",
-                             id="code")
-            yield Static("in-process idalib — every call runs on the UI thread",
-                         id="status")
+                yield Static(
+                    "select a function, press F5 to decompile inline", id="code"
+                )
+            yield Static(
+                "in-process idalib — every call runs on the UI thread", id="status"
+            )
             yield Footer()
 
         def on_mount(self):
@@ -428,13 +470,13 @@ def _build_spike_app(backend: "DirectBackend"):
             if ea is None:
                 return
             t = time.perf_counter()
-            code = backend.decompile(ea)          # <-- BLOCKS the event loop
+            code = backend.decompile(ea)  # <-- BLOCKS the event loop
             dt = (time.perf_counter() - t) * 1e3
-            self.query_one("#code", Static).update(
-                "\n".join(code.splitlines()[:40]))
+            self.query_one("#code", Static).update("\n".join(code.splitlines()[:40]))
             self.query_one("#status", Static).update(
                 f"decompiled {backend.idc.get_func_name(ea)} in {dt:.0f} ms "
-                f"(UI was frozen for those {dt:.0f} ms)")
+                f"(UI was frozen for those {dt:.0f} ms)"
+            )
 
         def action_decompile_all(self):
             funcs = backend.functions()
@@ -442,14 +484,15 @@ def _build_spike_app(backend: "DirectBackend"):
             n = 0
             for ea, _ in funcs:
                 try:
-                    backend.decompile(ea)         # <-- long, uninterruptible freeze
+                    backend.decompile(ea)  # <-- long, uninterruptible freeze
                     n += 1
                 except Exception:  # noqa: BLE001
                     pass
             dt = (time.perf_counter() - t) * 1e3
             self.query_one("#status", Static).update(
                 f"decompiled {n} funcs in {dt:.0f} ms — the whole UI was frozen "
-                f"the entire time (no spinner, no input)")
+                f"the entire time (no spinner, no input)"
+            )
 
         def action_bytes(self):
             ea = self._sel_ea()
@@ -459,7 +502,8 @@ def _build_spike_app(backend: "DirectBackend"):
             b = backend.read_bytes(ea, 64)
             dt = (time.perf_counter() - t) * 1e6
             self.query_one("#status", Static).update(
-                f"read 64 bytes in {dt:.1f} us: {b[:16].hex()}…")
+                f"read 64 bytes in {dt:.1f} us: {b[:16].hex()}…"
+            )
 
     return Spike()
 
@@ -472,7 +516,9 @@ def _open_copy(target: str) -> "DirectBackend":
             os.remove(tmp + e)
         except OSError:
             pass
-    print("opening in-process (blocks the terminal until analysis is done)…", flush=True)
+    print(
+        "opening in-process (blocks the terminal until analysis is done)…", flush=True
+    )
     return DirectBackend(tmp)  # MAIN THREAD open, before the event loop starts
 
 

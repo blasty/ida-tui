@@ -7,6 +7,7 @@ write per progress tick) and tallies the escapes.
 
     PYTHONPATH=. ~/ida-venv/bin/python experiments/splash_place_count.py
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -16,10 +17,10 @@ import sys
 
 os.environ["IDATUI_KITTY"] = "1"
 
-from textual.app import App, ComposeResult          # noqa: E402
-from textual.widgets import Static                  # noqa: E402
+from textual.app import App, ComposeResult  # noqa: E402
+from textual.widgets import Static  # noqa: E402
 
-from idatui import kittygfx                         # noqa: E402
+from idatui import kittygfx  # noqa: E402
 
 SENT: list[str] = []
 
@@ -29,10 +30,10 @@ def _fake_write(data: str) -> bool:
     return True
 
 
-kittygfx._write = _fake_write            # type: ignore[assignment]
+kittygfx._write = _fake_write  # type: ignore[assignment]
 kittygfx._cell = (9, 22)
 
-from idatui.app import LoadingScreen     # noqa: E402
+from idatui.app import LoadingScreen  # noqa: E402
 
 
 def tally() -> dict[str, int]:
@@ -79,12 +80,16 @@ async def main() -> None:
     d = tally()
     blob = "".join(SENT)
     cmds = re.findall(r"\x1b_G([^;\x1b]*)", blob)
-    ids = {dict(kv.split("=", 1) for kv in c.split(",") if "=" in kv).get("p")
-           for c in cmds if "a=p" in c.split(",")}
+    ids = {
+        dict(kv.split("=", 1) for kv in c.split(",") if "=" in kv).get("p")
+        for c in cmds
+        if "a=p" in c.split(",")
+    }
     onscreen = "unbounded (anonymous)" if None in ids else len(ids)
     print()
-    print(f"=> {d['placements (a=p)']} place escapes sent, "
-          f"{d['deletes (a=d)']} deletes")
+    print(
+        f"=> {d['placements (a=p)']} place escapes sent, {d['deletes (a=d)']} deletes"
+    )
     print(f"   images actually on screen: {onscreen}")
     print("   A placement is identified by (image id, placement id). An a=p with")
     print("   no p= key is ANONYMOUS and stacks a fresh copy every time; with a")

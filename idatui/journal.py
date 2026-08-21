@@ -46,8 +46,13 @@ class Journal:
         self._lock = threading.Lock()
 
     # -- recording ---------------------------------------------------------- #
-    def record(self, kind: str, ea: int | None = None, detail: str = "",
-               extra: dict | None = None) -> None:
+    def record(
+        self,
+        kind: str,
+        ea: int | None = None,
+        detail: str = "",
+        extra: dict | None = None,
+    ) -> None:
         """Note one edit: ``kind`` is 'rename' / 'comment' / 'retype' / …"""
         entry = {"k": str(kind), "t": int(time.time())}
         if ea is not None:
@@ -59,14 +64,17 @@ class Journal:
         with self._lock:
             self.entries.append(entry)
             if len(self.entries) > MAX_ENTRIES:
-                del self.entries[:len(self.entries) - MAX_ENTRIES]
+                del self.entries[: len(self.entries) - MAX_ENTRIES]
             self._dirty = True
 
     def addresses(self, kinds: tuple[str, ...] | None = None) -> set[int]:
         """Every address touched (optionally only by certain kinds of edit)."""
         with self._lock:
-            return {e["ea"] for e in self.entries
-                    if "ea" in e and (kinds is None or e.get("k") in kinds)}
+            return {
+                e["ea"]
+                for e in self.entries
+                if "ea" in e and (kinds is None or e.get("k") in kinds)
+            }
 
     def __len__(self) -> int:
         return len(self.entries)

@@ -15,6 +15,7 @@ The controller owns the trace state. ``IdaTui`` keeps forwarding properties
 (``app._trace``, ``app._t``, ``app._trail_map``...) because the pilot suite and
 the RPC layer read them by those names; see ``IdaTui._trace``.
 """
+
 from __future__ import annotations
 
 import bisect
@@ -23,7 +24,7 @@ from typing import TYPE_CHECKING
 
 from . import diag
 
-if TYPE_CHECKING:                                    # pragma: no cover
+if TYPE_CHECKING:  # pragma: no cover
     from .app import IdaTui
 
 _app_mod = None
@@ -39,6 +40,7 @@ def _views():
     global _app_mod
     if _app_mod is None:
         from . import app as _m
+
         _app_mod = _m
     return _app_mod
 
@@ -48,15 +50,15 @@ class TraceController:
 
     def __init__(self, app: "IdaTui", path: str = "") -> None:
         self.app = app
-        self.path = path or ""       # the Tenet trace to explore, if any
-        self.trace = None            # the loaded Trace, once analysed
-        self.t = 0                   # current timestamp in that trace
-        self.trail_map = []          # decomp_map for trail_map_ea
+        self.path = path or ""  # the Tenet trace to explore, if any
+        self.trace = None  # the loaded Trace, once analysed
+        self.t = 0  # current timestamp in that trace
+        self.trail_map = []  # decomp_map for trail_map_ea
         self.trail_map_ea = None
-        self.trail_line_of: dict[int, int] = {}   # ea -> pseudocode line
-        self.trail_eas: list[int] = []            # sorted keys of trail_line_of
-        self.trail_span = None                    # ea span of that function
-        self.pending_line = None     # step waiting on a re-decompile
+        self.trail_line_of: dict[int, int] = {}  # ea -> pseudocode line
+        self.trail_eas: list[int] = []  # sorted keys of trail_line_of
+        self.trail_span = None  # ea span of that function
+        self.pending_line = None  # step waiting on a re-decompile
 
     @property
     def armed(self) -> bool:
@@ -82,26 +84,30 @@ class TraceController:
         Called on a worker thread, so every touch of the UI hops back.
         """
         from .trace import Trace
+
         app = self.app
         path = self.path
         try:
+
             def note(n):
-                app.call_from_thread(
-                    app._status, f"trace: {n:,} instructions\u2026")
+                app.call_from_thread(app._status, f"trace: {n:,} instructions\u2026")
+
             trace = Trace.load(path, progress=note)
         except OSError as e:
             app.call_from_thread(app._status, f"trace: {e}")
             return
         if not trace.length:
             app.call_from_thread(
-                app._status, f"trace: {os.path.basename(path)} is empty")
+                app._status, f"trace: {os.path.basename(path)} is empty"
+            )
             return
         idx = app._func_index
         addrs = [f.addr for f in idx.all_loaded()] if idx is not None else []
         slide = trace.rebase(addrs)
         trace.apply_slide(slide)
-        hit = sum(1 for f in (idx.all_loaded() if idx else [])
-                  if trace.executions(f.addr))
+        hit = sum(
+            1 for f in (idx.all_loaded() if idx else []) if trace.executions(f.addr)
+        )
         app.call_from_thread(self.ready, trace, slide, hit)
 
     def ready(self, trace, slide: int, hit: int) -> None:
@@ -111,9 +117,11 @@ class TraceController:
         dock = app.query_one(_views().TraceDock)
         dock.display = True
         dock.show(trace, 0)
-        where = (f"rebased {slide:+#x}" if slide else "no rebase needed")
-        app._status(f"trace: {trace.length:,} instructions, {hit} functions "
-                    f"touched ({where})", priority=True)
+        where = f"rebased {slide:+#x}" if slide else "no rebase needed"
+        app._status(
+            f"trace: {trace.length:,} instructions, {hit} functions touched ({where})",
+            priority=True,
+        )
         self.seek(0, follow=True)
 
     # -- trace navigation --------------------------------------------------- #
@@ -144,8 +152,7 @@ class TraceController:
         # Stay in whichever view you're reading. Without prefer_decomp a step
         # from the pseudocode navigates to an address, which opens the listing —
         # so stepping through C threw you out of C on the first keypress.
-        app._goto_ea(pc, push=False,
-                     prefer_decomp=(app.is_decomp))
+        app._goto_ea(pc, push=False, prefer_decomp=(app.is_decomp))
 
     def seek_split(self, pc: int) -> bool:
         """Put BOTH panes on ``pc``. True if handled.
@@ -166,7 +173,7 @@ class TraceController:
             return False
         row = lst.model.ensure_ea(pc)
         if row is None or row < 0:
-            return False        # not in this listing (other segment): full nav
+            return False  # not in this listing (other segment): full nav
         lst.cursor = row
         lst._scroll_cursor_into_view()
 
@@ -177,8 +184,9 @@ class TraceController:
         # bounced main -> PLT stub -> main, each bounce costing a synchronous
         # 769-line map fetch on the UI thread.
         span = self.trail_span
-        inside = (pc in self.trail_line_of
-                  or (span is not None and span[0] <= pc <= span[1]))
+        inside = pc in self.trail_line_of or (
+            span is not None and span[0] <= pc <= span[1]
+        )
         if not inside:
             self.pending_line = pc
             app._resync_decomp_async(pc)
@@ -227,7 +235,7 @@ class TraceController:
         t = self.trace
         if t is None:
             return
-        hx = app._try_view(M.HexView)     # None until it's mounted
+        hx = app._try_view(M.HexView)  # None until it's mounted
         if hx is not None:
             hx.trace, hx.trace_idx = t, self.t
             if hx.display:
@@ -325,7 +333,7 @@ class TraceController:
         sp_name = "rsp" if "rsp" in t.reg_at else ("esp" if "esp" in t.reg_at else "sp")
         sp0 = t.register(sp_name, self.t)
         i = self.t + direction
-        limit = 200000          # a runaway search must not hang the UI
+        limit = 200000  # a runaway search must not hang the UI
         while 0 <= i < t.length and limit > 0:
             sp = t.register(sp_name, i)
             if sp0 is None or sp is None or sp >= sp0:
@@ -364,15 +372,17 @@ class TraceController:
                 # and often no question at all, since most lines have no marker.
                 line = view.cursor
                 eas = []
-                if (self.trail_map_ea == view.loaded_ea
-                        and 0 <= line < len(self.trail_map or [])):
+                if self.trail_map_ea == view.loaded_ea and 0 <= line < len(
+                    self.trail_map or []
+                ):
                     eas = list(self.trail_map[line])
                 if not eas:
                     one = view._line_ea(line)
                     eas = [one] if one is not None else []
                 if not eas:
-                    app._status("this line has no instructions to seek on",
-                                priority=True)
+                    app._status(
+                        "this line has no instructions to seek on", priority=True
+                    )
                     return
                 stamps = sorted({x for e in eas for x in t.executions(e)})
                 what = f"execution of C line {line + 1}"
@@ -392,12 +402,15 @@ class TraceController:
             i = bisect.bisect_left(stamps, self.t) - 1
         if not (0 <= i < len(stamps)):
             edge = "last" if direction > 0 else "first"
-            app._status(f"already at the {edge} {what} "
-                        f"({len(stamps)} in the trace)", priority=True)
+            app._status(
+                f"already at the {edge} {what} ({len(stamps)} in the trace)",
+                priority=True,
+            )
             return
         self.seek(stamps[i])
-        app._status(f"{what}: {i + 1} of {len(stamps)}  @ t={stamps[i]:,}",
-                    priority=True)
+        app._status(
+            f"{what}: {i + 1} of {len(stamps)}  @ t={stamps[i]:,}", priority=True
+        )
 
     def seek_reg_write(self) -> None:
         """W: which instruction set each register to its current value."""
@@ -410,11 +423,13 @@ class TraceController:
             v = t.register(name, self.t)
             if v is None:
                 continue
-            rows.append((name, v, t.last_write(name, self.t),
-                         t.next_write(name, self.t)))
+            rows.append(
+                (name, v, t.last_write(name, self.t), t.next_write(name, self.t))
+            )
         if rows:
-            app.push_screen(_views().RegWriteScreen(rows, self.t),
-                            self._on_reg_write_chosen)
+            app.push_screen(
+                _views().RegWriteScreen(rows, self.t), self._on_reg_write_chosen
+            )
 
     def _on_reg_write_chosen(self, idx) -> None:  # type: ignore[no-untyped-def]
         if idx is not None:

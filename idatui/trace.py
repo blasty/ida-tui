@@ -59,19 +59,25 @@ class TraceInfo:
     def load(cls, path: str) -> "TraceInfo | None":
         try:
             with open(path) as f:
-                raw = dict(
-                    ln.strip().split("=", 1) for ln in f if "=" in ln)
+                raw = dict(ln.strip().split("=", 1) for ln in f if "=" in ln)
         except OSError:
             return None
+
         def num(k):
             try:
                 return int(raw.get(k, "0"), 0)
             except ValueError:
                 return 0
-        return cls(arch=raw.get("arch", ""), mode=raw.get("mode", ""),
-                   binary=raw.get("binary", ""), start_code=num("start_code"),
-                   end_code=num("end_code"), entry_code=num("entry_code"),
-                   traced=raw.get("traced", ""))
+
+        return cls(
+            arch=raw.get("arch", ""),
+            mode=raw.get("mode", ""),
+            binary=raw.get("binary", ""),
+            start_code=num("start_code"),
+            end_code=num("end_code"),
+            entry_code=num("entry_code"),
+            traced=raw.get("traced", ""),
+        )
 
 
 @dataclass
@@ -233,8 +239,7 @@ class Trace:
         return vals[i] if i >= 0 else None
 
     def register_state(self, idx: int) -> dict[str, int]:
-        return {n: v for n in self.reg_at
-                if (v := self.register(n, idx)) is not None}
+        return {n: v for n in self.reg_at if (v := self.register(n, idx)) is not None}
 
     def changed(self, idx: int) -> set[str]:
         """Registers written BY the instruction at ``idx`` (what the line said).
@@ -277,9 +282,13 @@ class Trace:
         out = []
         for k in range(lo, hi):
             off, ln = self.mem_off[k], self.mem_len[k]
-            out.append(MemOp(addr=self.mem_addr[k],
-                             data=bytes(self.mem_blob[off:off + ln]),
-                             write=bool(self.mem_write[k])))
+            out.append(
+                MemOp(
+                    addr=self.mem_addr[k],
+                    data=bytes(self.mem_blob[off : off + ln]),
+                    write=bool(self.mem_write[k]),
+                )
+            )
         return out
 
     # -- memory state ------------------------------------------------------- #
@@ -298,8 +307,9 @@ class Trace:
         self._mem_starts = [self.mem_addr[k] for k in order]
         self._mem_maxlen = max(self.mem_len) if len(self.mem_len) else 0
 
-    def memory_raw(self, addr: int, length: int,
-                   idx: int | None = None) -> tuple[bytes, bytes]:
+    def memory_raw(
+        self, addr: int, length: int, idx: int | None = None
+    ) -> tuple[bytes, bytes]:
         """Memory at a TRACE address (no slide).
 
         The stack lives here. Measured on two real traces, 0% of memory accesses
@@ -309,8 +319,9 @@ class Trace:
         """
         return self.memory(addr + self.slide, length, idx)
 
-    def memory(self, addr: int, length: int,
-               idx: int | None = None) -> tuple[bytes, bytes]:
+    def memory(
+        self, addr: int, length: int, idx: int | None = None
+    ) -> tuple[bytes, bytes]:
         """``(data, known)`` for ``length`` bytes at ``addr`` as of ``idx``.
 
         ``known`` is a byte-per-byte mask: a trace only says what it saw, so a
@@ -332,6 +343,7 @@ class Trace:
         raw = addr - self.slide
         best = [-1] * length
         import bisect as _b
+
         lo = _b.bisect_left(self._mem_starts, raw - self._mem_maxlen)
         hi = _b.bisect_right(self._mem_starts, raw + length - 1)
         for pos in range(lo, hi):
@@ -369,6 +381,7 @@ class Trace:
         self._mem_index()
         raw = addr - self.slide
         import bisect as _b
+
         lo = _b.bisect_left(self._mem_starts, raw - self._mem_maxlen)
         hi = _b.bisect_right(self._mem_starts, raw + length - 1)
         out = set()
@@ -439,7 +452,9 @@ class Trace:
             elif prev == "future":
                 # Same distance rule as above, resolved by which loop found it
                 # first would be arbitrary; compare real distances instead.
-                fwd = next((i for i, a in enumerate(self.next_ips(idx, n)) if a == ea), n)
+                fwd = next(
+                    (i for i, a in enumerate(self.next_ips(idx, n)) if a == ea), n
+                )
                 if k < fwd:
                     out[ea] = "past"
         if 0 <= idx < self.length:

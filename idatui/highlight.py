@@ -15,10 +15,10 @@ The same tokenizer feeds two consumers, so one palette covers both:
 
 from __future__ import annotations
 
-from rich.segment import Segment
-from rich.style import Style
 from pygments.lexers import CLexer
 from pygments.token import Token
+from rich.segment import Segment
+from rich.style import Style
 from textual.widgets import TextArea
 from textual.widgets.text_area import TextAreaTheme
 
@@ -36,18 +36,26 @@ from textual.widgets.text_area import TextAreaTheme
 # mnemonic column: they're the skeleton you scan for, and a hue there would
 # claim a meaning the rest of the palette already assigns.
 _PALETTE: list[tuple[str, object, Style]] = [
-    ("comment", Token.Comment, Style(color="#7c8b9e", italic=True)),   # 5.2:1  commentary
-    ("type", Token.Keyword.Type, Style(color="#93aee0")),             # 8.1:1  type info
-    ("keyword", Token.Keyword, Style(color="#e8ecf2", bold=True)),    # 15.3:1 control flow
-    ("builtin", Token.Name.Builtin, Style(color="#93aee0")),          # 8.1:1  type info
-    ("string", Token.Literal.String, Style(color="#9ece6a")),         # 9.9:1  strings
-    ("number", Token.Literal.Number, Style(color="#d8a657")),         # 8.2:1  data/number
-    ("operator", Token.Operator, Style(color="#c3cad3")),             # 11.0:1 body
-    ("punctuation", Token.Punctuation, Style(color="#626c7a")),       # 3.4:1  structure
-    ("name", Token.Name, Style(color="#7aa2f7")),                     # 7.2:1  symbol names
+    (
+        "comment",
+        Token.Comment,
+        Style(color="#7c8b9e", italic=True),
+    ),  # 5.2:1  commentary
+    ("type", Token.Keyword.Type, Style(color="#93aee0")),  # 8.1:1  type info
+    (
+        "keyword",
+        Token.Keyword,
+        Style(color="#e8ecf2", bold=True),
+    ),  # 15.3:1 control flow
+    ("builtin", Token.Name.Builtin, Style(color="#93aee0")),  # 8.1:1  type info
+    ("string", Token.Literal.String, Style(color="#9ece6a")),  # 9.9:1  strings
+    ("number", Token.Literal.Number, Style(color="#d8a657")),  # 8.2:1  data/number
+    ("operator", Token.Operator, Style(color="#c3cad3")),  # 11.0:1 body
+    ("punctuation", Token.Punctuation, Style(color="#626c7a")),  # 3.4:1  structure
+    ("name", Token.Name, Style(color="#7aa2f7")),  # 7.2:1  symbol names
 ]
 _STYLES: list[tuple[object, Style]] = [(t, s) for _, t, s in _PALETTE]
-_DEFAULT = Style(color="#c3cad3")                           # 11.0:1 body
+_DEFAULT = Style(color="#c3cad3")  # 11.0:1 body
 _DEFAULT_NAME = "text"
 
 #: highlight name -> style, for TextArea themes (see ``CTextArea``).
@@ -97,7 +105,7 @@ def highlight_c(code: str) -> list[list[Segment]]:
         if not value:
             continue
         style = _style_for(token)
-        if "\n" not in value:      # the common case: a token inside one line
+        if "\n" not in value:  # the common case: a token inside one line
             lines[-1].append(Segment(value, style))
             continue
         parts = value.split("\n")
@@ -136,7 +144,7 @@ def highlight_c_spans(code: str) -> dict[int, list[tuple[int, int, str]]]:
             if not part:
                 continue
             width = len(part) if part.isascii() else len(part.encode("utf-8"))
-            if part.strip():   # whitespace carries no visible style
+            if part.strip():  # whitespace carries no visible style
                 spans.setdefault(row, []).append((col, col + width, name))
             col += width
     return spans

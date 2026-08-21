@@ -17,18 +17,21 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+from _fixtures import fast_keys, staged  # noqa: E402
 from textual.widgets import Input, OptionList, Static  # noqa: E402
 
-from _fixtures import fast_keys, staged  # noqa: E402
-
-fast_keys()   # ~85ms -> ~2ms per keypress; see _fixtures.fast_keys
+fast_keys()  # ~85ms -> ~2ms per keypress; see _fixtures.fast_keys
 from idatui._sync import settle  # noqa: E402
-from idatui.app import (DecompView, IdaTui, ListingView,  # noqa: E402
-                        RegWriteScreen, TraceDock)
+from idatui.app import (  # noqa: E402
+    DecompView,
+    IdaTui,
+    ListingView,
+    RegWriteScreen,
+    TraceDock,
+)
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-TRACER = os.path.expanduser(
-    "~/.pi/agent/skills/tenet-trace/scripts/tenet-trace")
+TRACER = os.path.expanduser("~/.pi/agent/skills/tenet-trace/scripts/tenet-trace")
 PASS = FAIL = 0
 
 
@@ -56,8 +59,12 @@ async def wait(pred, pilot, t=240.0):
 def make_trace(tmp, binary):
     out = os.path.join(tmp, "t")
     try:
-        subprocess.run([TRACER, "-o", out, binary, "hi"],
-                       capture_output=True, timeout=180, check=False)
+        subprocess.run(
+            [TRACER, "-o", out, binary, "hi"],
+            capture_output=True,
+            timeout=180,
+            check=False,
+        )
     except (OSError, subprocess.TimeoutExpired):
         return None
     log = out + ".0.log"
@@ -71,8 +78,9 @@ async def run() -> int:
     # anything tracked. On echo the seeding saves only ~0.2s (it analyses fast);
     # it is here so a suite pointed at a bigger target doesn't pay for analysis
     # on every run.
-    async with staged(binary, lambda p: IdaTui(open_path=p, keepalive=False),
-                      prefix="idatui-traceui-") as target:
+    async with staged(
+        binary, lambda p: IdaTui(open_path=p, keepalive=False), prefix="idatui-traceui-"
+    ) as target:
         tmp = os.path.dirname(target)
         log = make_trace(tmp, target)
         if not log:
@@ -90,22 +98,29 @@ async def run() -> int:
 
             # Rebasing: the tracer runs the binary relocated, so without a slide
             # nothing in the trace matches anything on screen.
-            check("trace addresses were rebased onto the database",
-                  t.slide != 0 and t.ip(0) < 0x1000000,
-                  f"slide={t.slide:#x} ip0={t.ip(0):#x}")
+            check(
+                "trace addresses were rebased onto the database",
+                t.slide != 0 and t.ip(0) < 0x1000000,
+                f"slide={t.slide:#x} ip0={t.ip(0):#x}",
+            )
             idx = app._func_index
             touched = [f.name for f in idx.all_loaded() if t.executions(f.addr)]
-            check("and now line up with real functions",
-                  len(touched) > 1 and "main" in touched, f"{touched[:6]}")
+            check(
+                "and now line up with real functions",
+                len(touched) > 1 and "main" in touched,
+                f"{touched[:6]}",
+            )
 
             dock = app.query_one(TraceDock)
             check("the dock is docked and visible", dock.display)
             head = str(dock.query_one("#trace-head", Static).render())
-            check("it shows where we are in time", "0" in head and "%" in head,
-                  head[:60])
+            check(
+                "it shows where we are in time", "0" in head and "%" in head, head[:60]
+            )
             regs = str(dock.query_one("#trace-regs", Static).render())
-            check("and the register state at that time", "rip" in regs.lower(),
-                  regs[:60])
+            check(
+                "and the register state at that time", "rip" in regs.lower(), regs[:60]
+            )
 
             # -- stepping --------------------------------------------------- #
             lst = app.query_one(ListingView)
@@ -117,15 +132,19 @@ async def run() -> int:
             # runs in a worker. Waiting on it and then reading the cursor was a
             # race that the (slower) IDA Nexus backend loses. Gate on the thing
             # the check is about.
-            await settle(app, lambda: app._t == 1 and lst._cursor_ea() == t.ip(1),
-                         timeout=20)
+            await settle(
+                app, lambda: app._t == 1 and lst._cursor_ea() == t.ip(1), timeout=20
+            )
             check("] steps forward one instruction", app._t == 1, f"t={app._t}")
-            check("the code view follows the trace",
-                  lst._cursor_ea() == t.ip(1),
-                  f"{lst._cursor_ea()} vs {t.ip(1)}")
+            check(
+                "the code view follows the trace",
+                lst._cursor_ea() == t.ip(1),
+                f"{lst._cursor_ea()} vs {t.ip(1)}",
+            )
             await pilot.press("[")
-            await settle(app, lambda: app._t == 0 and lst._cursor_ea() == t.ip(0),
-                         timeout=20)
+            await settle(
+                app, lambda: app._t == 0 and lst._cursor_ea() == t.ip(0), timeout=20
+            )
             check("[ steps backward", app._t == 0, f"t={app._t}")
             await pilot.press("[")
             # Nothing should happen, so there is no signal to wait FOR: the
@@ -144,8 +163,14 @@ async def run() -> int:
             for i in range(1, min(t.length - 1, 400)):
                 a, b = t.register(sp, i), t.register(sp, i + 1)
                 if a and b and b < a:
-                    ret = next((j for j in range(i + 1, t.length)
-                                if (t.register(sp, j) or 0) >= a), None)
+                    ret = next(
+                        (
+                            j
+                            for j in range(i + 1, t.length)
+                            if (t.register(sp, j) or 0) >= a
+                        ),
+                        None,
+                    )
                     if ret and ret > i + 3:
                         call_at = (i, ret)
                         break
@@ -157,8 +182,11 @@ async def run() -> int:
                 await wait(lambda: app._t == i, pilot, 20)
                 await pilot.press("}")
                 await wait(lambda: app._t != i, pilot, 30)
-                check("} steps OVER a call instead of into it",
-                      app._t == ret, f"{i} -> {app._t}, expected {ret}")
+                check(
+                    "} steps OVER a call instead of into it",
+                    app._t == ret,
+                    f"{i} -> {app._t}, expected {ret}",
+                )
                 check("which is further than a plain step", app._t > i + 1)
 
             # -- memory at time T -------------------------------------------- #
@@ -168,36 +196,56 @@ async def run() -> int:
             # image would have nothing to show.
             dock = app.query_one(TraceDock)
             app._seek(min(60, t.length - 1))
-            await wait(lambda: "stack (" in
-                       str(dock.query_one("#trace-stack", Static).render()),
-                       pilot, 5)
+            await wait(
+                lambda: (
+                    "stack (" in str(dock.query_one("#trace-stack", Static).render())
+                ),
+                pilot,
+                5,
+            )
             stack = str(dock.query_one("#trace-stack", Static).render())
-            check("the dock shows the stack at this timestamp",
-                  "stack (" in stack and len(stack.splitlines()) > 4, stack[:60])
+            check(
+                "the dock shows the stack at this timestamp",
+                "stack (" in stack and len(stack.splitlines()) > 4,
+                stack[:60],
+            )
             sp_name = next(r for r in ("rsp", "esp", "sp") if r in t.reg_at)
             sp = t.register(sp_name, app._t)
-            check("anchored at the stack pointer",
-                  f"{sp:012x}" in stack, f"sp={sp:#x} / {stack[:80]}")
+            check(
+                "anchored at the stack pointer",
+                f"{sp:012x}" in stack,
+                f"sp={sp:#x} / {stack[:80]}",
+            )
 
             # A trace knows what it observed and nothing else. Unseen bytes are
             # printed as '?', never as zeros — rendering them as zero would
             # invent facts about memory nobody looked at.
             data, known = t.memory_raw(sp, 8, app._t)
             if not all(known):
-                check("memory the trace never saw is marked unknown",
-                      "?" in stack, stack[:80])
+                check(
+                    "memory the trace never saw is marked unknown",
+                    "?" in stack,
+                    stack[:80],
+                )
             else:
-                check("known stack words are shown as values",
-                      any(c in "0123456789abcdef" for c in stack), stack[:60])
+                check(
+                    "known stack words are shown as values",
+                    any(c in "0123456789abcdef" for c in stack),
+                    stack[:60],
+                )
 
             # Stepping must move the memory view with time.
             before = stack
             app._seek(min(80, t.length - 1))
-            await wait(lambda: str(dock.query_one("#trace-stack",
-                                                  Static).render()) != before,
-                       pilot, 5)
-            check("and it follows as you move through time",
-                  str(dock.query_one("#trace-stack", Static).render()) != before)
+            await wait(
+                lambda: str(dock.query_one("#trace-stack", Static).render()) != before,
+                pilot,
+                5,
+            )
+            check(
+                "and it follows as you move through time",
+                str(dock.query_one("#trace-stack", Static).render()) != before,
+            )
 
             # -- trails ------------------------------------------------------ #
             # Not "every address the trace ever touched": on a loop-heavy
@@ -207,17 +255,27 @@ async def run() -> int:
             await wait(lambda: bool(lst.trail), pilot, 5)
             trail = lst.trail
             kinds = {k for k in trail.values()}
-            check("the listing is painted with an execution trail",
-                  {"now", "past", "future"} <= kinds, f"{sorted(kinds)}")
-            check("'now' is the instruction we're standing on",
-                  trail.get(t.ip(app._t)) == "now", f"{trail.get(t.ip(app._t))}")
-            check("the step behind is past, the step ahead is future",
-                  trail.get(t.ip(app._t - 1)) == "past"
-                  and trail.get(t.ip(app._t + 1)) == "future",
-                  f"{trail.get(t.ip(app._t - 1))}, {trail.get(t.ip(app._t + 1))}")
-            painted = [y for y in range(min(lst.size.height, 30))
-                       if any(seg.style and seg.style.bgcolor
-                              for seg in lst.render_line(y))]
+            check(
+                "the listing is painted with an execution trail",
+                {"now", "past", "future"} <= kinds,
+                f"{sorted(kinds)}",
+            )
+            check(
+                "'now' is the instruction we're standing on",
+                trail.get(t.ip(app._t)) == "now",
+                f"{trail.get(t.ip(app._t))}",
+            )
+            check(
+                "the step behind is past, the step ahead is future",
+                trail.get(t.ip(app._t - 1)) == "past"
+                and trail.get(t.ip(app._t + 1)) == "future",
+                f"{trail.get(t.ip(app._t - 1))}, {trail.get(t.ip(app._t + 1))}",
+            )
+            painted = [
+                y
+                for y in range(min(lst.size.height, 30))
+                if any(seg.style and seg.style.bgcolor for seg in lst.render_line(y))
+            ]
             check("and it actually reaches the screen", painted, "no tinted rows")
 
             # -- the same trail on PSEUDOCODE -------------------------------- #
@@ -234,23 +292,33 @@ async def run() -> int:
                 await wait(lambda: app._t == first + 12, pilot, 20)
                 lst.focus()
                 await pilot.press("tab")
-                got = await wait(lambda: app.query_one(DecompView).display
-                                 and app.query_one(DecompView)._texts, pilot, 120)
+                got = await wait(
+                    lambda: (
+                        app.query_one(DecompView).display
+                        and app.query_one(DecompView)._texts
+                    ),
+                    pilot,
+                    120,
+                )
                 dec = app.query_one(DecompView)
                 check("pseudocode is available for the traced function", got)
                 app._seek(first + 12)
                 await wait(lambda: len(dec.trail) > 2, pilot, 5)
-                check("pseudocode lines are painted with the trail",
-                      len(dec.trail) > 2, f"{len(dec.trail)} lines")
+                check(
+                    "pseudocode lines are painted with the trail",
+                    len(dec.trail) > 2,
+                    f"{len(dec.trail)} lines",
+                )
                 now = [i for i, k in dec.trail.items() if k == "now"]
-                check("exactly one pseudocode line is 'now'",
-                      len(now) == 1, f"{now}")
+                check("exactly one pseudocode line is 'now'", len(now) == 1, f"{now}")
                 # The 'now' line must be the one covering the current
                 # instruction, not merely some executed line.
                 covered = app._trail_map[now[0]] if now and app._trail_map else []
-                check("and it's the line covering the current instruction",
-                      t.ip(app._t) in covered,
-                      f"pc={t.ip(app._t):#x} line covers {[hex(a) for a in covered][:4]}")
+                check(
+                    "and it's the line covering the current instruction",
+                    t.ip(app._t) in covered,
+                    f"pc={t.ip(app._t):#x} line covers {[hex(a) for a in covered][:4]}",
+                )
 
                 # Stepping must not throw you out of the view you're reading.
                 # A step navigates to an address, and navigating to an address
@@ -260,13 +328,19 @@ async def run() -> int:
                 was = app._t
                 await pilot.press("]")
                 await settle(app, lambda: app._t != was)
-                check("stepping in pseudocode stays in pseudocode",
-                      app._active == "decomp", f"active={app._active}")
+                check(
+                    "stepping in pseudocode stays in pseudocode",
+                    app._active == "decomp",
+                    f"active={app._active}",
+                )
                 was = app._t
                 await pilot.press("[")
                 await settle(app, lambda: app._t != was)
-                check("and so does stepping backward",
-                      app._active == "decomp", f"active={app._active}")
+                check(
+                    "and so does stepping backward",
+                    app._active == "decomp",
+                    f"active={app._active}",
+                )
 
             # -- split view: a step is a GLOBAL move ------------------------ #
             # Normal navigation moves one pane and gives the companion a band,
@@ -274,8 +348,13 @@ async def run() -> int:
             # navigation though: both panes show the same instant, so the
             # listing cursor must sit on the current instruction.
             app.action_toggle_split()
-            await wait(lambda: app._split and lst.display
-                       and app.query_one(DecompView).display, pilot, 10)
+            await wait(
+                lambda: (
+                    app._split and lst.display and app.query_one(DecompView).display
+                ),
+                pilot,
+                10,
+            )
             if not app._split:
                 check("split view toggled on", False)
             else:
@@ -286,14 +365,18 @@ async def run() -> int:
                     # Wait for the cursor to arrive rather than sleeping a flat
                     # 0.5s and hoping. Same question -- does the listing follow
                     # the pc? -- but it costs what it costs instead of 3s.
-                    if await wait(lambda: lst._cursor_ea() == t.ip(app._t),
-                                  pilot, 5):
+                    if await wait(lambda: lst._cursor_ea() == t.ip(app._t), pilot, 5):
                         tracked += 1
-                check("stepping in split moves the listing cursor to the pc",
-                      tracked == 6, f"{tracked}/6 steps tracked")
-                check("and the trail follows in both panes",
-                      lst.trail.get(t.ip(app._t)) == "now",
-                      f"{lst.trail.get(t.ip(app._t))}")
+                check(
+                    "stepping in split moves the listing cursor to the pc",
+                    tracked == 6,
+                    f"{tracked}/6 steps tracked",
+                )
+                check(
+                    "and the trail follows in both panes",
+                    lst.trail.get(t.ip(app._t)) == "now",
+                    f"{lst.trail.get(t.ip(app._t))}",
+                )
 
                 # The pseudocode cursor follows too — but only for instructions
                 # the decompiler actually attributes to a line. About half
@@ -313,8 +396,14 @@ async def run() -> int:
                     # on `pc in _trail_line_of` instead would burn the timeout on
                     # every unmapped instruction -- about half of them -- and be
                     # slower than the flat sleep it replaces.
-                    await wait(lambda: lst._cursor_ea() == pc
-                               and app._trail_map_ea == dec.loaded_ea, pilot, 5)
+                    await wait(
+                        lambda: (
+                            lst._cursor_ea() == pc
+                            and app._trail_map_ea == dec.loaded_ea
+                        ),
+                        pilot,
+                        5,
+                    )
                     if app._trail_map_ea == dec.loaded_ea and pc in app._trail_line_of:
                         mapped += 1
                         # Mapped: the pseudocode cursor is expected, so it's fair
@@ -324,9 +413,11 @@ async def run() -> int:
                         await wait(lambda: dec.cursor == line, pilot, 3)
                         if dec.cursor != line:
                             missed += 1
-                check("the pseudocode cursor follows every mapped instruction",
-                      mapped > 3 and missed == 0,
-                      f"{mapped} mapped, {missed} not followed")
+                check(
+                    "the pseudocode cursor follows every mapped instruction",
+                    mapped > 3 and missed == 0,
+                    f"{mapped} mapped, {missed} not followed",
+                )
 
             # -- a late navigation must not drag the view back --------------- #
             # Navigations run in workers and finish out of order. The trace's
@@ -347,10 +438,12 @@ async def run() -> int:
                 # for the workers to drain rather than for three seconds and a
                 # hope: same question, ~50ms instead of 3s.
                 await settle(app)
-                check("a stale navigation doesn't drag the cursor away",
-                      lst._cursor_ea() == dbaddr and app._cur.ea == dbaddr,
-                      f"cursor={lst._cursor_ea():#x} cur={app._cur.ea:#x} "
-                      f"want {dbaddr:#x}")
+                check(
+                    "a stale navigation doesn't drag the cursor away",
+                    lst._cursor_ea() == dbaddr and app._cur.ea == dbaddr,
+                    f"cursor={lst._cursor_ea():#x} cur={app._cur.ea:#x} "
+                    f"want {dbaddr:#x}",
+                )
 
             # -- seeking, as opposed to stepping ---------------------------- #
             # "When else did this instruction run?" — the question that makes a
@@ -359,8 +452,11 @@ async def run() -> int:
             stamps = list(t.by_ip[hot])
             db = hot + t.slide
             if len(stamps) < 2 or lst.model is None:
-                check("found an address executed more than once", False,
-                      f"{len(stamps)} executions")
+                check(
+                    "found an address executed more than once",
+                    False,
+                    f"{len(stamps)} executions",
+                )
             else:
                 if app._split:
                     app.action_toggle_split()
@@ -377,31 +473,48 @@ async def run() -> int:
                 lst.cursor = row
                 lst._scroll_cursor_into_view()
                 await settle(app, lambda: lst._cursor_ea() == db)
-                check("cursor is on the repeated instruction",
-                      lst._cursor_ea() == db, f"{lst._cursor_ea():#x} vs {db:#x}")
+                check(
+                    "cursor is on the repeated instruction",
+                    lst._cursor_ea() == db,
+                    f"{lst._cursor_ea():#x} vs {db:#x}",
+                )
                 await pilot.press(">")
                 await settle(app, lambda: app._t == stamps[1])
-                check("> seeks to the next execution of it",
-                      app._t == stamps[1], f"t={app._t}, expected {stamps[1]}")
+                check(
+                    "> seeks to the next execution of it",
+                    app._t == stamps[1],
+                    f"t={app._t}, expected {stamps[1]}",
+                )
                 status = str(app.query_one("#status", Static).render())
-                check("and says which execution this is",
-                      f"2 of {len(stamps)}" in status, status[:80])
+                check(
+                    "and says which execution this is",
+                    f"2 of {len(stamps)}" in status,
+                    status[:80],
+                )
                 lst.cursor = row
                 await settle(app)
                 await pilot.press("<")
                 await settle(app, lambda: app._t == stamps[0])
-                check("< seeks back to the previous one",
-                      app._t == stamps[0], f"t={app._t}, expected {stamps[0]}")
+                check(
+                    "< seeks back to the previous one",
+                    app._t == stamps[0],
+                    f"t={app._t}, expected {stamps[0]}",
+                )
                 # An edge must SAY it's an edge rather than silently doing
                 # nothing, which is indistinguishable from a broken key.
                 lst.cursor = row
                 await settle(app)
                 await pilot.press("<")
-                await settle(app, lambda: "first" in str(
-                    app.query_one("#status", Static).render()))
+                await settle(
+                    app,
+                    lambda: "first" in str(app.query_one("#status", Static).render()),
+                )
                 status = str(app.query_one("#status", Static).render())
-                check("and the first execution says so instead of moving",
-                      app._t == stamps[0] and "first" in status, status[:80])
+                check(
+                    "and the first execution says so instead of moving",
+                    app._t == stamps[0] and "first" in status,
+                    status[:80],
+                )
 
             # -- "which instruction set this register?" ---------------------- #
             want_t = min(200, t.length - 1)
@@ -409,14 +522,24 @@ async def run() -> int:
             await settle(app, lambda: app._t == want_t)
             lst.focus()
             await pilot.press("W")
-            opened = await wait(lambda: isinstance(app.screen, RegWriteScreen),
-                                pilot, 20)
-            check("W lists the registers and where each was set", opened,
-                  f"screen={type(app.screen).__name__}")
+            opened = await wait(
+                lambda: isinstance(app.screen, RegWriteScreen), pilot, 20
+            )
+            check(
+                "W lists the registers and where each was set",
+                opened,
+                f"screen={type(app.screen).__name__}",
+            )
             if opened:
                 sc = app.screen
-                pick = next((k for k, (n, v, l, x) in enumerate(sc._rows)
-                             if l is not None and l != app._t), None)
+                pick = next(
+                    (
+                        k
+                        for k, (n, v, l, x) in enumerate(sc._rows)
+                        if l is not None and l != app._t
+                    ),
+                    None,
+                )
                 if pick is None:
                     check("a register was set by an earlier instruction", False)
                     await pilot.press("escape")
@@ -426,13 +549,18 @@ async def run() -> int:
                     await settle(app)
                     await pilot.press("enter")
                     await wait(lambda: app._t == last, pilot, 30)
-                    check("choosing one seeks to the write that set it",
-                          app._t == last, f"t={app._t}, expected {last}")
+                    check(
+                        "choosing one seeks to the write that set it",
+                        app._t == last,
+                        f"t={app._t}, expected {last}",
+                    )
                     # The real check: that instruction must actually have
                     # written the register we asked about.
-                    check("and that instruction really wrote it",
-                          name in t.changed(app._t),
-                          f"{name} not in {sorted(t.changed(app._t))}")
+                    check(
+                        "and that instruction really wrote it",
+                        name in t.changed(app._t),
+                        f"{name} not in {sorted(t.changed(app._t))}",
+                    )
 
     print(f"\n{PASS} passed, {FAIL} failed")
     return 1 if FAIL else 0

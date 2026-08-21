@@ -3,18 +3,21 @@
 A matching registered GUI is reused; otherwise IDA Nexus starts a managed
 idalib worker. Usage: ``uv run python experiments/worker_smoke.py FILE``.
 """
+
 from __future__ import annotations
 
 import os
 import sys
 import time
 
-from idatui.nexus_client import NexusClient
 from idatui.domain import Program
+from idatui.nexus_client import NexusClient
 
 
 def main() -> int:
-    target = os.path.abspath(sys.argv[1] if len(sys.argv) > 1 else "experiments/fibonacci.elf")
+    target = os.path.abspath(
+        sys.argv[1] if len(sys.argv) > 1 else "experiments/fibonacci.elf"
+    )
     print(f"attaching IDA Nexus to {target}…", flush=True)
     started = time.time()
     client = NexusClient(target)

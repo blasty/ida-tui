@@ -26,6 +26,7 @@ cells, so ``Painting`` is an *index* — per-row horizontal runs, a bucketed
 interval index of vertical runs, and point marks — and the view asks it for one
 row at a time (``cells_at_row``), exactly like the listing's ``render_line``.
 """
+
 from __future__ import annotations
 
 import logging
@@ -37,8 +38,8 @@ _LOG = logging.getLogger(__name__)
 
 # Terminal cells are about twice as tall as they are wide, so horizontal gaps
 # need roughly 2x the cell count of vertical gaps to look square.
-HGAP = 3           # min columns between two boxes in a layer
-VGAP = 1           # min rows between a layer band and the channel below it
+HGAP = 3  # min columns between two boxes in a layer
+VGAP = 1  # min rows between a layer band and the channel below it
 
 # Edge classes, used as style keys by the renderer.
 E_UNCOND = "uncond"
@@ -68,8 +69,8 @@ class Node:
     label: str = ""
     rank: int = 0
     order: int = 0
-    x: int = 0          # left column
-    y: int = 0          # top row
+    x: int = 0  # left column
+    y: int = 0  # top row
     w: int = 1
     h: int = 1
 
@@ -134,6 +135,7 @@ class _Graph:
 
 # ------------------------------------------------------------ 1. cycles
 
+
 def _break_cycles(g: _Graph, root: int) -> None:
     """Reverse back edges (DFS gray-set) so layering sees a DAG."""
     color: dict[int, int] = {}
@@ -165,6 +167,7 @@ def _break_cycles(g: _Graph, root: int) -> None:
 
 
 # --------------------------------------------------------- 2. layering
+
 
 def _assign_ranks(g: _Graph, root: int) -> None:
     """Longest-path layering: rank(v) = 1 + max(rank(preds)).
@@ -205,11 +208,12 @@ def _assign_ranks(g: _Graph, root: int) -> None:
 
 # ---------------------------------------------------------- 3. dummies
 
+
 def _add_dummies(g: _Graph) -> None:
     for e in list(g.edges):
         span = g.nodes[e.dst].rank - g.nodes[e.src].rank
         if span <= 0:
-            e.back = True          # residual cycle: colour it, route it flat
+            e.back = True  # residual cycle: colour it, route it flat
         chain = [e.src]
         if span > 1:
             for r in range(g.nodes[e.src].rank + 1, g.nodes[e.dst].rank):
@@ -238,6 +242,7 @@ def _segments(g: _Graph) -> list[tuple[int, int, Edge]]:
 
 # ---------------------------------------------------------- 4. ordering
 
+
 def _neighbors(g: _Graph) -> tuple[dict[int, list[int]], dict[int, list[int]]]:
     down: dict[int, list[int]] = {i: [] for i in g.nodes}
     up: dict[int, list[int]] = {i: [] for i in g.nodes}
@@ -247,8 +252,9 @@ def _neighbors(g: _Graph) -> tuple[dict[int, list[int]], dict[int, list[int]]]:
     return down, up
 
 
-def _cross_below(layer: list[int], down: dict[int, list[int]],
-                 pos: dict[int, int]) -> int:
+def _cross_below(
+    layer: list[int], down: dict[int, list[int]], pos: dict[int, int]
+) -> int:
     """Crossings between this layer and the one below, counted as inversions
     with a Fenwick tree: O(E log E). The naive O(E^2) version is the entire
     runtime on a 400-block function (20s vs 150ms), so it is not an option."""
@@ -277,8 +283,7 @@ def _cross_below(layer: list[int], down: dict[int, list[int]],
     return total
 
 
-def _pair_cross(a: int, b: int, side: dict[int, list[int]],
-                pos: dict[int, int]) -> int:
+def _pair_cross(a: int, b: int, side: dict[int, list[int]], pos: dict[int, int]) -> int:
     """Crossings from a's and b's edges to one neighbouring layer given a sits
     immediately LEFT of b. Local — O(deg(a)*deg(b)) — so the transposition pass
     never has to recount the whole graph per candidate swap."""
@@ -291,8 +296,13 @@ def _pair_cross(a: int, b: int, side: dict[int, list[int]],
     return n
 
 
-def _swap_delta(a: int, b: int, down: dict[int, list[int]],
-                up: dict[int, list[int]], pos: dict[int, int]) -> tuple[int, int]:
+def _swap_delta(
+    a: int,
+    b: int,
+    down: dict[int, list[int]],
+    up: dict[int, list[int]],
+    pos: dict[int, int],
+) -> tuple[int, int]:
     """``(keep, swap)`` for the adjacent pair (a, b), both sides, in one pass.
 
     The same as calling :func:`_pair_cross` four times, which is what the
@@ -318,8 +328,9 @@ def _swap_delta(a: int, b: int, down: dict[int, list[int]],
     return keep, swap
 
 
-def crossings(layers: list[list[int]], down: dict[int, list[int]],
-              pos: dict[int, int]) -> int:
+def crossings(
+    layers: list[list[int]], down: dict[int, list[int]], pos: dict[int, int]
+) -> int:
     return sum(_cross_below(l, down, pos) for l in layers)
 
 
@@ -340,7 +351,7 @@ def _order_layers(g: _Graph, root: int, sweeps: int = 6) -> list[list[int]]:
                 seen.add(j)
                 stack.append(j)
     for layer in layers:
-        layer.sort(key=lambda i: seed.get(i, 10 ** 9))
+        layer.sort(key=lambda i: seed.get(i, 10**9))
     pos = {i: k for layer in layers for k, i in enumerate(layer)}
 
     def median(i: int, side: dict[int, list[int]]) -> float:
@@ -394,6 +405,7 @@ def _order_layers(g: _Graph, root: int, sweeps: int = 6) -> list[list[int]]:
 
 # --------------------------------------------------------- 5. x coords
 
+
 def _assign_x(g: _Graph, layers: list[list[int]], sweeps: int = 8) -> None:
     down, up = _neighbors(g)
     for layer in layers:
@@ -418,8 +430,9 @@ def _assign_x(g: _Graph, layers: list[list[int]], sweeps: int = 8) -> None:
         for r in rng:
             layer = layers[r]
             # dummies first: keeping long edges straight matters most
-            order = sorted(layer, key=lambda i: (not g.nodes[i].dummy,
-                                                 g.nodes[i].order))
+            order = sorted(
+                layer, key=lambda i: (not g.nodes[i].dummy, g.nodes[i].order)
+            )
             for i in order:
                 nb = side[i]
                 if not nb:
@@ -436,6 +449,7 @@ def _assign_x(g: _Graph, layers: list[list[int]], sweeps: int = 8) -> None:
 
 
 # ------------------------------------------------------------ 6. route
+
 
 def _ports(g: _Graph) -> tuple[dict, dict]:
     """Spread a node's out-edges along its bottom border and its in-edges along
@@ -470,8 +484,8 @@ def _ports(g: _Graph) -> tuple[dict, dict]:
 class Route:
     edge: Edge
     pts: list[tuple[int, int]]
-    head: bool = True      # arrowhead (target is a real block)
-    tail: bool = True      # port tee (source is a real block)
+    head: bool = True  # arrowhead (target is a real block)
+    tail: bool = True  # port tee (source is a real block)
     #: the polyline is drawn against control flow (a reversed back edge), so the
     #: arrowhead belongs at ``pts[0]`` and the port tee at ``pts[-1]``.
     flipped: bool = False
@@ -490,7 +504,7 @@ def _route(g: _Graph, layers: list[list[int]]) -> list[Route]:
         runs = []
         for a, b, e in lst:
             x0, x1 = out_port[(a, b, id(e))], in_port[(a, b, id(e))]
-            if x0 != x1:                      # a straight drop needs no lane
+            if x0 != x1:  # a straight drop needs no lane
                 runs.append((min(x0, x1), max(x0, x1), (a, b, id(e))))
         runs.sort(key=lambda t: (t[1] - t[0], t[0]))
         occupied: list[list[tuple[int, int]]] = []
@@ -516,7 +530,7 @@ def _route(g: _Graph, layers: list[list[int]]) -> list[Route]:
             n = g.nodes[i]
             n.y = y
             if n.dummy:
-                n.h = h                       # the band is its pass-through
+                n.h = h  # the band is its pass-through
         chan_y.append(y + h - 1 + VGAP)
         y += h - 1 + VGAP + channels[r] + VGAP + 1
 
@@ -535,34 +549,58 @@ def _route(g: _Graph, layers: list[list[int]]) -> list[Route]:
         else:
             ych = chan_y[na.rank] + lanes.get((a, b, id(e)), 0)
             pts = [(y0, x0), (ych, x0), (ych, x1), (y1, x1)]
-        routes.append(Route(edge=e, pts=pts, head=not nb.dummy,
-                            tail=not na.dummy, flipped=e.flipped))
+        routes.append(
+            Route(
+                edge=e, pts=pts, head=not nb.dummy, tail=not na.dummy, flipped=e.flipped
+            )
+        )
     return routes
 
 
 # ------------------------------------------------------------ painting
 
-BOX = {"tl": "\u250c", "tr": "\u2510", "bl": "\u2514", "br": "\u2518",
-       "h": "\u2500", "v": "\u2502"}
-LINE_CHARS = set("\u2502\u2500\u250c\u2510\u2514\u2518\u251c\u2524\u252c\u2534"
-                 "\u253c\u256d\u256e\u2570\u256f")
+BOX = {
+    "tl": "\u250c",
+    "tr": "\u2510",
+    "bl": "\u2514",
+    "br": "\u2518",
+    "h": "\u2500",
+    "v": "\u2502",
+}
+LINE_CHARS = set(
+    "\u2502\u2500\u250c\u2510\u2514\u2518\u251c\u2524\u252c\u2534"
+    "\u253c\u256d\u256e\u2570\u256f"
+)
 MERGE = {
     frozenset("\u2502\u2500"): "\u253c",
-    frozenset("\u2502\u250c"): "\u251c", frozenset("\u2502\u2510"): "\u2524",
-    frozenset("\u2502\u2514"): "\u251c", frozenset("\u2502\u2518"): "\u2524",
-    frozenset("\u2500\u250c"): "\u252c", frozenset("\u2500\u2510"): "\u252c",
-    frozenset("\u2500\u2514"): "\u2534", frozenset("\u2500\u2518"): "\u2534",
-    frozenset("\u2502\u256d"): "\u251c", frozenset("\u2502\u256e"): "\u2524",
-    frozenset("\u2502\u2570"): "\u251c", frozenset("\u2502\u256f"): "\u2524",
-    frozenset("\u2500\u256d"): "\u252c", frozenset("\u2500\u256e"): "\u252c",
-    frozenset("\u2500\u2570"): "\u2534", frozenset("\u2500\u256f"): "\u2534",
+    frozenset("\u2502\u250c"): "\u251c",
+    frozenset("\u2502\u2510"): "\u2524",
+    frozenset("\u2502\u2514"): "\u251c",
+    frozenset("\u2502\u2518"): "\u2524",
+    frozenset("\u2500\u250c"): "\u252c",
+    frozenset("\u2500\u2510"): "\u252c",
+    frozenset("\u2500\u2514"): "\u2534",
+    frozenset("\u2500\u2518"): "\u2534",
+    frozenset("\u2502\u256d"): "\u251c",
+    frozenset("\u2502\u256e"): "\u2524",
+    frozenset("\u2502\u2570"): "\u251c",
+    frozenset("\u2502\u256f"): "\u2524",
+    frozenset("\u2500\u256d"): "\u252c",
+    frozenset("\u2500\u256e"): "\u252c",
+    frozenset("\u2500\u2570"): "\u2534",
+    frozenset("\u2500\u256f"): "\u2534",
 }
 CORNER = {
-    ("D", "R"): "\u2570", ("D", "L"): "\u256f", ("R", "D"): "\u256e",
-    ("L", "D"): "\u256d", ("R", "U"): "\u256f", ("L", "U"): "\u2570",
-    ("U", "R"): "\u256d", ("U", "L"): "\u256e",
+    ("D", "R"): "\u2570",
+    ("D", "L"): "\u256f",
+    ("R", "D"): "\u256e",
+    ("L", "D"): "\u256d",
+    ("R", "U"): "\u256f",
+    ("L", "U"): "\u2570",
+    ("U", "R"): "\u256d",
+    ("U", "L"): "\u256e",
 }
-BUCKET = 32          # rows per vertical-run index bucket
+BUCKET = 32  # rows per vertical-run index bucket
 
 
 def _dir(p: tuple[int, int], q: tuple[int, int]) -> str:
@@ -595,8 +633,9 @@ class Painting:
     def add_mark(self, row: int, col: int, ch: str, style: str, eid: int) -> None:
         self.marks.setdefault(row, []).append((col, ch, style, eid))
 
-    def cells_at_row(self, row: int, c0: int, c1: int
-                     ) -> dict[int, tuple[str, str, int]]:
+    def cells_at_row(
+        self, row: int, c0: int, c1: int
+    ) -> dict[int, tuple[str, str, int]]:
         """{col: (char, style, edge_id)} for ``row`` within [c0, c1)."""
         out: dict[int, tuple[str, str, int]] = {}
 
@@ -604,8 +643,13 @@ class Painting:
             if col < c0 or col >= c1:
                 return
             old = out.get(col)
-            if old and not force and old[0] != ch \
-                    and old[0] in LINE_CHARS and ch in LINE_CHARS:
+            if (
+                old
+                and not force
+                and old[0] != ch
+                and old[0] in LINE_CHARS
+                and ch in LINE_CHARS
+            ):
                 ch = MERGE.get(frozenset((old[0], ch)), ch)
             out[col] = (ch, style, eid)
 
@@ -626,16 +670,16 @@ class Layout:
     """The finished drawing: boxes, an edge index, and enough structure for the
     view to hit-test, navigate and highlight."""
 
-    nodes: list[Node]                          # real blocks only, layout order
+    nodes: list[Node]  # real blocks only, layout order
     by_id: dict[int, Node]
     edges: list[Edge]
     painting: Painting
     width: int
     height: int
     entry: int
-    rows: dict[int, list[int]]                 # row -> real node ids covering it
-    incident: dict[int, set[int]]              # node id -> edge ids touching it
-    succ: dict[int, list[tuple[int, str]]]     # node id -> [(node id, style)]
+    rows: dict[int, list[int]]  # row -> real node ids covering it
+    incident: dict[int, set[int]]  # node id -> edge ids touching it
+    succ: dict[int, list[tuple[int, str]]]  # node id -> [(node id, style)]
     pred: dict[int, list[tuple[int, str]]]
     stats: dict
 
@@ -670,8 +714,15 @@ def _build(blocks: list[Block], sizer, entry: int | None) -> tuple[_Graph, int]:
     for b in blocks:
         w, h = sizer(b)
         b.selfloop = False
-        g.add(Node(id=b.id, block=b, label=f"loc_{b.start:X}",
-                   w=max(int(w), 4), h=max(int(h), 3)))
+        g.add(
+            Node(
+                id=b.id,
+                block=b,
+                label=f"loc_{b.start:X}",
+                w=max(int(w), 4),
+                h=max(int(h), 3),
+            )
+        )
     for b in blocks:
         outs = [(d, k) for d, k in b.succs if d in g.nodes]
         for dst, kind in outs:
@@ -722,14 +773,16 @@ def _pick_engine(engine: str | None, nblocks: int) -> str:
         want = "auto"
     if want == "auto":
         from . import graph_triskel
+
         if nblocks <= AUTO_TRISKEL_MAX_BLOCKS and graph_triskel.available():
             return "triskel"
         return "native"
     return want
 
 
-def layout(blocks: list[Block], sizer, entry: int | None = None,
-           engine: str | None = None) -> Layout:
+def layout(
+    blocks: list[Block], sizer, entry: int | None = None, engine: str | None = None
+) -> Layout:
     """Lay out ``blocks``. ``sizer(block) -> (width, height)`` in cells.
 
     ``engine`` picks the layout backend: ``native`` (pure python, always
@@ -747,9 +800,10 @@ def layout(blocks: list[Block], sizer, entry: int | None = None,
         routes = []
     elif name == "triskel":
         from . import graph_triskel
+
         try:
             routes, layers = graph_triskel.run(g, root)
-        except Exception as exc:                      # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
             # Native code with a history of throwing on degenerate CFGs. The
             # graph view is a convenience; losing it beats losing the session.
             # Keep the REASON: a fallback the user can see but not explain is
@@ -804,23 +858,27 @@ def layout(blocks: list[Block], sizer, entry: int | None = None,
         down_last = last[0] > rt.pts[-2][0] if len(rt.pts) > 1 else True
         if rt.flipped:
             if rt.tail:
-                p.add_mark(first[0], first[1],
-                           "\u25b2" if down_first else "\u25bc", style, eid)
+                p.add_mark(
+                    first[0], first[1], "\u25b2" if down_first else "\u25bc", style, eid
+                )
             if rt.head:
-                p.add_mark(last[0], last[1],
-                           "\u2534" if down_last else "\u252c", style, eid)
+                p.add_mark(
+                    last[0], last[1], "\u2534" if down_last else "\u252c", style, eid
+                )
         else:
             if rt.tail:
-                p.add_mark(first[0], first[1],
-                           "\u252c" if down_first else "\u2534", style, eid)
+                p.add_mark(
+                    first[0], first[1], "\u252c" if down_first else "\u2534", style, eid
+                )
             if rt.head:
-                p.add_mark(last[0], last[1],
-                           "\u25bc" if down_last else "\u25b2", style, eid)
+                p.add_mark(
+                    last[0], last[1], "\u25bc" if down_last else "\u25b2", style, eid
+                )
 
     succ: dict[int, list[tuple[int, str]]] = {n.id: [] for n in real}
     pred: dict[int, list[tuple[int, str]]] = {n.id: [] for n in real}
     for e in g.edges:
-        a, b = (e.dst, e.src) if e.flipped else (e.src, e.dst)   # undo reversal
+        a, b = (e.dst, e.src) if e.flipped else (e.src, e.dst)  # undo reversal
         if a in succ:
             succ[a].append((b, e.style))
         if b in pred:
@@ -849,7 +907,17 @@ def layout(blocks: list[Block], sizer, entry: int | None = None,
         "engine_error": err,
         "ms": (time.perf_counter() - t0) * 1000,
     }
-    return Layout(nodes=order, by_id={n.id: n for n in g.nodes.values()},
-                  edges=g.edges, painting=p, width=width, height=height,
-                  entry=root, rows=rows, incident=incident,
-                  succ=succ, pred=pred, stats=stats)
+    return Layout(
+        nodes=order,
+        by_id={n.id: n for n in g.nodes.values()},
+        edges=g.edges,
+        painting=p,
+        width=width,
+        height=height,
+        entry=root,
+        rows=rows,
+        incident=incident,
+        succ=succ,
+        pred=pred,
+        stats=stats,
+    )

@@ -85,7 +85,9 @@ def from_loader(seg: str, name: str = "") -> bool:
 #: its stereotyped shapes, which no one types by accident.
 _ANALYZER = re.compile(
     r"^(?:switch \d+ cases?|switch jump|jumptable [0-9A-Fa-f]+\b.*|"
-    r"indirect table for switch.*|jump table for switch.*)$", re.I)
+    r"indirect table for switch.*|jump table for switch.*)$",
+    re.I,
+)
 
 #: The other family is argument hints (`s1`, `locale`, `domainname`), which IDA
 #: copies from the callee's prototype onto each argument-setup instruction. They
@@ -101,11 +103,14 @@ def analyzer_texts(comments) -> set[str]:
     counts: dict[str, int] = {}
     for c in comments:
         text = (c.text or "").strip()
-        if text and not text.split()[1:]:      # a single whitespace-free token
+        if text and not text.split()[1:]:  # a single whitespace-free token
             counts[text] = counts.get(text, 0) + 1
     out = {t for t, n in counts.items() if n >= _HINT_REPEATS}
-    out |= {(c.text or "").strip() for c in comments
-            if _ANALYZER.match((c.text or "").strip())}
+    out |= {
+        (c.text or "").strip()
+        for c in comments
+        if _ANALYZER.match((c.text or "").strip())
+    }
     return out
 
 
@@ -115,7 +120,8 @@ _DUMMY = re.compile(
     r"^(?:(?:sub|loc|locret|off|seg|asc|byte|word|dword|qword|xmmword|ymmword|"
     r"flt|dbl|tbyte|stru|algn|unk|nullsub|def|jpt|jsub)_[0-9A-Fa-f]+"
     # j_strlen: a thunk name IDA derives from its target, not from a person.
-    r"|j_\w+)$")
+    r"|j_\w+)$"
+)
 
 
 def is_dummy(name: str) -> bool:
@@ -123,8 +129,9 @@ def is_dummy(name: str) -> bool:
     return bool(_DUMMY.match(name or ""))
 
 
-def gather(program, path: str = "", *, limit: int = 4000,
-           types: bool = True, journal=None) -> Findings:
+def gather(
+    program, path: str = "", *, limit: int = 4000, types: bool = True, journal=None
+) -> Findings:
     """Collect a :class:`Findings` from a live :class:`Program`.
 
     ``path`` is the binary the app opened -- ``Program`` speaks to a database
@@ -139,8 +146,11 @@ def gather(program, path: str = "", *, limit: int = 4000,
     if journal is not None:
         try:
             out.recorded = journal.addresses()
-            out.recorded_types = {e.get("d", "") for e in journal.entries
-                                  if e.get("k") == "type" and e.get("d")}
+            out.recorded_types = {
+                e.get("d", "")
+                for e in journal.entries
+                if e.get("k") == "type" and e.get("d")
+            }
             out.n_recorded = len(journal)
         except Exception:  # noqa: BLE001
             out.recorded, out.recorded_types, out.n_recorded = set(), set(), 0
@@ -188,8 +198,9 @@ def _esc(text: str) -> str:
 
 def _fence(text: str) -> str:
     """Fence body text so a comment containing backticks cannot break out."""
-    ticks = "`" * max(3, max((len(m) for m in re.findall(r"`+", text or "")),
-                            default=0) + 1)
+    ticks = "`" * max(
+        3, max((len(m) for m in re.findall(r"`+", text or "")), default=0) + 1
+    )
     return f"{ticks}\n{(text or '').rstrip()}\n{ticks}"
 
 
@@ -199,9 +210,13 @@ def _user_names(f: Findings) -> list:
     With a journal, that is exactly the addresses we recorded renaming. Without
     one, it is a judgement: a real name, not the linker's, not the loader's.
     """
-    names = [n for n in f.names
-             if not is_dummy(n.name) and n.name not in f.linked
-             and not from_loader(n.seg, n.name)]
+    names = [
+        n
+        for n in f.names
+        if not is_dummy(n.name)
+        and n.name not in f.linked
+        and not from_loader(n.seg, n.name)
+    ]
     if f.recorded:
         return [n for n in names if n.addr in f.recorded]
     return names
@@ -212,8 +227,7 @@ def _user_types(f: Findings) -> list:
     IDA loaded, so with a journal we show only the ones declared here; without
     one, all of them, newest ordinal first (yours are the newest)."""
     if f.recorded or f.recorded_types:
-        return [t for t in f.types
-                if getattr(t[0], "name", "") in f.recorded_types]
+        return [t for t in f.types if getattr(t[0], "name", "") in f.recorded_types]
     return list(f.types)
 
 
@@ -244,8 +258,7 @@ def render(f: Findings) -> str:
     names = sorted(_user_names(f), key=lambda n: n.addr)
     funcs = [n for n in names if n.is_func]
     data = [n for n in names if not n.is_func]
-    comments = sorted(_user_comments(f), key=lambda c: (c.func_addr or c.addr,
-                                                        c.addr))
+    comments = sorted(_user_comments(f), key=lambda c: (c.func_addr or c.addr, c.addr))
     dropped = (len(f.comments) - len(comments)) + (len(f.names) - len(names))
     types = _user_types(f)
 
@@ -253,9 +266,11 @@ def render(f: Findings) -> str:
     title = f.binary or "database"
     L.append(f"# Findings — {title}")
     L.append("")
-    L.append(f"*{len(funcs)} named functions · {len(data)} named data · "
-             f"{len(comments)} comments · {len(types)} local types — "
-             f"exported {when} by idatui*")
+    L.append(
+        f"*{len(funcs)} named functions · {len(data)} named data · "
+        f"{len(comments)} comments · {len(types)} local types — "
+        f"exported {when} by idatui*"
+    )
     L.append("")
     if f.path:
         L.append(f"- **binary**: `{f.path}`")
@@ -267,24 +282,34 @@ def render(f: Findings) -> str:
         L.append(f"- **segments**: {segs}{more}")
     if f.recorded or f.recorded_types:
         n_at = len(f.recorded)
-        L.append(f"- **source**: idatui's edit journal — {f.n_recorded} recorded "
-                 f"edits across {n_at} address{'' if n_at == 1 else 'es'}. "
-                 "Everything below is work done here, not the analyzer's.")
+        L.append(
+            f"- **source**: idatui's edit journal — {f.n_recorded} recorded "
+            f"edits across {n_at} address{'' if n_at == 1 else 'es'}. "
+            "Everything below is work done here, not the analyzer's."
+        )
     else:
-        L.append("- **source**: a scan of the database. Nothing in a `.i64` "
-                 "records *who* wrote a comment or a name — IDA's own analyzer "
-                 "uses the same calls — so this is filtered by shape and may "
-                 "include its work as well as yours.")
+        L.append(
+            "- **source**: a scan of the database. Nothing in a `.i64` "
+            "records *who* wrote a comment or a name — IDA's own analyzer "
+            "uses the same calls — so this is filtered by shape and may "
+            "include its work as well as yours."
+        )
         if not f.stripped:
-            L.append("- **note**: this binary has its own symbols, so the names "
-                     "below include ones it shipped with.")
+            L.append(
+                "- **note**: this binary has its own symbols, so the names "
+                "below include ones it shipped with."
+            )
     if dropped and (f.recorded or f.recorded_types):
-        L.append(f"- **note**: {dropped} other annotations in this database "
-                 "were not made here (the analyzer's, the loader's, the "
-                 "linker's) and are left out.")
+        L.append(
+            f"- **note**: {dropped} other annotations in this database "
+            "were not made here (the analyzer's, the loader's, the "
+            "linker's) and are left out."
+        )
     elif dropped:
-        L.append(f"- **note**: {dropped} annotations left out as the loader's "
-                 "own (file headers, dummy names, imports).")
+        L.append(
+            f"- **note**: {dropped} annotations left out as the loader's "
+            "own (file headers, dummy names, imports)."
+        )
     if f.truncated:
         L.append("- **note**: the scan hit its limit; this report is partial.")
     L.append("")
@@ -293,8 +318,10 @@ def render(f: Findings) -> str:
     L.append("## Comments")
     L.append("")
     if not comments:
-        L.append("*None. (Comments are the part of a database nobody else can "
-                 "reconstruct — they are worth writing.)*")
+        L.append(
+            "*None. (Comments are the part of a database nobody else can "
+            "reconstruct — they are worth writing.)*"
+        )
         L.append("")
     else:
         by_func: dict[str, list] = {}
@@ -309,11 +336,9 @@ def render(f: Findings) -> str:
             L.append("")
             for c in rows:
                 if c.whole_func:
-                    L.append(f"- **{c.addr:#x}** — *whole function*: "
-                             f"{_esc(c.text)}")
+                    L.append(f"- **{c.addr:#x}** — *whole function*: {_esc(c.text)}")
                 elif c.line:
-                    L.append(f"- **{c.addr:#x}** `{_esc(c.line)}`  \n"
-                             f"  {_esc(c.text)}")
+                    L.append(f"- **{c.addr:#x}** `{_esc(c.line)}`  \n  {_esc(c.text)}")
                 else:
                     L.append(f"- **{c.addr:#x}** — {_esc(c.text)}")
             L.append("")
@@ -329,8 +354,7 @@ def render(f: Findings) -> str:
         L.append("|---|---|---|---|")
         for n in funcs:
             proto = f"`{_esc(n.proto)}`" if n.proto else ""
-            L.append(f"| `{n.addr:#x}` | `{_esc(n.name)}` | "
-                     f"{n.size:#x} | {proto} |")
+            L.append(f"| `{n.addr:#x}` | `{_esc(n.name)}` | {n.size:#x} | {proto} |")
         L.append("")
     if data:
         L.append("## Named data")
@@ -346,17 +370,21 @@ def render(f: Findings) -> str:
         L.append("## Local types")
         L.append("")
         if not (f.recorded or f.recorded_types):
-            L.append("*Newest first. A database is seeded with types from the "
-                     "libraries IDA loaded, so the ones you defined are the "
-                     "ones with the highest ordinals — at the top of this "
-                     "list.*")
+            L.append(
+                "*Newest first. A database is seeded with types from the "
+                "libraries IDA loaded, so the ones you defined are the "
+                "ones with the highest ordinals — at the top of this "
+                "list.*"
+            )
             L.append("")
         ordered = sorted(types, key=lambda t: -getattr(t[0], "ordinal", 0))
         for st, src in ordered:
             kw = "union" if getattr(st, "is_union", False) else "struct"
-            L.append(f"### `{kw} {st.name}`  "
-                     f"({getattr(st, 'size', 0):#x} bytes, "
-                     f"{getattr(st, 'members', 0)} fields)")
+            L.append(
+                f"### `{kw} {st.name}`  "
+                f"({getattr(st, 'size', 0):#x} bytes, "
+                f"{getattr(st, 'members', 0)} fields)"
+            )
             L.append("")
             if src:
                 L.append("```c")
@@ -372,9 +400,15 @@ def default_path(program_path: str) -> str:
     return f"{base}.findings.md"
 
 
-def export(program, binary_path: str = "", out_path: str | None = None, *,
-           limit: int = 4000, types: bool = True,
-           journal=None) -> tuple[str, Findings]:
+def export(
+    program,
+    binary_path: str = "",
+    out_path: str | None = None,
+    *,
+    limit: int = 4000,
+    types: bool = True,
+    journal=None,
+) -> tuple[str, Findings]:
     """Gather, render and WRITE the report. Returns ``(path, findings)``."""
     f = gather(program, binary_path, limit=limit, types=types, journal=journal)
     out = out_path or default_path(f.path)

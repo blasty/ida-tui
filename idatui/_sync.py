@@ -8,6 +8,7 @@ Two yield strategies feed the same poll loop: under a Pilot (tests) we yield wit
 ``pilot.pause`` (which also drains the screen); live (RPC) we yield with
 ``asyncio.sleep`` and drain explicitly via a throwaway ``Pilot(app)``.
 """
+
 from __future__ import annotations
 
 import asyncio

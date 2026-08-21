@@ -46,6 +46,7 @@ def _reference():
     log.pmsg = lambda *a, **k: None
     import tenet  # noqa: F401
     import tenet.util  # noqa: F401
+
     sys.modules["tenet.util.log"] = log
     from tenet.trace.arch import ArchAMD64
     from tenet.trace.reader import TraceReader
@@ -57,6 +58,7 @@ def _reference():
         # stay in raw trace addresses, which is what we want to compare.
         def get_instruction_addresses(self):
             return [0xDEAD0000]
+
     return TraceReader, ArchAMD64, FakeDctx
 
 
@@ -88,9 +90,11 @@ def compare(path, ref_cls, arch, dctx, samples=200):
     theirs = TraceReader(path, ArchAMD64(), FakeDctx())
     name = os.path.basename(path)
 
-    check(f"{name}: same length",
-          ours.length == theirs.trace.length,
-          f"{ours.length} vs {theirs.trace.length}")
+    check(
+        f"{name}: same length",
+        ours.length == theirs.trace.length,
+        f"{ours.length} vs {theirs.trace.length}",
+    )
     n = min(ours.length, theirs.trace.length)
     if not n:
         return
@@ -99,8 +103,11 @@ def compare(path, ref_cls, arch, dctx, samples=200):
     idxs = sorted({0, n - 1, n // 2} | {rnd.randrange(n) for _ in range(samples)})
 
     bad = [i for i in idxs if ours.raw_ip(i) != theirs.get_ip(i)]
-    check(f"{name}: same PC at every sampled timestamp", not bad,
-          f"first mismatch at {bad[:1]}")
+    check(
+        f"{name}: same PC at every sampled timestamp",
+        not bad,
+        f"first mismatch at {bad[:1]}",
+    )
 
     # Register reconstruction is the part that is easy to get subtly wrong: a
     # delta belongs to the line that CAUSED it, and an off-by-one here silently
@@ -121,11 +128,16 @@ def compare(path, ref_cls, arch, dctx, samples=200):
                 continue
             true = _truth(path, r, i)
             (ours_wrong if mine != true else ref_wrong).append((i, r, mine, ref, true))
-    check(f"{name}: register state matches the trace text everywhere",
-          not ours_wrong, f"{ours_wrong[:3]}")
+    check(
+        f"{name}: register state matches the trace text everywhere",
+        not ours_wrong,
+        f"{ours_wrong[:3]}",
+    )
     if ref_wrong:
-        print(f"       (reference disagrees at {len(ref_wrong)} sampled points; "
-              f"the text backs us, e.g. idx {ref_wrong[0][0]} {ref_wrong[0][1]})")
+        print(
+            f"       (reference disagrees at {len(ref_wrong)} sampled points; "
+            f"the text backs us, e.g. idx {ref_wrong[0][0]} {ref_wrong[0][1]})"
+        )
 
     # Execution queries: what painting is built on.
     hot = sorted(ours.by_ip, key=lambda a: -len(ours.by_ip[a]))[:5]
@@ -135,8 +147,11 @@ def compare(path, ref_cls, arch, dctx, samples=200):
         ref = list(theirs.get_executions(ea))
         if mine != ref:
             ex_bad.append((hex(ea), len(mine), len(ref)))
-    check(f"{name}: same execution timestamps for the hottest addresses",
-          not ex_bad, f"{ex_bad[:3]}")
+    check(
+        f"{name}: same execution timestamps for the hottest addresses",
+        not ex_bad,
+        f"{ex_bad[:3]}",
+    )
 
     # Memory STATE at a timestamp — reconstructed from the deltas, which is the
     # hard part and the whole point of reading memory from a trace.
@@ -153,11 +168,14 @@ def compare(path, ref_cls, arch, dctx, samples=200):
             # own coverage separately and a byte neither has seen is not a
             # disagreement.
             for j in range(n):
-                if known[j] and refb[j:j + 1] and mine[j] != refb[j]:
+                if known[j] and refb[j : j + 1] and mine[j] != refb[j]:
                     mem_bad.append((i, hex(op.addr + j), mine[j], refb[j]))
             mem_checked += 1
-    check(f"{name}: memory state at a timestamp matches the reference",
-          not mem_bad, f"{mem_bad[:3]}")
+    check(
+        f"{name}: memory state at a timestamp matches the reference",
+        not mem_bad,
+        f"{mem_bad[:3]}",
+    )
 
     # Memory: the bytes an instruction touched, and which way.
     with_mem = [i for i in idxs if ours.memory_ops(i)][:40]
@@ -167,18 +185,24 @@ def compare(path, ref_cls, arch, dctx, samples=200):
             ref = theirs.get_memory(op.addr, len(op.data), i + 1) if op.write else None
             if ref is not None and bytes(ref.data) != op.data:
                 mem_bad.append((i, hex(op.addr), op.data.hex(), bytes(ref.data).hex()))
-    check(f"{name}: written bytes match the reference's memory state",
-          not mem_bad, f"{mem_bad[:2]}")
-    print(f"       ({ours.length:,} instructions, {len(idxs)} sampled, "
-          f"{len(with_mem)} with memory)")
+    check(
+        f"{name}: written bytes match the reference's memory state",
+        not mem_bad,
+        f"{mem_bad[:2]}",
+    )
+    print(
+        f"       ({ours.length:,} instructions, {len(idxs)} sampled, "
+        f"{len(with_mem)} with memory)"
+    )
 
 
 def main(argv):
     if not os.path.isdir(TENET):
         print(f"  skip: reference not found at {TENET}")
         return 0
-    traces = argv or [p for p in ("/tmp/echotrace.0.log", "/tmp/big.0.log")
-                      if os.path.exists(p)]
+    traces = argv or [
+        p for p in ("/tmp/echotrace.0.log", "/tmp/big.0.log") if os.path.exists(p)
+    ]
     if not traces:
         print("  skip: no traces to compare (pass one, or run tenet-trace first)")
         return 0

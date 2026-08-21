@@ -16,13 +16,14 @@ Note the `can_focus` toggling: a hidden `Input` that stays focusable still takes
 part in Tab focus-nav, so tabbing around a closed prompt used to land the cursor
 in an invisible widget and swallow every subsequent keystroke.
 """
+
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
 from textual.widgets import Input, Static
 
-if TYPE_CHECKING:                                     # pragma: no cover
+if TYPE_CHECKING:  # pragma: no cover
     from textual.app import App
 
 

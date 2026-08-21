@@ -68,7 +68,8 @@ def declare_type(db: Database, **a: Any) -> Any:
 
 
 def decomp_error(db: Database, **a: Any) -> Any:
-    import ida_hexrays, ida_ida
+    import ida_hexrays
+    import ida_ida
 
     ea = int(str(a["addr"]), 16)
     fn = db.functions.get_at(ea)
@@ -114,7 +115,11 @@ def define_code(db: Database, **a: Any) -> Any:
 
 
 def define_code_run(db: Database, **a: Any) -> Any:
-    import ida_bytes, ida_idp, ida_segment, ida_ua, idaapi
+    import ida_bytes
+    import ida_idp
+    import ida_segment
+    import ida_ua
+    import idaapi
 
     ea, limit = int(str(a["addr"]), 16), max(1, min(int(a.get("limit", 20000)), 200000))
     seg = ida_segment.getseg(ea)
@@ -172,7 +177,9 @@ def define_func(db: Database, **a: Any) -> Any:
 
 
 def define_func_run(db: Database, **a: Any) -> Any:
-    import ida_bytes, ida_funcs, ida_segment
+    import ida_bytes
+    import ida_funcs
+    import ida_segment
 
     ea = int(str(a["addr"]), 16)
     fn = db.functions.get_at(ea)
@@ -279,7 +286,8 @@ def file_regions(db: Database, **a: Any) -> Any:
 
 
 def flowchart(db: Database, **a: Any) -> Any:
-    import ida_funcs, ida_gdl
+    import ida_funcs
+    import ida_gdl
 
     ea = int(str(a["addr"]), 16)
     fn = ida_funcs.get_func(ea)
@@ -407,8 +415,14 @@ def journal_put(db: Database, **a: Any) -> Any:
 
 
 def list_annotations(db: Database, **a: Any) -> Any:
-    import ida_bytes, ida_funcs, ida_lines, ida_nalt, ida_name
-    import ida_segment, ida_typeinf, idautils
+    import ida_bytes
+    import ida_funcs
+    import ida_lines
+    import ida_nalt
+    import ida_name
+    import ida_segment
+    import ida_typeinf
+    import idautils
 
     limit = max(1, int(a.get("limit", 4000)))
     max_scan = max(1000, int(a.get("max_scan", 2000000)))
@@ -629,7 +643,9 @@ def lookup_funcs(db: Database, **a: Any) -> Any:
 
 
 def make_data(db: Database, **a: Any) -> Any:
-    import ida_bytes, ida_idaapi, ida_typeinf
+    import ida_bytes
+    import ida_idaapi
+    import ida_typeinf
     from ida_domain.types import TypeApplyFlags
 
     rows = []
@@ -715,7 +731,9 @@ def read_raw(db: Database, **a: Any) -> Any:
 
 
 def rename(db: Database, **a: Any) -> Any:
-    import idaapi, ida_hexrays, ida_name
+    import ida_hexrays
+    import ida_name
+    import idaapi
 
     batch = a.get("batch") or {}
     dry_run = bool(batch.get("dry_run", False))
@@ -902,7 +920,8 @@ def rename(db: Database, **a: Any) -> Any:
 
 
 def resolve_names(db: Database, **a: Any) -> Any:
-    import ida_idaapi, ida_name
+    import ida_idaapi
+    import ida_name
 
     rows = []
     for query in a.get("queries", []):
@@ -916,7 +935,11 @@ def resolve_names(db: Database, **a: Any) -> Any:
 
 
 def search_bytes(db: Database, **a: Any) -> Any:
-    import ida_bytes, ida_funcs, ida_idaapi, ida_lines, ida_segment
+    import ida_bytes
+    import ida_funcs
+    import ida_idaapi
+    import ida_lines
+    import ida_segment
 
     pat = str(a.get("pattern", "")).strip()
     limit = max(1, int(a.get("limit", 500)))
@@ -980,8 +1003,12 @@ def search_structs(db: Database, **a: Any) -> Any:
 
 
 def search_text(db: Database, **a: Any) -> Any:
-    import ida_lines, ida_funcs, ida_segment, idautils
     import re as _re
+
+    import ida_funcs
+    import ida_lines
+    import ida_segment
+    import idautils
 
     q = str(a.get("query", ""))
     limit = max(1, int(a.get("limit", 500)))
@@ -1039,7 +1066,9 @@ def search_text(db: Database, **a: Any) -> Any:
 
 
 def set_comments(db: Database, **a: Any) -> Any:
-    import idaapi, idc, ida_hexrays
+    import ida_hexrays
+    import idaapi
+    import idc
 
     rows = []
     for item in a.get("items", []):
@@ -1150,7 +1179,11 @@ def set_lvar_type(db: Database, **a: Any) -> Any:
 
 
 def set_thumb(db: Database, **a: Any) -> Any:
-    import ida_bytes, ida_ida, ida_idp, ida_segment, ida_segregs
+    import ida_bytes
+    import ida_ida
+    import ida_idp
+    import ida_segment
+    import ida_segregs
 
     ea = int(str(a["addr"]), 16)
     treg = ida_idp.str2reg("T")
@@ -1224,7 +1257,12 @@ def survey_binary(db: Database, **a: Any) -> Any:
 
 
 def thumb_scan(db: Database, **a: Any) -> Any:
-    import ida_bytes, ida_funcs, ida_idp, ida_segment, ida_segregs, ida_ua
+    import ida_bytes
+    import ida_funcs
+    import ida_idp
+    import ida_segment
+    import ida_segregs
+    import ida_ua
 
     lo, hi = int(str(a["start"]), 16), int(str(a["end"]), 16)
     apply, limit = bool(a.get("apply", True)), int(a.get("limit", 512))
@@ -1329,7 +1367,10 @@ def undefine(db: Database, **a: Any) -> Any:
 
 
 def xref_query(db: Database, **a: Any) -> Any:
-    import idaapi, idautils, ida_bytes, ida_funcs
+    import ida_bytes
+    import ida_funcs
+    import idaapi
+    import idautils
 
     def _fn(ea):
         f = ida_funcs.get_func(ea)
@@ -1452,7 +1493,11 @@ def xref_query(db: Database, **a: Any) -> Any:
 
 
 def xref_types(db: Database, **a: Any) -> Any:
-    import idaapi, idautils, ida_bytes, ida_funcs, ida_xref
+    import ida_bytes
+    import ida_funcs
+    import ida_xref
+    import idaapi
+    import idautils
 
     code_kind = {
         ida_xref.fl_CF: "call",

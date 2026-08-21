@@ -21,8 +21,8 @@ import pstats
 import time
 
 from idatui import remote_ops
-from idatui.nexus_client import NexusClient
 from idatui.domain import Program
+from idatui.nexus_client import NexusClient
 
 
 def main() -> int:
