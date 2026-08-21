@@ -4425,8 +4425,11 @@ class LoadingScreen(ModalScreen):
         except Exception:  # noqa: BLE001 -- not mounted yet / already gone
             pass
         # Textual doesn't know the image is there, so a repaint can drop it.
-        # Re-anchoring is one short escape with no image data; throttled so a
-        # chatty progress callback can't turn it into a flicker.
+        # Re-anchoring is one short escape with no image data, and it REPLACES
+        # the placement rather than adding one (kittygfx.LOGO_PLACEMENT), so a
+        # long load ends with one image on screen instead of a stack of them.
+        # Still throttled: a chatty progress callback shouldn't drive the
+        # terminal's image compositor at status-write rate.
         if self._image:
             now = time.monotonic()
             if now - self._last_place > 0.2:
@@ -4439,6 +4442,8 @@ class LoadingScreen(ModalScreen):
 
         Deferred to after a refresh because a widget has no screen region until
         it has been laid out, and re-run on resize because the region moves.
+        Idempotent: the placement carries an id, so calling this a hundred times
+        during a slow load leaves exactly one image on the screen.
         """
         if not self._image:
             return
@@ -4446,9 +4451,13 @@ class LoadingScreen(ModalScreen):
             region = self.query_one("#loading-image", Static).region
         except Exception as e:  # noqa: BLE001 -- gone already
             kittygfx.log(f"place_logo: no widget ({e})")
+            kittygfx.clear()
             return
         kittygfx.log(f"place_logo: region={region}")
         if not region.width or not region.height:
+            # No room left to draw into -- drop the placement rather than leave
+            # the old, bigger one anchored over whatever now occupies the cells.
+            kittygfx.clear()
             return
         # The reserved region is the truth about how much room there is; the
         # image is scaled into exactly it, so a resize needs no relayout.
@@ -4470,8 +4479,9 @@ class LoadingScreen(ModalScreen):
         self.call_after_refresh(self._place_logo)
 
     def on_resize(self) -> None:
+        # No clear() first: re-placing with the same placement id replaces the
+        # old one atomically, where delete-then-draw shows a hole for a frame.
         if self._image:
-            kittygfx.clear()
             self.call_after_refresh(self._place_logo)
 
     def on_unmount(self) -> None:

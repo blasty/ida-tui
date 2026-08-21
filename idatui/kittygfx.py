@@ -45,6 +45,14 @@ import time
 #: One id for the splash. Ids are a terminal-wide namespace shared with whatever
 #: else the user is running, so this is deliberately not 1.
 LOGO_ID = 0x1DA7
+#: Placement id for the splash. A placement is identified by the PAIR (image id,
+#: placement id): re-placing with the same pair REPLACES the placement, while a
+#: placement with no ``p`` key is anonymous and every one of those stacks a new
+#: copy on the screen. The splash re-anchors itself on every progress note, so
+#: without this the terminal ends a long load holding hundreds of placements of
+#: the same image at the same cell -- alpha-compositing the (RGBA) logo over
+#: itself until its soft edges go solid, and re-rendering all of them per frame.
+LOGO_PLACEMENT = 1
 
 _supported: bool | None = None
 _uploaded: dict[int, tuple[int, int]] = {}   # image id -> (pixel w, pixel h)
@@ -210,21 +218,26 @@ def is_uploaded(image_id: int = LOGO_ID) -> bool:
 
 
 def place(row: int, col: int, cols: int, rows: int,
-          image_id: int = LOGO_ID) -> bool:
+          image_id: int = LOGO_ID, placement_id: int = LOGO_PLACEMENT) -> bool:
     """Draw the uploaded image at (``row``, ``col``), 0-based, sized in cells.
 
     Saves and restores the cursor, and asks the terminal not to move it
     (``C=1``), so Textual's idea of where the cursor is stays true.
+
+    Always carries a placement id (``p``), so calling this again REPLACES the
+    previous placement instead of adding another one underneath it -- see
+    ``LOGO_PLACEMENT``. Callers re-anchor freely; the screen holds exactly one.
     """
     size = _uploaded.get(image_id)
     if size is None or cols <= 0 or rows <= 0:
         log(f"place: refused size={size} cols={cols} rows={rows}")
         return False
     w, h = size
-    log(f"place row={row} col={col} c={cols} r={rows}")
+    log(f"place row={row} col={col} c={cols} r={rows} p={placement_id}")
     return _write(
         f"\033[s\033[{row + 1};{col + 1}H"
-        f"\033_Ga=p,i={image_id},s={w},v={h},c={cols},r={rows},C=1,q=2\033\\"
+        f"\033_Ga=p,i={image_id},p={placement_id},"
+        f"s={w},v={h},c={cols},r={rows},C=1,q=2\033\\"
         f"\033[u")
 
 
