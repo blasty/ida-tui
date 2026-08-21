@@ -8,8 +8,11 @@ TODO:
     [x] delete the private pickle worker and ida-pro-mcp patch injection
     [x] stop sweeping/reaping resources that may belong to another client
     [ ] run the full live Pilot suite against both GUI and managed backends
-    [ ] add database revision/change notifications for cross-client cache invalidation
-    [ ] decide how "discard changes" should work (IDA Nexus final workers save)
+    [x] add database revision/change notifications for cross-client cache invalidation
+        -> PR #1: subscribe_idb_events -> IDBEventListener -> _refresh_idb_events
+    [x] decide how "discard changes" should work (IDA Nexus final workers save)
+        -> PR #1: shutdown_database(save=False) when ours is the final lease;
+           otherwise the lease transfers finalization (pool.discard_changes)
 
 - [x] add support for toggling literal types, ala `o` in IDA. (decimal to hex to
       reference etc.)
