@@ -1,164 +1,139 @@
-![ida-tui](logo-trans.png)
+<p align="center">
+  <img src="logo-trans.png" alt="ida-tui" width="480">
+</p>
 
-**IDA Pro in a terminal.** Listing, decompiler, graph — keyboard-first, mouse-capable.
+<p align="center">
+  <b>IDA Pro, right in your terminal.</b><br>
+  Disassembly, decompiler and graphs, driven by the keyboard (the mouse works too).
+</p>
 
-`disasm` · `pseudocode` · `cfg` · `hex` · `strings` · `structs` · `traces` · `rpc`
+<p align="center">
+  <code>disasm</code> · <code>pseudocode</code> · <code>graph</code> · <code>hex</code> · <code>strings</code> · <code>structs</code> · <code>traces</code> · <code>rpc</code>
+</p>
 
 ---
 
-> **Status: personal project, actively hacked on.** No packaging, no versioning,
-> no support. It assumes a licensed IDA Pro and a venv at `~/ida-venv`. Things
-> move and break. Poke around; don't file expectations.
+> [!NOTE]
+> **This is a personal project and it changes often.** There are no releases and no
+> support promises, and things will sometimes break. You need your own licensed copy
+> of IDA Pro. Feel free to poke around.
 
-## Why
+## Why?
 
-IDA's own UI is excellent and it is a GUI. This is for the times you're in a
-terminal over SSH, in a tmux pane next to your notes, or driving RE from a
-script — and still want the listing, Hex-Rays, and a real control-flow graph.
+IDA's own interface is great, but it's a desktop app. ida-tui is for the times you'd
+rather stay in the terminal: working over SSH, sitting in a tmux pane next to your
+notes, or scripting your reverse engineering.
 
-It is **not** a reimplementation of IDA. It's a frontend: IDA does the analysis,
-this draws it.
+It doesn't replace IDA. **IDA still does all the analysis.** ida-tui just gives you
+a different window onto it.
 
-## Install
+## Getting started
 
-Needs **Python ≥ 3.11** and **IDA Pro 9.4+ with idalib**.
+You'll need **Python 3.11+** and **IDA Pro 9.4+** (with idalib).
+
+**1. Install**
 
 ```sh
 uv sync
 ```
 
-That pulls [ida-nexus](https://github.com/HexRaysSA/ida-nexus) from PyPI,
-which is how ida-tui talks to IDA. To also attach to databases you have open in
-the IDA GUI, install its plugin:
+**2. Optional: connect to IDA windows you already have open**
 
 ```sh
 uvx ida-hcli plugin install ida-nexus
 ```
 
-Hacking on ida-nexus itself? Point at a checkout instead:
+**3. Open a binary**
 
 ```sh
-uv add --editable ../ida-nexus
+./ida-tui /path/to/binary
 ```
 
-## Run
+If the binary is already open in IDA, ida-tui connects to that copy. If it isn't,
+ida-tui opens it in the background. Edits made in either place show up in the other,
+and quitting ida-tui never closes anyone else's session.
 
-```sh
-./ida-tui /path/to/binary        # attach to a GUI session, or open a managed database
-./ida-tui                        # attach, when exactly one database is registered
-```
-
-ida-tui never owns an IDA process — it takes a **lease**. A matching database open
-in the IDA GUI is reused, otherwise IDA Nexus starts or shares a managed idalib
-worker. Quitting drops the lease and leaves everyone else alone.
-Changes made in the GUI or another client arrive over IDA Nexus's IDB event
-stream; ida-tui debounces bursts and refreshes its cached views automatically.
-On quit with unsaved changes, a final managed-worker lease can discard the
-session without saving; GUI-backed or still-shared sessions leave that final
-decision with their owner or remaining clients.
-If the owning GUI or worker closes, ida-tui never replaces it by spawning a
-headless worker implicitly. It keeps the cached view disconnected until a
-matching owner is reopened and an attach-only rediscovery succeeds.
-Remote operations are typed, source-backed Python functions. ida-nexus installs
-their content-addressed modules once per IDA Python interpreter, so ida-tui keeps
-normal refactorable source without paying to resend hot listing/decompiler code.
-Operation attribution is also a per-call provider rather than a fixed string, so
-it can evolve from `IDA TUI` to labels such as `IDA TUI: alice`.
-
-Headerless blobs need a hint, or IDA assumes x86 at address 0 and analyses nothing:
-
-```sh
-./ida-tui fw.bin --processor arm --base 0x8000000
-```
-
-These apply only when the database is **created** — an existing IDB already records
-them. On ARM, `t` toggles ARM/Thumb at the cursor, `T` scans a vector table for
-Thumb entry points.
+> [!TIP]
+> **Raw firmware or other headerless files:** tell IDA what it's looking at, or it
+> will guess wrong:
+>
+> ```sh
+> ./ida-tui fw.bin --processor arm --base 0x8000000
+> ```
+>
+> These settings only matter the first time a file is opened. On ARM, `t` switches
+> between ARM and Thumb at the cursor, and `T` finds Thumb code by reading the vector table.
 
 ## Keys
 
+| Key | What it does |
+|---|---|
+| `enter` / `esc` | Follow a reference / go back |
+| `tab` or `F5` | Switch between disassembly and pseudocode |
+| `space` | Graph view (`z` zoom · `m` minimap · `J`/`K` walk edges) |
+| `s` | Split view: disassembly and pseudocode side by side |
+| `g` · `/` · `?` | Go to address · search · search backwards |
+| `x` · `n` · `y` · `;` | Cross-references · rename · change type · comment |
+| `c` · `d` · `p` · `u` · `a` | Mark as code · data · function · undefined · string |
+| `o` · `O` · `B` | Change number format · go back a format · show opcode bytes |
+| `\` · `"` · `ctrl+t` | Hex · strings · structs |
+| `ctrl+n` · `ctrl+p` | Jump to a symbol · command palette |
+| `ctrl+r` · `ctrl+s` · `ctrl+l` · `q` | Refresh · save · reload as… · quit |
+| **`F1`** | **Show every key** |
+
+## What's inside
+
 | | |
 |---|---|
-| `enter` `escape` | follow / back |
-| `tab` `F5` | listing ↔ pseudocode |
-| `space` | control-flow graph (`z` zoom, `m` minimap, `J`/`K` walk edges) |
-| `s` | split view — listing and pseudocode, cursor-synced |
-| `g` `/` `?` | goto · search · search back |
-| `x` `n` `y` `;` | xrefs · rename · retype · comment |
-| `c` `d` `p` `u` `a` | make code · data · function · undefine · string |
-| `o` `O` `B` | cycle this literal's format · reverse · opcode bytes |
-| `\` `"` `ctrl+t` | hex · strings · structs |
-| `ctrl+n` `ctrl+p` | symbol palette · command palette |
-| `ctrl+r` `ctrl+s` `ctrl+l` `q` | refresh view · save · reload as… · quit |
-| `F1` | all of them |
+| 📜 **Disassembly** | Code and data in one smooth scrolling view, in IDA's own colours. Huge binaries scroll just as easily as small ones. |
+| 🧠 **Pseudocode** | Hex-Rays decompiler output with syntax highlighting. Anything you rename, retype or comment is saved back to IDA. |
+| 🕸️ **Graph** | A proper control-flow graph with colour-coded arrows. Each box holds the same lines as the disassembly, so renaming and xrefs work inside it too. |
+| 🪞 **Split view** | Disassembly and pseudocode side by side. Move through one and the other highlights the matching lines. |
+| 🔎 **Search** | Search the whole database for text or byte patterns like `48 8b ?? c3`. ida-tui works out which one you mean. |
+| 🧱 **Structs & types** | Your types shown as plain C. Edit them and press `ctrl+s` to save them back into IDA. |
+| 🔢 **Number formats** | Press `o` to cycle a number through hex, decimal, binary, character and offset. |
+| 📝 **Findings export** | Press `ctrl+e` to write up your session as markdown: your names, comments and function signatures, grouped by function. |
+| ⏱️ **Execution traces** | Load a [Tenet](https://github.com/gaasedelen/tenet) trace and step backwards and forwards through time, with registers and stack shown at each step. |
+| 🤖 **Remote control** | Let scripts or AI agents drive a running ida-tui. Handy for automation and livestreams. |
 
-## What's in it
+There's also a hex view, a strings list, projects with several binaries, and a
+splash screen that shows a real image in terminals that support it (kitty and friends).
 
-**Listing** — code, data and undefined runs in one continuous view, with IDA's own
-colours. Line-virtualized: a 400 MB binary scrolls like a text file.
+<details>
+<summary><b>Traces, remote control & demo mode</b></summary>
 
-**Decompiler** (`tab`) — Hex-Rays pseudocode, highlighted, with per-line address
-anchors. Renames, retypes and comments write back.
-
-**Graph** (`space`) — basic blocks laid out with a real layered (Sugiyama) algorithm
-and routed, colour-coded edges. The boxes hold the *same rows* as the listing, so
-renames and xrefs work inside them.
-
-**Split view** (`s`) — listing and pseudocode side by side, cursor-synced. The
-focused pane drives; the other highlights the instructions the current C line owns.
-
-**Search** (`ctrl+f`) — the whole database, as **text** through the disassembly or as
-**bytes** with IDA's wildcard patterns (`48 8b ?? c3`). It guesses which you meant;
-`hex:`/`text:` overrides.
-
-**Structs / types** (`ctrl+t`) — local types as plain C, editable and highlighted.
-`ctrl+s` declares it straight back into the database.
-
-**Literal formats** (`o`) — hex → decimal → binary → char → offset, IDA's own key.
-Skips the stops that wouldn't change anything, so no press is a silent no-op.
-
-**Findings export** (`ctrl+e`) — the session as a markdown writeup: your comments,
-names and prototypes, grouped by function. idatui journals its own edits, so the
-report is *yours*, not IDA's analyzer's.
-
-**Execution traces** — load a [Tenet](https://github.com/gaasedelen/tenet) trace and
-move through time. Both code views paint the execution trail; the dock shows
-registers and stack as of that instant.
+**Replay a trace.** Use `]` / `[` to step and `}` / `{` to step over calls:
 
 ```sh
-./ida-tui /path/to/binary --trace trace.0.log     # ] [ step · } { step over
+./ida-tui /path/to/binary --trace trace.0.log
 ```
 
-**RPC** — drive the live TUI from another process (agent-driven RE, livestreams):
+**Drive it from another program** (more in [docs/RPC.md](docs/RPC.md)):
 
 ```sh
 ./ida-tui /abs/path/bin --rpc /tmp/ida.sock
-python -m idatui.drive pc main               # pseudocode of main
-python -m idatui.drive rename sub_5BE0 foo   # goto + rename
+python -m idatui.drive pc main               # show pseudocode for main
+python -m idatui.drive rename sub_5BE0 foo   # jump there and rename it
 ```
 
-Scripted feature tour, for screen recordings: `python tools/demo.py --spawn`
-
-**Also** — hex view (`\`), strings (`"`), symbol and command palettes
-(`ctrl+n`/`ctrl+p`), multi-binary projects, and a splash that renders as a real
-image on terminals speaking the kitty graphics protocol.
-
-## Tests
+**Run a scripted tour** for screen recordings:
 
 ```sh
-python3 tests/run.py --fast     # 380 checks, <1s, any python3 — between edits
-python3 tests/run.py --list     # what runs, and what needs IDA
-python3 tests/run.py            # 1031 checks, ~50s — before a commit
+python tools/demo.py --spawn
 ```
 
-Every suite declares `NEEDS_IDA`; `--fast` runs only the pure ones (stdlib, no
-IDA, no database). The rest drive a headless Textual `Pilot` against a real
-database. Iterate on one with `--only`:
+</details>
+
+## Contributing
+
+Bug reports and patches are welcome. [CONTRIBUTING.md](CONTRIBUTING.md) explains how
+ida-tui works under the hood and how to run the tests. The quick check needs only
+plain Python, no IDA:
 
 ```sh
-~/ida-venv/bin/python tests/test_scenarios.py targets/echo --only hex,rename
+python3 tests/run.py --fast
 ```
 
-—
+---
 
-[sl0p.foo](https://sl0p.foo)
+<p align="center"><a href="https://sl0p.foo">sl0p.foo</a></p>

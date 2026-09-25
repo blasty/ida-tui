@@ -26,6 +26,38 @@ GUI:
 uvx ida-hcli plugin install ida-nexus
 ```
 
+Hacking on ida-nexus itself? Point at a checkout instead:
+
+```sh
+uv add --editable ../ida-nexus
+```
+
+## How ida-tui talks to IDA
+
+- **Leases, not ownership.** ida-tui never owns an IDA process; it takes a
+  lease. A matching database open in the IDA GUI is reused, otherwise IDA Nexus
+  starts or shares a managed idalib worker. Quitting drops the lease and leaves
+  every other client alone. `./ida-tui` with no argument attaches when exactly
+  one database is registered.
+- **Live updates.** Changes made in the GUI or another client arrive over IDA
+  Nexus's IDB event stream; ida-tui debounces bursts and refreshes its cached
+  views automatically.
+- **Unsaved changes on quit.** The last lease on a managed worker may discard
+  the session without saving. GUI-backed or still-shared sessions leave that
+  decision to their owner or the remaining clients.
+- **Owner goes away.** If the owning GUI or worker closes, ida-tui never
+  spawns a headless replacement on its own. It keeps the cached view
+  disconnected until a matching owner reopens and an attach-only rediscovery
+  succeeds.
+- **Remote operations** are typed, source-backed Python functions. ida-nexus
+  installs their content-addressed modules once per IDA Python interpreter, so
+  the code stays normal refactorable source without resending hot
+  listing/decompiler code on every call.
+- **Attribution** is a per-call provider rather than a fixed string, so it can
+  evolve from `IDA TUI` to labels such as `IDA TUI: alice`.
+- **Loader hints** (`--processor`, `--base`) only apply when a database is
+  created; an existing IDB already records them.
+
 ## Running the tests
 
 This repo does **not** use pytest. Every suite is a standalone script with its
@@ -34,8 +66,9 @@ for each file.
 
 ```sh
 python3 tests/run.py --fast          # every pure suite — stdlib only, ~1s
+python3 tests/run.py --list          # what runs, and what needs IDA
 python3 tests/run.py graph -x        # one suite by substring, fail-fast
-python3 tests/run.py                 # everything (needs IDA)
+python3 tests/run.py                 # everything (needs IDA), ~50s
 ```
 
 The IDA-backed suites need an interpreter that has `textual`, `idapro` and
