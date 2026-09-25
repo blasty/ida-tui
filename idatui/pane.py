@@ -361,6 +361,13 @@ def spawn(args) -> int:
             inner += ["--" + opt.replace("_", "-"), str(val)]
     if getattr(args, "trace", None):
         inner += ["--trace", os.path.abspath(os.path.expanduser(args.trace))]
+    # Where the database goes, for a binary whose own directory cannot hold one
+    # (/bin/ls). Without it the TUI picks a writable location itself and says so
+    # in the status line -- an RPC-driven pane is never asked, because nothing
+    # would answer and spawn would wait out its whole timeout in front of the
+    # dialog. Pass it when the location matters.
+    if getattr(args, "idb", None):
+        inner += ["--idb", os.path.abspath(os.path.expanduser(args.idb))]
 
     if args.size and mux == "zellij":
         print(
@@ -649,6 +656,12 @@ def main(argv: list[str]) -> int:
         metavar="STR",
         dest="ida_args",
         help="extra IDA command-line switches, passed through",
+    )
+    sp.add_argument(
+        "--idb",
+        metavar="FILE",
+        help="keep the database at this .i64 path instead of beside the binary "
+        "(passed to idatui.launch)",
     )
     sp.add_argument(
         "--sock", help="RPC socket path (default: auto in $XDG_RUNTIME_DIR)"

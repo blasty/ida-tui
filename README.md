@@ -64,6 +64,14 @@ and quitting ida-tui never closes anyone else's session.
 > These settings only matter the first time a file is opened. On ARM, `t` switches
 > between ARM and Thumb at the cursor, and `T` finds Thumb code by reading the vector table.
 
+> [!TIP]
+> **Binaries you can't write next to** — `./ida-tui /bin/ls` would need IDA to
+> create `/bin/ls.i64`, which isn't yours to write. ida-tui notices before opening
+> anything and offers to keep the database somewhere else instead
+> (`~/.local/share/idatui/db/`, one stable path per binary, so your names and
+> comments come back next time). `--idb /path/to/db.i64` picks the location
+> yourself, and `$IDATUI_DB_DIR` moves the default.
+
 ## Keys
 
 | Key | What it does |

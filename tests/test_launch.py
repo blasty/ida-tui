@@ -83,8 +83,29 @@ def t_load_args():
     check("extra ida_args are passed through", "-p1" in c, c)
 
 
+def t_idb_option():
+    """``--idb`` names where the database goes, for a binary in /bin.
+
+    The launcher only has to accept it and hand it over; choosing a location and
+    asking about one live in idbpath/app (tests/test_idbpath.py).
+    """
+    src = open(launch.__file__, encoding="utf-8").read()
+    check("the launcher offers --idb", '"--idb"' in src)
+    check("...and passes it to the app", "idb_path=idb_path" in src)
+    with tempfile.TemporaryDirectory() as tmp:
+        # A project keeps its databases in its sidecar, so the two options mean
+        # contradictory things; refusing beats silently ignoring one.
+        proj = os.path.join(tmp, "p.idatui-project")
+        binary = os.path.join(tmp, "bin")
+        touch(binary)
+        rc = launch.main(
+            ["--project", proj, binary, "--idb", os.path.join(tmp, "x.i64")]
+        )
+        check("--idb with --project is refused", rc == 2, f"rc={rc}")
+
+
 def main() -> int:
-    for fn in (t_no_lock_sweeping, t_load_args):
+    for fn in (t_no_lock_sweeping, t_load_args, t_idb_option):
         print(f"\n{fn.__name__}")
         try:
             fn()

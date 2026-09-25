@@ -103,6 +103,12 @@ def main(argv: list[str] | None = None) -> int:
         metavar="FILE",
         help="Tenet execution trace to explore alongside the binary",
     )
+    p.add_argument(
+        "--idb",
+        metavar="FILE",
+        help="keep the database here instead of beside the binary (an .i64 path; "
+        "the default for a binary in a directory you cannot write)",
+    )
     g = p.add_argument_group(
         "loading a headerless blob",
         "An ELF/PE/Mach-O says what it is. A raw firmware dump doesn't, and IDA "
@@ -144,6 +150,27 @@ def main(argv: list[str] | None = None) -> int:
         load["base"] = base
     if args.ida_args:
         load["ida_args"] = args.ida_args
+
+    # Where the database goes, for a binary whose own directory cannot hold one
+    # (``/bin/ls`` -> ``/bin/ls.i64``). Validated HERE, before anything is staged
+    # or imported, so a contradictory invocation costs nothing.
+    idb_path = None
+    if args.idb:
+        from . import idbpath
+
+        if args.project:
+            # A project already keeps every database in its sidecar, so the two
+            # options mean contradictory things. Refusing beats ignoring one.
+            _log(
+                "--idb is for a single binary; a project keeps its databases in "
+                "its sidecar"
+            )
+            return 2
+        try:
+            idb_path = idbpath.ensure_parent(args.idb)
+        except OSError as e:
+            _log(f"cannot create the directory for --idb {args.idb}: {e}")
+            return 2
 
     project = None
     binary = None
@@ -249,6 +276,7 @@ def main(argv: list[str] | None = None) -> int:
         trace_path=(
             os.path.abspath(os.path.expanduser(args.trace)) if args.trace else ""
         ),
+        idb_path=idb_path,
     ).run()
     return 0
 

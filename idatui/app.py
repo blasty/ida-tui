@@ -4498,6 +4498,104 @@ class ProjectPalette(OptionListNav, ModalScreen):
 
 
 # --------------------------------------------------------------------------- #
+# Where the database goes
+# --------------------------------------------------------------------------- #
+class IdbLocationScreen(ModalScreen):
+    """Where should the database go, when it can't go where IDA would put it?
+
+    ``ida-tui /bin/ls`` asks IDA to create ``/bin/ls.i64``, which a normal user
+    cannot write. The backend's answer is "idalib worker launcher 2425195 exited
+    with status 1" -- after a full analysis wait, naming neither the file nor the
+    reason. This is that failure, moved to before the open and turned into a
+    question with a working default.
+
+    Dismisses the chosen path (a str), or None to quit: there is no third option
+    that shows anything, and "carry on and fail exactly as before" is not worth a
+    keystroke.
+    """
+
+    BINDINGS = [
+        Binding("enter", "accept", "Use this path", priority=True),
+        Binding("escape", "cancel", "Quit"),
+    ]
+
+    def __init__(self, binary: str, reason: str, proposed: str) -> None:
+        super().__init__()
+        self._binary = binary
+        self._reason = reason
+        self._proposed = proposed
+
+    def compose(self) -> ComposeResult:
+        from . import idbpath
+
+        with Vertical(id="idb-box") as box:
+            box.border_title = Text("\u26a0 the database cannot be written there")
+            yield Static(
+                f" {idbpath.expected_idb(self._binary)}\n \u2014 {self._reason}.",
+                id="idb-msg",
+                markup=False,
+            )
+            yield Static(" Keep the database here instead:", id="idb-note")
+            yield Input(value=self._proposed, id="idb-path")
+            yield Static(
+                f" {idbpath.describe(self._binary, self._proposed)}",
+                id="idb-detail",
+                markup=False,
+            )
+            yield Static(
+                " [Enter] open it there      [Esc] quit",
+                id="idb-help",
+                markup=False,
+            )
+
+    def on_mount(self) -> None:
+        inp = self.query_one("#idb-path", Input)
+        inp.focus()
+        inp.cursor_position = len(inp.value)
+
+    def on_input_changed(self, event: Input.Changed) -> None:
+        """Keep the note honest: an edited path may already hold a database."""
+        from . import idbpath
+
+        event.stop()
+        value = event.value.strip()
+        self.query_one("#idb-detail", Static).update(
+            f" {idbpath.describe(self._binary, value)}" if value else ""
+        )
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        event.stop()
+        self.action_accept()
+
+    def action_accept(self) -> None:
+        from . import idbpath
+
+        value = self.query_one("#idb-path", Input).value.strip()
+        if not value:
+            return
+        target = os.path.abspath(os.path.expanduser(value))
+        if not target.lower().endswith(".i64"):
+            # IDA Nexus derives the scratch file names from this path, and a
+            # database that isn't named .i64 confuses every later lookup
+            # (including its own registry matching).
+            target += ".i64"
+        try:
+            idbpath.ensure_parent(target)
+        except OSError as e:
+            self.query_one("#idb-help", Static).update(f" {e.strerror}: {target}")
+            return
+        if not os.access(os.path.dirname(target), os.W_OK | os.X_OK):
+            self.query_one("#idb-help", Static).update(
+                f" not writable either: {os.path.dirname(target)}"
+            )
+            return
+        self.dismiss(target)
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+
+# --------------------------------------------------------------------------- #
 # Confirmation dialog
 # --------------------------------------------------------------------------- #
 class ConfirmScreen(ModalScreen):
@@ -5397,7 +5495,7 @@ class IdaTui(App):
        only thing worth looking at. Size stays per-box; everything else is
        here, once. */
     #quit-box, #help-box, #xref-box, #pal-box, #se-box, #confirm-box,
-    #loading-box, #busy-box {
+    #idb-box, #loading-box, #busy-box {
         background: $panel;
         border: round $panel-lighten-3;
         border-title-color: $accent;
@@ -5475,6 +5573,13 @@ class IdaTui(App):
        instead of the old near-black bar. */
     #se-status { height: 1; background: $panel-darken-1; color: $text-muted;
                  padding: 0 1; }
+    #idb-box { width: 84; max-width: 92%; height: auto; padding: 1 1;
+               border: round $warning; border-title-color: $warning; }
+    #idb-msg { height: auto; padding: 0 1; }
+    #idb-note { height: 1; padding: 0 1; margin-top: 1; color: $text-muted; }
+    #idb-path { border: none; height: 1; margin: 0 1; background: $panel; color: $text; }
+    #idb-detail { height: auto; padding: 0 1; color: $text-muted; }
+    #idb-help { height: 1; padding: 0 1; margin-top: 1; color: $text-muted; }
     #confirm-box { width: 60; height: auto; padding: 1 2; }
     #confirm-msg { height: auto; }
     #confirm-help { height: 1; color: $text-muted; margin-top: 1; }
@@ -5537,6 +5642,7 @@ class IdaTui(App):
         project=None,
         load_args: str = "",
         trace_path: str = "",
+        idb_path: str | None = None,
     ) -> None:
         super().__init__()
         # Project mode is additive: with no project this is the plain
@@ -5572,6 +5678,12 @@ class IdaTui(App):
         self._open_path = open_path
         self._ttl = ttl
         self._load_args = load_args or ""  # first-open options for a headerless blob
+        #: Where the database lives, when not beside the binary (--idb, or the
+        #: answer to IdbLocationScreen). Project mode has its own answer: the
+        #: sidecar, decided by the pool.
+        self._idb_path = (
+            os.path.abspath(os.path.expanduser(idb_path)) if idb_path else None
+        )
         self._new_database = False  # Ctrl+L asks IDA Nexus for a fresh IDB
         self._title = os.path.basename(open_path) if open_path else ""
         #: Where we are in the execution trace, and everything that moves us.
@@ -5709,6 +5821,17 @@ class IdaTui(App):
         elif self._should_ask_load_options():
             self._ask_load_options(self._open_path)
             return
+        self._begin_connect()
+
+    def _begin_connect(self) -> None:
+        """Open the database, once every question about HOW has been answered.
+
+        The last of those questions is where the database may be written, asked
+        here rather than in ``on_mount`` because the load-options dialog returns
+        through this path too.
+        """
+        if self._ask_idb_location():
+            return
         # Show a loading overlay immediately so a slow open/analysis (big binary)
         # isn't just dead air behind empty panes; dismissed once we land.
         self._loading_screen = LoadingScreen(self._loading_title())
@@ -5729,16 +5852,105 @@ class IdaTui(App):
             return False
         from .formats import needs_load_options
 
-        if os.path.exists(self._open_path + ".i64") or os.path.exists(
+        # Including a relocated database: it records the answer just as well as
+        # an .i64 beside the binary would.
+        if os.path.exists(self._planned_idb()) or os.path.exists(
             os.path.splitext(self._open_path)[0] + ".i64"
         ):
             return False
         try:
-            if registered_database(self._open_path):
+            if registered_database(self._open_path, output_database=self._idb_path):
                 return False
         except Exception:
             pass  # connect() will surface registry failures with full diagnostics
         return needs_load_options(self._open_path)
+
+    def _planned_idb(self) -> str:
+        """The database path this binary is heading for.
+
+        Not always ``binary + ".i64"``: an explicit ``--idb`` wins, and a binary
+        whose own directory cannot hold a database is about to be offered the
+        relocated path, so that is where an earlier session's work will be.
+        """
+        from . import idbpath
+
+        if self._idb_path:
+            return self._idb_path
+        if self._open_path and idbpath.blocked_reason(self._open_path) is not None:
+            return idbpath.relocated_idb(self._open_path)
+        return idbpath.expected_idb(self._open_path or "")
+
+    def _blocked_idb_reason(self) -> str | None:
+        """Why IDA can't write this binary's database beside it, if it can't.
+
+        None in every ordinary case, including: project mode (the sidecar is
+        already somewhere writable), a location we were told to use (--idb or an
+        earlier answer), and a database some other client already has open --
+        that one exists and is being written by its owner, not by us.
+        """
+        if self._project is not None or self._idb_path is not None:
+            return None
+        if not self._open_path:
+            return None
+        from . import idbpath
+
+        reason = idbpath.blocked_reason(self._open_path)
+        if reason is None:
+            return None
+        try:
+            if registered_database(self._open_path):
+                return None
+        except Exception:  # noqa: BLE001 -- connect() reports registry failures
+            pass
+        return reason
+
+    def _ask_idb_location(self, reason: str | None = None) -> bool:
+        """Offer a writable database location. True when the dialog is up."""
+        reason = reason or self._blocked_idb_reason()
+        if reason is None or not self._open_path:
+            return False
+        from . import idbpath
+
+        if self._rpc_path:
+            # Nobody is watching this one. An RPC-driven TUI is waited on by
+            # `pane spawn`, which polls for ready and would sit through its whole
+            # timeout in front of a modal nobody can answer -- so take the
+            # proposal, which destroys nothing, and say where it went.
+            self._idb_path = idbpath.ensure_parent(
+                idbpath.relocated_idb(self._open_path)
+            )
+            self._status(f"{reason} \u2014 database kept at {self._idb_path}")
+            return False
+        self.push_screen(
+            IdbLocationScreen(
+                self._open_path, reason, idbpath.relocated_idb(self._open_path)
+            ),
+            self._on_idb_location,
+        )
+        return True
+
+    def _offer_idb_relocation(self, why: str) -> None:
+        """After a failed open, ask about the database if that could be the cause."""
+        if (
+            self._project is not None
+            or self._idb_path is not None
+            or not self._open_path
+        ):
+            return
+        from . import idbpath
+
+        if idbpath.can_create(idbpath.expected_idb(self._open_path)):
+            return  # the database was creatable; the failure is something else
+        self._ask_idb_location(f"cannot create it ({why.splitlines()[0]})")
+
+    def _on_idb_location(self, target) -> None:  # type: ignore[no-untyped-def]
+        """Esc means quit: with nowhere to put the database there is no session."""
+        if not target:
+            self._save_on_exit = False
+            self.exit(message="no writable location for the database")
+            return
+        self._idb_path = target
+        self._begin_connect()  # asks nothing more now that _idb_path is set
 
     def action_load_options(self) -> None:
         """Ctrl+L: re-open this binary with different load options.
@@ -5893,9 +6105,7 @@ class IdaTui(App):
             label2, self._pending_switch = self._pending_switch, None
             self._switch_binary(label2)
             return
-        self._loading_screen = LoadingScreen(self._loading_title())
-        self.push_screen(self._loading_screen)
-        self._connect()
+        self._begin_connect()
 
     def _loading_title(self) -> str:
         return os.path.basename(self._open_path) if self._open_path else "database"
@@ -6210,6 +6420,7 @@ class IdaTui(App):
                     self._open_path,
                     ttl=self._ttl,
                     load_args=self._load_args,
+                    output_database=self._idb_path,
                     spawn=False,
                 )
             client.connect(
@@ -6272,6 +6483,14 @@ class IdaTui(App):
             # cost one more keypress, not a restart.
             if "load options" in str(e):
                 self.app.call_from_thread(self._retry_load_options)
+                return
+            # Belt and braces for the unwritable-database case. `blocked_reason`
+            # is an os.access answer and os.access does not know about ACLs, a
+            # lying network mount or a full disk; an open that failed anyway,
+            # where we cannot then create the database ourselves, is the same
+            # problem discovered the expensive way. Offer the same way out
+            # instead of dead-ending on the backend's "worker exited with 1".
+            self.app.call_from_thread(self._offer_idb_relocation, str(e))
             return
         self.client = client
         self.program = program
@@ -6308,6 +6527,7 @@ class IdaTui(App):
             self._open_path,
             ttl=self._ttl,
             load_args=self._load_args,
+            output_database=self._idb_path,
             new_database=self._new_database,
         )
         client.connect(progress=lambda m: self.app.call_from_thread(self._status, m))
