@@ -14,8 +14,8 @@ injected BODY, which the IDA Nexus port deletes):
 
 Keeping the originals rather than paraphrasing them is deliberate: this is the
 most performance-tuned and most behaviour-sensitive code in the project (the
-span walker is a single regex pass because a per-character loop was the most
-expensive thing the listing did, and the cycle only offers stops that change
+span walker skips text runs with a regex because a per-character loop was the
+most expensive thing the listing did, and the cycle only offers stops that change
 what you see). A re-implementation drifts from it silently.
 
 This file is SOURCE SHIPPED AS TEXT to the database process; it is never
@@ -252,7 +252,7 @@ _IDATUI_TAGS = None
 _IDATUI_OPND_TAGS = None
 
 
-_IDATUI_CTL = None  # re: a tag = one of three control chars plus its argument
+_IDATUI_CTL = None  # re: find a control byte; the kernel determines its size
 
 
 _IDATUI_TAGINFO = None
@@ -292,12 +292,11 @@ def _idatui_spans(line):
     if _IDATUI_CTL is None:
         import re as _re
 
-        # One capturing split gives [text, tag, text, tag, ..., text] in a
-        # single C pass. A per-character python loop over the line used to be
-        # the most expensive thing the `heads` tool did, and a line is ~54
-        # characters but only ~13 tags -- everything between two tags is already
-        # exactly one span's worth of text.
-        _IDATUI_CTL = _re.compile("([\\x01\\x02\\x03](?s:.))")
+        # Search for control bytes, not two-byte pairs: semantic tags have
+        # kernel-dependent headers, possibly containing control bytes themselves.
+        # Still skip ordinary text in C rather than walking it character by
+        # character (previously the most expensive part of `heads`).
+        _IDATUI_CTL = _re.compile("[\\x01-\\x04]")
     if _IDATUI_TAGINFO is None:
         _IDATUI_TAGINFO = {
             tag: (_IDATUI_TAGS.get(tag, "text"), _IDATUI_OPND_TAGS.get(tag))
@@ -305,43 +304,41 @@ def _idatui_spans(line):
         }
     taginfo = _IDATUI_TAGINFO
     plain_tag = ("text", None)
-    on, off, esc = "\x01", "\x02", "\x03"
+    on, off, esc, inv = "\x01", "\x02", "\x03", "\x04"
     addr_tag = chr(getattr(ida_lines, "COLOR_ADDR", 0x28))
-    addr_len = int(getattr(ida_lines, "COLOR_ADDR_SIZE", 16))
-    parts = _IDATUI_CTL.split(line)
+    semantic_tag = "\x36"
+    skipcode = ida_lines.tag_skipcode
     spans, stack = [], []  # stack entries: (kind, operand index|None)
     kind, opnd = "text", None  # state the current run of text belongs to
     pend = ""
-    skip = 0  # characters of an address payload still due
-    i, n = 0, len(parts)
+    i, n = 0, len(line)
     while i < n:
-        txt = parts[i]
-        i += 1
-        if skip:
-            if len(txt) <= skip:
-                skip -= len(txt)
-                txt = ""
-            else:
-                txt = txt[skip:]
-                skip = 0
-        if txt:
-            pend += txt
-        if i >= n:
+        match = _IDATUI_CTL.search(line, i)
+        if match is None:
+            pend += line[i:]
             break
-        pair = parts[i]
-        i += 1
-        if skip:  # a tag INSIDE an address payload: 2 chars
-            skip = skip - 2 if skip > 2 else 0
+        at = match.start()
+        pend += line[i:at]
+        size = skipcode(line[at:])
+        if size <= 0:  # malformed code: retain it and always make progress
+            pend += line[at]
+            i = at + 1
             continue
-        ch = pair[0]
+        i = min(at + size, n)
+        ch = line[at]
+        if ch == inv:  # one byte, no following argument to consume
+            continue
+        if at + 1 >= n:
+            break
+        tag = line[at + 1]
         if ch == esc:  # escaped literal: keep the char it guards
-            pend += pair[1]
+            pend += tag
             continue
-        tag = pair[1]
-        if ch == on and tag == addr_tag:
-            # An embedded target address, not display text: 16 hex digits that
-            # must not reach the screen. Deliberately NOT a span boundary.
-            skip = addr_len
+        if tag == semantic_tag or (ch == on and tag == addr_tag):
+            # Structural metadata is invisible and does not change colour or
+            # operand ownership. Older kernels emit headerless semantic groups;
+            # newer ones include a kind and sometimes a TID. Only skipcode knows
+            # the correct length, so never hard-code these payload sizes.
             continue
         if pend:
             spans.append([kind, pend, opnd])

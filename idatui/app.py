@@ -51,7 +51,7 @@ from textual.widgets import (
 from textual.widgets.option_list import Option
 
 from . import diag, findings, graph, kittygfx, search
-from .domain import Func, Head, ListingModel, Program, Struct
+from .domain import Func, Head, ListingModel, Program, Struct, split_pseudocode_line
 from .edit_ctl import EditController
 from .errors import IDAConnectionError
 from .highlight import CTextArea, highlight_c
@@ -192,12 +192,6 @@ _S_DECOMP_SPIN = Style(color="#d0a215", bold=True)  # 'decompiling' spinner glyp
 _S_DECOMP_WAIT = Style(color="#7c8b9e", italic=True)  # 'decompiling' label
 _S_DECOMP_DOTS = Style(color="#626c7a")  # trailing ellipsis
 _S_LINK = Style(bgcolor="#233044")  # split view: rows linked to the other pane's cursor
-
-# Hex-Rays appends a `/*0xEA*/` address marker to each pseudocode line (we fetch
-# with include_addresses so we have a per-line anchor). Matched here to extract
-# the address and strip the marker from the display.
-_ADDR_MARK_RE = re.compile(r"/\*\s*0x([0-9A-Fa-f]+)\s*\*/")
-_ADDR_MARK_STRIP_RE = re.compile(r"\s*/\*\s*0x[0-9A-Fa-f]+\s*\*/")
 
 
 @dataclass
@@ -1786,9 +1780,9 @@ class DecompView(SearchMixin, NavMixin, ColumnCursor, ScrollView, can_focus=True
         line_eas: list[int | None] = []
         clean: list[str] = []
         for ln in text.split("\n"):
-            eas = _ADDR_MARK_RE.findall(ln)
-            line_eas.append(int(eas[-1], 16) if eas else None)
-            clean.append(_ADDR_MARK_STRIP_RE.sub("", ln).rstrip())
+            source, line_ea = split_pseudocode_line(ln)
+            line_eas.append(line_ea)
+            clean.append(source)
         seglists = highlight_c("\n".join(clean))
         self._strips = [Strip(segs) for segs in seglists]
         self._texts = ["".join(seg.text for seg in segs) for segs in seglists]
@@ -8225,7 +8219,7 @@ class IdaTui(App):
         lines = (dec.code or "").splitlines()
         if not (0 <= line_idx < len(lines)):
             return 0
-        clean = _ADDR_MARK_STRIP_RE.sub("", lines[line_idx])
+        clean, _ = split_pseudocode_line(lines[line_idx])
         m = re.search(rf"\b{re.escape(name)}\b", clean)
         return m.start() if m else 0
 
@@ -8255,7 +8249,8 @@ class IdaTui(App):
         best: tuple[int, int] | None = None
         best_key: tuple[int, int] | None = None
         for i, ln in enumerate(lines):
-            m = pat.search(_ADDR_MARK_STRIP_RE.sub("", ln))
+            clean, _ = split_pseudocode_line(ln)
+            m = pat.search(clean)
             if not m:
                 continue
             # rank: nearest to the anchor; tie -> the line at/after the anchor.
@@ -8277,10 +8272,9 @@ class IdaTui(App):
             return -1
         best_idx, best_ea = -1, -1
         for i, line in enumerate(dec.code.splitlines()):
-            for m in re.findall(r"/\*\s*0x([0-9A-Fa-f]+)\s*\*/", line):
-                e = int(m, 16)
-                if best_ea < e <= ea:
-                    best_ea, best_idx = e, i
+            _, e = split_pseudocode_line(line)
+            if e is not None and best_ea < e <= ea:
+                best_ea, best_idx = e, i
         return best_idx
 
     @staticmethod
