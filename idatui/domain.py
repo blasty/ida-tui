@@ -2626,6 +2626,21 @@ def _parse_xrefs(payload) -> list[Xref]:
     return out
 
 
+_PSEUDOCODE_ANCHOR_RE = re.compile(r"[ \t]*/\*[ \t]*0x([0-9A-Fa-f]+)[ \t]*\*/[ \t]*$")
+
+
+def split_pseudocode_line(line: str) -> tuple[str, int | None]:
+    """Separate the legacy trailing address annotation from a pseudocode line.
+
+    Only the final annotation is metadata. Identical text inside a string or an
+    earlier source comment must survive, both for display and cursor columns.
+    """
+    match = _PSEUDOCODE_ANCHOR_RE.search(line)
+    if match is None:
+        return line.rstrip(), None
+    return line[: match.start()].rstrip(), int(match.group(1), 16)
+
+
 def _parse_decompilation(ea: int, payload) -> Decompilation:
     if not isinstance(payload, dict):
         return Decompilation(ea, None, True, "unexpected payload", False, None)

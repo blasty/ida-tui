@@ -6,7 +6,7 @@ requires-python = ">=3.11"
 # ida-nexus supplies GUI discovery, shared idalib workers, leases, and the
 # execute_python/ida-domain database surface.
 dependencies = [
-    "ida-nexus>=0.7.0",
+    "ida-nexus>=0.13.0",
     "textual>=8",
     "pygments>=2",  # Used directly for pseudocode highlighting.
 ]
@@ -29,4 +29,3 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["idatui"]
-
