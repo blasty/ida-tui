@@ -28,12 +28,17 @@ from typing import Any
 
 from rich.console import Console
 
-from . import diag
+from . import diag, remote_ops
 from ._sync import drain, settle
 from .app import DecompView, GraphView, HexView, ListingView, ViewMode
 
 PROTO_VERSION = 1
-TYPE_DELAY_MS = 35  # default per-char delay for high-level typed ops (aesthetic)
+#: Default per-char delay for high-level typed ops -- purely aesthetic, and
+#: since ``press()`` removed Textual's ~80ms-per-key idle heuristic this is the
+#: WHOLE cost of a keystroke, so it is also the honest number: 20ms is ~50
+#: chars/second, fast but still visibly typed. (It used to be 35 on top of that
+#: floor, i.e. ~115ms/char -- a third of the pace it claimed.)
+TYPE_DELAY_MS = 20
 
 # Verbs that dereference app.program — refused with a clear error before load.
 _PROGRAM_METHODS = {
@@ -656,6 +661,48 @@ def _text_to_keys(text: str, delay_ms: int = 0) -> list[str]:
     return keys
 
 
+async def _yield_instead_of_sleeping(
+    min_sleep: float = 0.0, max_sleep: float = 1.0
+) -> None:
+    await asyncio.sleep(0)
+
+
+async def press(app, keys) -> None:
+    """Inject keys at the pace WE asked for, not Textual's.
+
+    ``App._press_keys`` waits for ``wait_for_idle`` **twice** per key: a
+    CPU-load heuristic that sleeps in 20ms granules until process time stops
+    advancing. Measured through this server on a real pty, that is ~80ms for
+    every character -- so a `delay_ms=35` rename actually typed at ~115ms/char,
+    and `delay_ms=0` (what `idatui.drive` asks for, and what an agent wants) was
+    no faster than a slow human. The typing speed a driver asks for has to be
+    the typing speed it gets, in both directions: legible on a stream, instant
+    for a script.
+
+    So the heuristic is swapped for a bare yield while our keys go in -- the
+    same trade ``tests/_fixtures.fast_keys`` makes, for the same reason. What
+    replaces it is not "nothing": every verb ends in ``settle()`` (pump drained,
+    threaded workers finished), which is the real gate and strictly stronger
+    than "the CPU looks idle". The ``wait:<ms>`` tokens still sleep for real, so
+    a delay that was asked for still renders frame by frame.
+
+    Patched around the call rather than at import: nothing else in the app uses
+    ``wait_for_idle``, but a global patch would also silently change the pilot
+    suite's behaviour if this module were ever imported there.
+    """
+    import textual.app
+
+    original = getattr(textual.app, "wait_for_idle", None)
+    if original is None:  # Textual moved it: correctness over speed
+        await app._press_keys(keys)
+        return
+    textual.app.wait_for_idle = _yield_instead_of_sleeping
+    try:
+        await app._press_keys(keys)
+    finally:
+        textual.app.wait_for_idle = original
+
+
 # --------------------------------------------------------------------------- #
 # Server
 # --------------------------------------------------------------------------- #
@@ -757,7 +804,7 @@ class RpcServer:
 
     # -- composed helpers (semantic verbs) -------------------------------- #
     async def _press(self, keys, pred=None, timeout=20.0, what=""):
-        await self.app._press_keys([str(k) for k in keys])
+        await press(self.app, [str(k) for k in keys])
         ok = await settle(self.app, pred, timeout=timeout)
         if pred is not None and not ok:
             # Never report success for an action that did not happen: the caller
@@ -848,7 +895,7 @@ class RpcServer:
         from textual.widgets import Input
 
         app = self.app
-        await app._press_keys([open_key])
+        await press(app, [open_key])
         await settle(
             app, lambda: app.query_one(f"#{input_id}", Input).display, timeout=10
         )
@@ -866,8 +913,8 @@ class RpcServer:
             raise RuntimeError(f"{input_id!r} prompt did not open: {why}")
         if clear:
             inp.value = ""
-        await app._press_keys(_text_to_keys(value, delay_ms))
-        await app._press_keys(["enter"])
+        await press(app, _text_to_keys(value, delay_ms))
+        await press(app, ["enter"])
 
     async def _rename_many(self, params: dict[str, Any], timeout: float) -> dict:
         """Apply a whole symbol file in one worker call.
@@ -925,7 +972,9 @@ class RpcServer:
         batch = {"func": ops, "allow_overwrite": bool(overwrite)}
         # The worker is blocking and single-threaded; off the event loop it goes,
         # or the TUI freezes for the length of the batch.
-        res = await asyncio.to_thread(app.program.client.invoke, "rename", batch=batch)
+        res = await asyncio.to_thread(
+            app.program.client.call, remote_ops.rename, batch=batch
+        )
         summary = res.get("summary", {}) if isinstance(res, dict) else {}
         failed = (
             [
@@ -943,7 +992,7 @@ class RpcServer:
         # this a batch import leaves pseudocode calling sub_98C0 forever while
         # the listing (and every readback) says memset.
         try:
-            await asyncio.to_thread(app.program.client.invoke, "force_recompile")
+            await asyncio.to_thread(app.program.client.call, remote_ops.force_recompile)
         except Exception:  # noqa: BLE001 -- older worker without the tool
             pass
         app.program.bump_names()
@@ -1074,7 +1123,7 @@ class RpcServer:
             keys = params.get("keys") or []
             if not isinstance(keys, list):
                 raise ValueError("keys must be a list")
-            await app._press_keys([str(k) for k in keys])
+            await press(app, [str(k) for k in keys])
             if params.get("settle", True):
                 await settle(app, timeout=float(params.get("timeout", 20.0)))
             return snapshot(app)
@@ -1082,7 +1131,7 @@ class RpcServer:
         if method == "text":
             text = str(params.get("text", ""))
             keys = _text_to_keys(text, int(params.get("delay_ms", 0)))
-            await app._press_keys(keys)
+            await press(app, keys)
             if params.get("settle", True):
                 await settle(app, timeout=float(params.get("timeout", 20.0)))
             return snapshot(app)
@@ -1431,13 +1480,13 @@ class RpcServer:
                 "xrefs",
             )
         if method == "symbols":
-            await app._press_keys(["ctrl+n"])
+            await press(app, ["ctrl+n"])
             await settle(
                 app, lambda: type(app.screen).__name__ == "SymbolPalette", timeout=10
             )
             q = params.get("query")
             if q:
-                await app._press_keys(_text_to_keys(str(q), delay))
+                await press(app, _text_to_keys(str(q), delay))
             await settle(app, timeout=timeout)
             return snapshot(app)
         if method == "structs":
@@ -1539,7 +1588,7 @@ class RpcServer:
             if idx is not None and ol.option_count:
                 ol.highlighted = max(0, min(ol.option_count - 1, int(idx)))
                 await drain(app)
-            await app._press_keys(["enter"])
+            await press(app, ["enter"])
             await settle(app, timeout=timeout)
             return snapshot(app)
 
@@ -1551,7 +1600,7 @@ class RpcServer:
                     f"(one of {sorted(_MOVE_KEYS)})"
                 )
             n = max(1, int(params.get("n", 1)))
-            await app._press_keys([key] * n)
+            await press(app, [key] * n)
             if params.get("settle", True):
                 await drain(app)  # light: pump only, keep movement snappy
             return snapshot(app)

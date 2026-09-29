@@ -82,8 +82,13 @@ stalls. `target` is a name, `0xADDR`, or omitted (= current function).
 
 ### Semantic verbs
 High-level ops type through the **real prompts** with a per-char delay
-(`delay_ms`, default 35ms) so viewers see it typed; each settles on an op-specific
+(`delay_ms`, default 20ms) so viewers see it typed; each settles on an op-specific
 predicate so the returned state is final.
+
+`delay_ms` is the *whole* per-key cost: injected keys skip Textual's
+`wait_for_idle` heuristic (`rpc.py: press()`), which used to add ~80ms to every
+character no matter what the driver asked for. So `delay_ms=0` really is instant
+(~1ms/char), and a raised delay buys exactly the pace it names.
 
 | method | params | effect |
 |--------|--------|--------|
