@@ -1,12 +1,14 @@
-"""Spawn/stop/list idatui TUI panes in tmux or zellij, for an agent to drive over RPC.
+"""Spawn/stop/list idatui TUI panes in slosh or tmux, for an agent to drive over RPC.
 
-The agent (running inside a tmux or zellij pane) can open a fresh pane with the
+The agent (running inside a slosh or tmux pane) can open a fresh pane with the
 TUI running against a binary, wait until it's ready, drive it over the RPC
 socket, then close it — all without a human touching the keyboard.
 
-The multiplexer is auto-detected ($ZELLIJ -> zellij, $TMUX -> tmux) and recorded
-per pane in the registry, so stop/list/capture/keys keep working across both
-(and across a mixed set of panes). $IDATUI_MUX forces a backend.
+The multiplexer is auto-detected ($SLOSH -> slosh, $ZELLIJ -> zellij, $TMUX ->
+tmux) and recorded per pane in the registry, so stop/list/capture/keys keep
+working across all of them (and across a mixed set of panes). $IDATUI_MUX forces
+a backend. (zellij is the legacy backend, kept working but no longer the house
+multiplexer.)
 
     # open a binary in a new pane, block until analysed + drivable, print JSON
     python -m idatui.pane spawn --open /abs/path/to/bin
@@ -23,7 +25,7 @@ per pane in the registry, so stop/list/capture/keys keep working across both
     python -m idatui.pane capture --pane <pane>
     python -m idatui.pane keys --pane <pane> Escape
 
-Requires: running inside tmux or zellij. Each pane leases a registered GUI or
+Requires: running inside slosh or tmux. Each pane leases a registered GUI or
 shared managed idalib database through IDA Nexus. Uses ~/ida-venv/bin/python for
 the TUI (needs textual) unless --python / IDATUI_PYTHON says otherwise.
 """
@@ -75,20 +77,23 @@ def _save_registry(rows: list[dict[str, Any]]) -> None:
 #
 # Everything that touches panes goes through here, so the rest of the module (and
 # every caller) is mux-agnostic. tmux pane ids look like ``%7``; zellij ids look
-# like ``terminal_3``, which is what ``zellij action new-pane`` prints, so a pane
-# id alone is enough to route a later stop/capture even if the registry predates
-# the ``mux`` field.
+# like ``terminal_3``, which is what ``zellij action new-pane`` prints; slosh ids
+# are bare integers ('7'), so a pane id alone is enough to route a later
+# stop/capture even if the registry predates the ``mux`` field.
 # --------------------------------------------------------------------------- #
-MUXES = ("tmux", "zellij")
+MUXES = ("tmux", "zellij", "slosh")
 
 
 def _detect_mux() -> str:
-    """Which multiplexer we're running under: 'tmux', 'zellij', or '' if neither."""
+    """Which multiplexer we're running under: 'slosh', 'tmux', 'zellij', or ''."""
     forced = os.environ.get("IDATUI_MUX", "").strip().lower()
     if forced:
         return forced if forced in MUXES else "?" + forced
-    # Check zellij first: a zellij session started from inside tmux inherits
-    # $TMUX, and the pane we can actually create there is the zellij one.
+    # slosh first: it is the house multiplexer, and a slosh session started from
+    # inside tmux inherits $TMUX while the pane we can actually create is the
+    # slosh one. (slosh's own pty clears $ZELLIJ for the same reason.)
+    if os.environ.get("SLOSH"):
+        return "slosh"
     if os.environ.get("ZELLIJ"):
         return "zellij"
     if os.environ.get("TMUX"):
@@ -97,11 +102,13 @@ def _detect_mux() -> str:
 
 
 def _mux_of_pane(pane: str) -> str:
-    """Infer the backend from a pane id ('%7' = tmux, 'terminal_3' = zellij)."""
+    """Infer the backend from a pane id ('%7' tmux, 'terminal_3' zellij, '7' slosh)."""
     if pane.startswith(("terminal_", "plugin_")):
         return "zellij"
     if pane.startswith("%"):
         return "tmux"
+    if pane.isdigit():
+        return "slosh"
     return _detect_mux() or "tmux"
 
 
@@ -126,6 +133,58 @@ def _zellij(*args: str) -> str:
     ).stdout.strip()
 
 
+def _slosh_argv() -> list[str]:
+    """Base slosh argv for the control socket, pinned to our session.
+
+    $SLOSH_BIN rather than ``slosh``: a session may have been started from a
+    build tree, where ``slosh`` is not on $PATH.
+    """
+    exe = os.environ.get("SLOSH_BIN") or "slosh"
+    session = os.environ.get("IDATUI_SLOSH_SESSION") or os.environ.get("SLOSH_SESSION")
+    return [exe, "-s", session, "cmd"] if session else [exe, "cmd"]
+
+
+def _slosh(cmd: str, **params: Any) -> dict[str, Any]:
+    """One JSON control-socket call. Raises RuntimeError on a refusal.
+
+    Always the JSON form, never the bare-verb alias: the bare form answers
+    unwrapped (`panes` is the array itself), so a parser written for one shape
+    silently finds nothing in the other.
+    """
+    out = subprocess.run(
+        [*_slosh_argv(), json.dumps({"cmd": cmd, **params})],
+        capture_output=True,
+        text=True,
+    )
+    if out.returncode != 0:
+        # e.g. 'slosh: no session named X' -- a failed call, not an {"ok":false}
+        raise RuntimeError((out.stderr or out.stdout).strip() or f"slosh {cmd} failed")
+    try:
+        reply = json.loads(out.stdout or "{}")
+    except ValueError:
+        raise RuntimeError(f"slosh {cmd}: unparseable reply {out.stdout[:120]!r}")
+    if not reply.get("ok"):
+        raise RuntimeError(f"slosh {cmd}: {reply.get('error', 'refused')}")
+    return reply
+
+
+def _slosh_panes() -> list[dict[str, Any]]:
+    try:
+        rows = _slosh("panes").get("panes")
+    except (OSError, RuntimeError):
+        return []
+    return rows if isinstance(rows, list) else []
+
+
+def _slosh_row(pane: str) -> dict[str, Any] | None:
+    return next((r for r in _slosh_panes() if str(r.get("id")) == str(pane)), None)
+
+
+def _kdl_str(s: str) -> str:
+    """Quote a value for a KDL layout (slosh's parser knows \\" and \\\\)."""
+    return '"' + s.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
 def _zellij_panes() -> list[dict[str, Any]]:
     try:
         out = subprocess.run(
@@ -142,14 +201,18 @@ def _zellij_panes() -> list[dict[str, Any]]:
 def _pane_alive(pane: str, mux: str | None = None) -> bool:
     """True if the pane exists *and* its command is still running.
 
-    zellij keeps an exited pane on screen (EXITED, holding its output) rather
-    than removing it like tmux does; that husk must count as dead or ``stop``
-    would wait out its whole timeout and ``_wait_ready`` would never notice a
-    launcher that died on startup.
+    slosh and zellij both keep an exited pane on screen (holding its output)
+    rather than removing it like tmux does; that husk must count as dead or
+    ``stop`` would wait out its whole timeout and ``_wait_ready`` would never
+    notice a launcher that died on startup.
     """
     if not pane:
         return False
-    if (mux or _mux_of_pane(pane)) == "zellij":
+    mux = mux or _mux_of_pane(pane)
+    if mux == "slosh":
+        row = _slosh_row(pane)
+        return bool(row and row.get("alive"))
+    if mux == "zellij":
         want = pane.split("_", 1)[-1]
         for row in _zellij_panes():
             if str(row.get("id")) == want and bool(row.get("is_plugin")) is False:
@@ -162,10 +225,13 @@ def _pane_alive(pane: str, mux: str | None = None) -> bool:
 
 
 def _pane_exists(pane: str, mux: str | None = None) -> bool:
-    """True if the pane is still on screen at all (including a zellij exit husk)."""
+    """True if the pane is still on screen at all (including a dead-pane husk)."""
     if not pane:
         return False
-    if (mux or _mux_of_pane(pane)) == "zellij":
+    mux = mux or _mux_of_pane(pane)
+    if mux == "slosh":
+        return _slosh_row(pane) is not None
+    if mux == "zellij":
         want = pane.split("_", 1)[-1]
         return any(
             str(r.get("id")) == want and not r.get("is_plugin") for r in _zellij_panes()
@@ -174,10 +240,17 @@ def _pane_exists(pane: str, mux: str | None = None) -> bool:
 
 
 def _pane_kill(pane: str, mux: str | None = None) -> None:
-    """Remove the pane. Idempotent, and also clears a zellij exit husk."""
+    """Remove the pane. Idempotent, and also clears a dead-pane husk."""
     if not pane:
         return
-    if (mux or _mux_of_pane(pane)) == "zellij":
+    mux = mux or _mux_of_pane(pane)
+    if mux == "slosh":
+        try:
+            _slosh("close", id=int(pane))
+        except (OSError, RuntimeError, ValueError):
+            pass  # already gone: closing is idempotent from our side
+        return
+    if mux == "zellij":
         subprocess.run(
             [*_zellij_argv(), "action", "close-pane", "--pane-id", pane],
             capture_output=True,
@@ -190,6 +263,44 @@ def _pane_split(
     inner: list[str], *, mux: str, vertical: bool, size: str | None, detached: bool
 ) -> str:
     """Open a pane running ``inner`` (argv) in REPO, and return its pane id."""
+    if mux == "slosh":
+        # slosh's `split` verb only ever makes a shell pane, and typing a command
+        # into a shell is the thing not to do: a pane that was *given* a command
+        # is the one with alive/exit_code to poll and `rerun` to repeat. So the
+        # pane comes from a one-tab layout and is then moved in beside us.
+        origin = next((r for r in _slosh_panes() if r.get("focused")), None)
+        tag = "idatui:" + secrets.token_hex(3)
+        command = f"cd {_q(REPO)} && exec " + " ".join(_q(a) for a in inner)
+        kdl = (
+            'layout { tab name="idatui" { pane '
+            f"purpose={_kdl_str(tag)} cwd={_kdl_str(REPO)} command={_kdl_str(command)}"
+            " } }"
+        )
+        _slosh("apply-layout", kdl=kdl)
+        # Find it by the purpose we declared, never by "the newest id": a
+        # declared purpose is locked, so the program in the pane cannot rename
+        # itself out from under us the way a title changes.
+        row = next((r for r in _slosh_panes() if r.get("purpose") == tag), None)
+        if row is None:
+            raise RuntimeError("slosh applied the layout but reported no pane for it")
+        pane = str(row.get("id"))
+        if origin:
+            # Into the tab we were called from, so the TUI sits beside the agent
+            # and is on screen for `capture`. The pane keeps its pty/scrollback,
+            # and the layout's now-empty tab goes away by itself.
+            try:
+                _slosh(
+                    "move-pane",
+                    id=int(pane),
+                    tab=int(origin.get("tab_id", 0)),
+                    dir="rows" if vertical else "cols",
+                )
+            except (OSError, RuntimeError):
+                pass  # no room to split: leave it in the tab of its own
+            if detached:  # slosh focuses what it creates/moves; hop back
+                _slosh("focus", id=int(origin.get("id", 0)))
+        return pane
+
     if mux == "zellij":
         # zellij runs the argv directly (no shell) and takes the cwd as a flag,
         # so there's nothing to quote. --name labels the pane in the UI.
@@ -236,9 +347,39 @@ def _pane_split(
     return _tmux(*split)
 
 
+def _slosh_capture(pane: str) -> str:
+    """One slosh pane's visible screen, cut out of the session snapshot.
+
+    ``snapshot`` is the whole composited session (every visible pane, borders and
+    all), and only the active tab is composited at all — so a pane parked in
+    another tab is brought up and put back.
+    """
+    row = _slosh_row(pane)
+    if row is None:
+        raise RuntimeError(f"no such slosh pane: {pane}")
+    tabs = _slosh("tabs").get("tabs") or []
+    active = next((t for t in tabs if t.get("active")), None)
+    restore = None
+    if active and row.get("tab_id") != active.get("id"):
+        _slosh("select-tab", id=int(row.get("tab_id", 0)))
+        restore = int(active.get("id", 0))
+        row = _slosh_row(pane) or row  # rects are a function of the frame
+    try:
+        text = _slosh("snapshot", format="text").get("text", "")
+    finally:
+        if restore is not None:
+            _slosh("select-tab", id=restore)
+    x, y = int(row.get("content_x", 0)), int(row.get("content_y", 0))
+    w, h = int(row.get("content_w", 0)), int(row.get("content_h", 0))
+    lines = text.splitlines()[y : y + h]
+    return "\n".join(ln[x : x + w].rstrip() for ln in lines).rstrip()
+
+
 def _pane_capture(pane: str, mux: str | None = None) -> str:
     """The pane's visible screen as text."""
     mux = mux or _mux_of_pane(pane)
+    if mux == "slosh":
+        return _slosh_capture(pane)
     if mux == "zellij":
         return _zellij("action", "dump-screen", "--pane-id", pane)
     return _tmux("capture-pane", "-p", "-t", pane)
@@ -268,9 +409,66 @@ def _to_zellij_key(key: str) -> str:
     return key
 
 
+# tmux key names -> the bytes a terminal actually sends (slosh writes bytes).
+_SLOSH_KEYS = {
+    "escape": "\x1b",
+    "enter": "\r",
+    "cr": "\r",
+    "tab": "\t",
+    "btab": "\x1b[Z",
+    "space": " ",
+    "bspace": "\x7f",
+    "up": "\x1b[A",
+    "down": "\x1b[B",
+    "right": "\x1b[C",
+    "left": "\x1b[D",
+    "home": "\x1b[H",
+    "end": "\x1b[F",
+    "pageup": "\x1b[5~",
+    "ppage": "\x1b[5~",
+    "pagedown": "\x1b[6~",
+    "npage": "\x1b[6~",
+    "ic": "\x1b[2~",
+    "insert": "\x1b[2~",
+    "dc": "\x1b[3~",
+    "delete": "\x1b[3~",
+    "f1": "\x1bOP",
+    "f2": "\x1bOQ",
+    "f3": "\x1bOR",
+    "f4": "\x1bOS",
+}
+
+
+def _to_slosh_bytes(key: str) -> str:
+    """Accept tmux-flavoured key names so callers can stay mux-agnostic."""
+    low = key.lower()
+    if low in _SLOSH_KEYS:
+        return _SLOSH_KEYS[low]
+    if len(key) > 2 and key[1] == "-" and key[0] in "CM":  # C-a / M-x
+        rest = key[2:]
+        if key[0] == "M":
+            return "\x1b" + _to_slosh_bytes(rest)
+        return chr(ord(rest[0]) & 0x1F) if len(rest) == 1 else rest
+    return key
+
+
 def _pane_keys(pane: str, keys: list[str], mux: str | None = None) -> None:
     """Inject real terminal keystrokes into the pane (the input-layer cross-check)."""
     mux = mux or _mux_of_pane(pane)
+    if mux == "slosh":
+        data = "".join(_to_slosh_bytes(k) for k in keys)
+        prev = next((r for r in _slosh_panes() if r.get("focused")), None)
+        # Both `raw` and `send` land in the *focused* pane, so focus first and
+        # put focus back after. `raw` rather than `send`: `send` is decoded as
+        # session input, where C-a is slosh's leader and would be swallowed
+        # instead of reaching the TUI.
+        _slosh("focus", id=int(pane))
+        try:
+            _slosh("raw", data=data)
+        finally:
+            if prev and str(prev.get("id")) != str(pane):
+                _slosh("focus", id=int(prev.get("id", 0)))
+        return
     if mux == "zellij":
         subprocess.run(
             [
@@ -311,14 +509,14 @@ def spawn(args) -> int:
     mux = args.mux or _detect_mux()
     if mux.startswith("?"):
         print(
-            f"error: unknown multiplexer {mux[1:]!r} (want tmux or zellij)",
+            f"error: unknown multiplexer {mux[1:]!r} (want {'/'.join(MUXES)})",
             file=sys.stderr,
         )
         return 2
     if not mux:
         print(
-            "error: not inside tmux or zellij (spawn creates a pane there). "
-            "Set $IDATUI_MUX=tmux|zellij to force a backend.",
+            "error: not inside slosh or tmux (spawn creates a pane there). "
+            "Set $IDATUI_MUX=slosh|tmux to force a backend.",
             file=sys.stderr,
         )
         return 2
@@ -369,9 +567,9 @@ def spawn(args) -> int:
     if getattr(args, "idb", None):
         inner += ["--idb", os.path.abspath(os.path.expanduser(args.idb))]
 
-    if args.size and mux == "zellij":
+    if args.size and mux != "tmux":
         print(
-            "note: --size is tmux-only; zellij tiles the new pane evenly",
+            f"note: --size is tmux-only; {mux} tiles the new pane evenly",
             file=sys.stderr,
         )
     try:
@@ -535,7 +733,7 @@ def list_panes(args) -> int:
                     os.unlink(r["sock"])
                 except OSError:
                     pass
-            # a zellij pane whose command exited is still on screen; drop it
+            # a slosh/zellij pane whose command exited is still on screen; drop it
             if r.get("pane") and _pane_exists(r["pane"], r.get("mux")):
                 _pane_kill(r["pane"], r.get("mux"))
             continue
@@ -565,7 +763,7 @@ def reap(args) -> int:
 
 
 def capture(args) -> int:
-    """Print a pane's visible screen (tmux capture-pane / zellij dump-screen)."""
+    """Print a pane's visible screen (slosh snapshot / tmux capture-pane)."""
     pane = args.pane or _resolve_pane(args.sock)
     if not pane:
         return 2
@@ -578,7 +776,7 @@ def capture(args) -> int:
 
 
 def send_keys(args) -> int:
-    """Inject real terminal keystrokes (tmux send-keys / zellij send-keys).
+    """Inject real terminal keystrokes (slosh raw / tmux send-keys).
 
     Key names are tmux-flavoured and translated per backend, so `keys --pane P
     Escape` does the right thing under either mux.
@@ -621,7 +819,7 @@ def _resolve_pane(sock: str | None) -> str | None:
 def main(argv: list[str]) -> int:
     p = argparse.ArgumentParser(
         prog="idatui.pane",
-        description="spawn/manage idatui TUI panes in tmux or zellij",
+        description="spawn/manage idatui TUI panes in slosh or tmux",
     )
     sub = p.add_subparsers(dest="cmd", required=True)
 
@@ -674,7 +872,8 @@ def main(argv: list[str]) -> int:
     )
     sp.add_argument(
         "--size",
-        help="new pane size (tmux -l value, e.g. 60%% or 120; ignored under zellij)",
+        help="new pane size (tmux -l value, e.g. 60%% or 120; "
+        "ignored under slosh/zellij)",
     )
     sp.add_argument("--detached", action="store_true", help="don't focus the new pane")
     sp.add_argument(
@@ -682,7 +881,7 @@ def main(argv: list[str]) -> int:
         choices=MUXES,
         default="",
         help="multiplexer to spawn in (default: autodetect from "
-        "$ZELLIJ/$TMUX; $IDATUI_MUX overrides)",
+        "$SLOSH/$ZELLIJ/$TMUX; $IDATUI_MUX overrides)",
     )
     sp.add_argument(
         "--timeout",

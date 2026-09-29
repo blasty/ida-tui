@@ -7,7 +7,7 @@ every trace verb through the RPC socket, validating the JSON responses an agent
 would see. It exercises the serialization, the settle/timeout machinery, and
 the response shape that a driver depends on.
 
-Requires: tmux or zellij, IDA (idalib), and a trace. Records a fresh trace with the QEMU
+Requires: slosh or tmux, IDA (idalib), and a trace. Records a fresh trace with the QEMU
 tracer if built; falls back to /tmp/echotrace.0.log if present; skips with a
 message otherwise.
 
@@ -105,8 +105,8 @@ def stop_pane(sock, timeout=60):
 
 def main() -> int:
     global PASS, FAIL
-    if not os.environ.get("TMUX") and not os.environ.get("ZELLIJ"):
-        print("  skip: not inside tmux or zellij (test spawns a pane)")
+    if not any(os.environ.get(v) for v in ("SLOSH", "TMUX", "ZELLIJ")):
+        print("  skip: not inside slosh or tmux (test spawns a pane)")
         return 0
 
     with tempfile.TemporaryDirectory() as tmp:

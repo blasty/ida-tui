@@ -9,7 +9,7 @@ being used.
     # render the TUI in THIS terminal and drive it (best for a single-pane capture)
     python tools/demo.py --here
 
-    # or give it its own pane in tmux/zellij
+    # or give it its own pane in slosh/tmux
     python tools/demo.py --spawn
 
     # or record a session you set up yourself (your pane, your size, your zoom)

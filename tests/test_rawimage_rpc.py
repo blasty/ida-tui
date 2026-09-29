@@ -16,7 +16,7 @@ fall apart:
 
 This test spawns a real pane on a real Thumb blob and checks all three.
 
-Requires: tmux or zellij, IDA (idalib). ~2min.
+Requires: slosh or tmux, IDA (idalib). ~2min.
 
     ~/ida-venv/bin/python tests/test_rawimage_rpc.py
 """
@@ -96,8 +96,8 @@ def stop_pane(sock, timeout=60):
 
 
 def main() -> int:
-    if not os.environ.get("TMUX") and not os.environ.get("ZELLIJ"):
-        print("SKIP: not inside tmux or zellij (test spawns a pane)")
+    if not any(os.environ.get(v) for v in ("SLOSH", "TMUX", "ZELLIJ")):
+        print("SKIP: not inside slosh or tmux (test spawns a pane)")
         return 0
     if not os.path.exists(BLOB):
         print(f"SKIP: no blob at {BLOB}")
