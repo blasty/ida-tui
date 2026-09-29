@@ -185,6 +185,105 @@ def _kdl_str(s: str) -> str:
     return '"' + s.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 
+_SLOSH_CAPS: dict[str, bool] = {}
+
+
+def _slosh_addressable() -> bool:
+    """Whether this slosh can act on a pane *by id* rather than on the focused one.
+
+    Probed, not assumed, and the probe is a field rather than a verb: slosh
+    ignores arguments it does not know, so ``raw`` with an ``id`` on an older
+    build answers ``ok`` and writes the bytes into whatever pane has focus --
+    silently, into somebody's shell. There is no way to tell from the reply, so
+    ask something that *is* visible. ``panes[].pid`` arrived with the
+    id-addressed verbs (``raw id``, ``capture``, ``move-pane beside``,
+    ``apply-layout focus``), so its presence is the capability.
+    """
+    if "addressable" not in _SLOSH_CAPS:
+        rows = _slosh_panes()
+        _SLOSH_CAPS["addressable"] = bool(rows) and "pid" in rows[0]
+    return _SLOSH_CAPS["addressable"]
+
+
+def _proc_ancestry() -> list[int]:
+    """Our own pid and every parent up to init, nearest first.
+
+    For finding which pane we are in when the environment cannot say: the pane's
+    program is one of our ancestors, and slosh reports each pane's pid.
+    """
+    out: list[int] = []
+    pid = os.getpid()
+    for _ in range(64):  # a bound, not an expectation: no cycles in /proc
+        if pid <= 1:
+            break
+        out.append(pid)
+        try:
+            with open(f"/proc/{pid}/stat") as fh:
+                stat = fh.read()
+            # comm can contain spaces and brackets; everything after the last
+            # ')' is the fixed-position part, and ppid is its second field.
+            pid = int(stat[stat.rindex(")") + 2 :].split()[1])
+        except (OSError, ValueError):
+            break
+    return out
+
+
+def _slosh_origin() -> dict[str, Any] | None:
+    """The pane *we* are running in, as a `panes` row, or None if unknowable.
+
+    This is the question the whole spawn hangs on, and getting it from the
+    session's focus -- which is what this used to do -- is wrong in a way that
+    is invisible until it bites: exactly one pane in a slosh session is
+    ``focused``, it is always in the tab currently on screen, and it belongs to
+    whoever is looking. So a TUI spawned "beside the agent" landed in whatever
+    tab the human had wandered into, and in a session running several agents it
+    was reliably somebody else's. (Worse, ``apply-layout`` used to jump the view
+    to the tab it built, so one spawn moved the focus that the *next* spawn
+    would read.)
+
+    Four answers, in order, none of which is "whoever has focus":
+
+    1. ``$IDATUI_SLOSH_PANE`` -- an operator or wrapper saying so outright.
+    2. ``$SLOSH_PANE`` -- slosh telling the pane's program which pane it is.
+       The right answer; needs a slosh new enough to export it.
+    3. our own pid's ancestry against ``panes[].pid`` -- the answer for a tool
+       whose environment was scrubbed, or which has no controlling tty (an
+       agent's shell-out has neither), on a slosh that reports pids.
+    4. a purpose named by ``$IDATUI_ORIGIN_PURPOSE`` or ``$SLOSH_PANE_PURPOSE``
+       -- for an agent that labelled its own pane
+       (``printf '\\033]5577;1;purpose;agent:me'``) and exported the label, on a
+       slosh too old for either of the above. pi's slosh-status extension does
+       exactly this.
+
+    None of them means "leave the pane wherever it was built", which is a
+    predictable, harmless place. Guessing does not.
+    """
+    rows = _slosh_panes()
+    if not rows:
+        return None
+    by_id = {str(r.get("id")): r for r in rows}
+
+    for var in ("IDATUI_SLOSH_PANE", "SLOSH_PANE"):
+        want = os.environ.get(var, "").strip()
+        if want and want in by_id:
+            return by_id[want]
+
+    mine = set(_proc_ancestry())
+    for r in rows:
+        pid = r.get("pid")
+        if isinstance(pid, int) and pid > 0 and pid in mine:
+            return r
+
+    for var in ("IDATUI_ORIGIN_PURPOSE", "SLOSH_PANE_PURPOSE"):
+        purpose = os.environ.get(var, "").strip()
+        if not purpose:
+            continue
+        for r in rows:
+            if r.get("purpose") == purpose:
+                return r
+    return None
+
+
 def _zellij_panes() -> list[dict[str, Any]]:
     try:
         out = subprocess.run(
@@ -268,7 +367,7 @@ def _pane_split(
         # into a shell is the thing not to do: a pane that was *given* a command
         # is the one with alive/exit_code to poll and `rerun` to repeat. So the
         # pane comes from a one-tab layout and is then moved in beside us.
-        origin = next((r for r in _slosh_panes() if r.get("focused")), None)
+        origin = _slosh_origin()
         tag = "idatui:" + secrets.token_hex(3)
         command = f"cd {_q(REPO)} && exec " + " ".join(_q(a) for a in inner)
         kdl = (
@@ -276,7 +375,14 @@ def _pane_split(
             f"purpose={_kdl_str(tag)} cwd={_kdl_str(REPO)} command={_kdl_str(command)}"
             " } }"
         )
-        _slosh("apply-layout", kdl=kdl)
+        # focus=False builds the tab without moving anybody's view to it. An
+        # older slosh ignores the argument and jumps to the new tab -- rude, but
+        # that jump is also what used to *size* the pane there, so asking for it
+        # is only safe where the sizing does not depend on it.
+        if _slosh_addressable():
+            _slosh("apply-layout", kdl=kdl, focus=False)
+        else:
+            _slosh("apply-layout", kdl=kdl)
         # Find it by the purpose we declared, never by "the newest id": a
         # declared purpose is locked, so the program in the pane cannot rename
         # itself out from under us the way a title changes.
@@ -288,17 +394,43 @@ def _pane_split(
             # Into the tab we were called from, so the TUI sits beside the agent
             # and is on screen for `capture`. The pane keeps its pty/scrollback,
             # and the layout's now-empty tab goes away by itself.
+            #
+            # `beside` names our own pane rather than letting slosh pick that
+            # tab's focused one -- the tab's focus is a fact about the last
+            # person who looked at it -- and `focus` says whether to follow the
+            # pane there. Both are ignored by an older slosh, which lands it
+            # beside that tab's focus and takes focus with it; the tab is still
+            # right, which is the part that matters.
+            move: dict[str, Any] = {
+                "id": int(pane),
+                "tab": int(origin.get("tab_id", 0)),
+                "dir": "rows" if vertical else "cols",
+            }
+            if _slosh_addressable():
+                move["beside"] = int(origin.get("id", 0))
+                move["focus"] = not detached
             try:
-                _slosh(
-                    "move-pane",
-                    id=int(pane),
-                    tab=int(origin.get("tab_id", 0)),
-                    dir="rows" if vertical else "cols",
-                )
+                _slosh("move-pane", **move)
             except (OSError, RuntimeError):
                 pass  # no room to split: leave it in the tab of its own
-            if detached:  # slosh focuses what it creates/moves; hop back
-                _slosh("focus", id=int(origin.get("id", 0)))
+            if detached:
+                # Put focus back if this slosh moved it anyway, and check
+                # `panes` rather than assuming: focusing a pane also selects its
+                # tab, so a needless call here is itself a view change.
+                now = next((r for r in _slosh_panes() if r.get("focused")), None)
+                if now and str(now.get("id")) == pane:
+                    _slosh("focus", id=int(origin.get("id", 0)))
+        else:
+            # We could not establish which pane we are in, so there is no "here"
+            # to put it next to. It stays in the tab the layout made -- visible,
+            # findable by purpose, and nobody else's tab. Said out loud, because
+            # the fix is a one-liner in the caller's environment.
+            print(
+                f"note: cannot tell which slosh pane this is, so {tag} stays in "
+                "its own tab (set $IDATUI_SLOSH_PANE, or use a slosh that "
+                "exports $SLOSH_PANE / reports panes[].pid)",
+                file=sys.stderr,
+            )
         return pane
 
     if mux == "zellij":
@@ -348,12 +480,18 @@ def _pane_split(
 
 
 def _slosh_capture(pane: str) -> str:
-    """One slosh pane's visible screen, cut out of the session snapshot.
+    """One slosh pane's visible screen.
 
-    ``snapshot`` is the whole composited session (every visible pane, borders and
-    all), and only the active tab is composited at all — so a pane parked in
-    another tab is brought up and put back.
+    ``capture`` asks the pane's own terminal, so it works for a pane in any tab
+    and changes nothing. Where it is missing (an older slosh) fall back to the
+    old route: cut the pane's rect out of the session ``snapshot``, which
+    composites only the active tab and therefore has to bring the pane's tab up
+    and put it back -- visible to anybody watching, and a race against any other
+    tool doing the same. That is the fallback precisely because it is rude.
     """
+    if _slosh_addressable():
+        return _slosh("capture", id=int(pane)).get("text", "").rstrip()
+
     row = _slosh_row(pane)
     if row is None:
         raise RuntimeError(f"no such slosh pane: {pane}")
@@ -457,11 +595,17 @@ def _pane_keys(pane: str, keys: list[str], mux: str | None = None) -> None:
     mux = mux or _mux_of_pane(pane)
     if mux == "slosh":
         data = "".join(_to_slosh_bytes(k) for k in keys)
+        # `raw` takes the pane to write into, so no focus moves: focusing a pane
+        # also selects its tab, which moves the view of whoever is watching and
+        # loses a race with any other tool doing the same dance. `raw` rather
+        # than `send` either way: `send` is decoded as session input, where C-a
+        # is slosh's leader and would be swallowed instead of reaching the TUI.
+        if _slosh_addressable():
+            _slosh("raw", id=int(pane), data=data)
+            return
+        # An older slosh ignores `id` and writes to the focused pane, so the
+        # only safe route is the old one: focus, write, put focus back.
         prev = next((r for r in _slosh_panes() if r.get("focused")), None)
-        # Both `raw` and `send` land in the *focused* pane, so focus first and
-        # put focus back after. `raw` rather than `send`: `send` is decoded as
-        # session input, where C-a is slosh's leader and would be swallowed
-        # instead of reaching the TUI.
         _slosh("focus", id=int(pane))
         try:
             _slosh("raw", data=data)
@@ -875,7 +1019,26 @@ def main(argv: list[str]) -> int:
         help="new pane size (tmux -l value, e.g. 60%% or 120; "
         "ignored under slosh/zellij)",
     )
-    sp.add_argument("--detached", action="store_true", help="don't focus the new pane")
+    # Detached is the default, and `--focus` is the opt-in.
+    #
+    # The other way round, every spawn ended by pulling the session's focus (and
+    # so the viewed tab) to a pane nobody asked to look at -- fine when a human
+    # typed the command and is waiting for it, wrong for an agent opening a
+    # binary while somebody else works two tabs away. A caller that does want to
+    # land on it says so.
+    sp.add_argument(
+        "--focus",
+        dest="detached",
+        action="store_false",
+        default=True,
+        help="focus the new pane (default: leave focus and the viewed tab alone)",
+    )
+    sp.add_argument(
+        "--detached",
+        dest="detached",
+        action="store_true",
+        help="don't focus the new pane (the default; kept for callers that say so)",
+    )
     sp.add_argument(
         "--mux",
         choices=MUXES,
